@@ -12,6 +12,7 @@ mod hotcorners;
 mod launchpad;
 mod menubar;
 mod menulogo;
+mod mediakeys;
 mod widgets;
 mod netmenu;
 mod mission;
@@ -228,6 +229,9 @@ fn main() {
     }
     services::init();
     let _hud = if args.no_hud { None } else { hud::Hud::create(&host, args.glass).ok() };
+    if _hud.is_some() {
+        mediakeys::install();
+    }
 
     let _demo = if args.demo_surface { demo_surface(&host).ok() } else { None };
 
@@ -247,6 +251,7 @@ fn main() {
             DispatchMessageW(&msg);
         }
     }
+    mediakeys::shutdown();
     switcher::shutdown();
     stage::shutdown();
     nacre_platform::clipboard::shutdown();
