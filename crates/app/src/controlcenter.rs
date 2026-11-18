@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use windows::core::w;
 use windows::UI::Color;
-use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual, SpriteVisual};
+use windows::UI::Composition::{CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionStretch, Compositor, ContainerVisual, SpriteVisual};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -79,6 +79,7 @@ struct Mod {
     rect: Rect,
     track: Option<Rect>,
     fill: Option<SpriteVisual>,
+    fill_geo: Option<CompositionRoundedRectangleGeometry>,
     thumb: Vec<SpriteVisual>,
     btns: Vec<(Rect, u8)>,
     badge: Rect,
@@ -486,6 +487,24 @@ impl Cc {
         go().ok()
     }
 
+    fn rrect_geo(&self, parent: &ContainerVisual, r: Rect, radius: f32, c: Color) -> Option<(SpriteVisual, CompositionRoundedRectangleGeometry)> {
+        let go = || -> windows_core::Result<(SpriteVisual, CompositionRoundedRectangleGeometry)> {
+            let v = self.comp.CreateSpriteVisual()?;
+            v.SetSize(Vector2 { X: r.2, Y: r.3 })?;
+            v.SetOffset(Vector3 { X: r.0, Y: r.1, Z: 0.0 })?;
+            v.SetBrush(&self.comp.CreateColorBrushWithColor(c)?)?;
+            let g = self.comp.CreateRoundedRectangleGeometry()?;
+            g.SetSize(Vector2 { X: r.2, Y: r.3 })?;
+            g.SetCornerRadius(Vector2 { X: radius, Y: radius })?;
+            let clip = self.comp.CreateGeometricClip()?;
+            clip.SetGeometry(&g)?;
+            v.SetClip(&clip)?;
+            parent.Children()?.InsertAtTop(&v)?;
+            Ok((v, g))
+        };
+        go().ok()
+    }
+
     fn glass(&self, parent: &ContainerVisual, r: Rect, radius: f32) -> Option<GlassPanel> {
         let look = prefs::look(prefs::Role::Dark);
         let base = GlassParams::dark((r.2, r.3), radius);
@@ -691,7 +710,7 @@ impl Cc {
         let (gt, grc) = (17.0 * dpi, rad + 2.5 * dpi);
         let (gcx, gcy) = (r.0 + r.2 - rad, r.1 + r.3 - rad);
         let grip_box: Rect = (gcx - gt, gcy - gt, grc + 2.0 * gt, grc + 2.0 * gt);
-        let mut m = Mod { placed: *p, rect: r, track: None, fill: None, thumb: vec![], btns: vec![], badge: (r.0 - 6.0 * dpi, r.1 - 6.0 * dpi, 24.0 * dpi, 24.0 * dpi), grip: grip_box, vertical: false, cont: None };
+        let mut m = Mod { placed: *p, rect: r, track: None, fill: None, fill_geo: None, thumb: vec![], btns: vec![], badge: (r.0 - 6.0 * dpi, r.1 - 6.0 * dpi, 24.0 * dpi, 24.0 * dpi), grip: grip_box, vertical: false, cont: None };
         let small = p.w == 1 && p.h == 1;
         match k {
             Kind::Display | Kind::Sound if small => {
@@ -708,7 +727,11 @@ impl Cc {
                 let frac = if k == Kind::Display { brightness::latest().map(|v| v as f32 / 100.0).unwrap_or(0.5) } else { audio::latest().level };
                 let (kw, kh) = (KNOB.1 * dpi, KNOB.0 * dpi);
                 let ky = (top + th * (1.0 - frac)).clamp(top + kh / 2.0, top + th - kh / 2.0);
-                let fill = self.rrect(c, (tx, ky, tw, (top + th - ky).max(tw)), tw / 2.0, Color { A: 240, R: 255, G: 255, B: 255 });
+                let fill_top = (ky - kh / 2.0).max(top);
+                let fill_h = (top + th - fill_top).clamp(tw, th);
+                let (fill, fill_geo) = self
+                    .rrect_geo(c, (tx, fill_top, tw, fill_h), tw / 2.0, Color { A: 240, R: 255, G: 255, B: 255 })
+                    .unzip();
                 let sym = if k == Kind::Display { Sym::Sun } else { Sym::SpeakerWave };
                 self.symbol(c, sym, px(17.0), WHITE, r.0 + r.2 / 2.0, r.1 + r.3 - 21.0 * dpi, 0.85);
                 let mut thumb = Vec::new();
@@ -723,6 +746,7 @@ impl Cc {
                 m.thumb = thumb;
                 m.track = Some((tx - 14.0 * dpi, top, tw + 28.0 * dpi, th));
                 m.fill = fill;
+                m.fill_geo = fill_geo;
                 m.vertical = true;
             }
             Kind::Display | Kind::Sound => {
@@ -741,7 +765,10 @@ impl Cc {
                 let frac = if k == Kind::Display { brightness::latest().map(|v| v as f32 / 100.0).unwrap_or(0.5) } else { audio::latest().level };
                 let (kw, kh) = (KNOB.0 * dpi, KNOB.1 * dpi);
                 let kx = (tx + tw * frac).clamp(tx + kw / 2.0, tx + tw - kw / 2.0);
-                let fill = self.rrect(c, (tx, ty, (kx - tx).max(th), th), th / 2.0, Color { A: 240, R: 255, G: 255, B: 255 });
+                let fill_w = (kx - tx + kw / 2.0).clamp(th, tw);
+                let (fill, fill_geo) = self
+                    .rrect_geo(c, (tx, ty, fill_w, th), th / 2.0, Color { A: 240, R: 255, G: 255, B: 255 })
+                    .unzip();
                 let (lo, hi, lo_px, hi_px) = if k == Kind::Display { (Sym::SunSmall, Sym::Sun, 15, 19) } else { (Sym::Speaker, Sym::SpeakerWave, 19, 25) };
                 self.symbol(c, lo, px(lo_px as f32), WHITE, r.0 + 23.0 * dpi, cy, 0.85);
                 let hi_x = if out > 0.0 { r.0 + r.2 - 86.0 * dpi } else { r.0 + r.2 - 21.0 * dpi };
@@ -764,6 +791,7 @@ impl Cc {
                 m.thumb = thumb;
                 m.track = Some((tx, ty - 10.0 * dpi, tw, th + 20.0 * dpi));
                 m.fill = fill;
+                m.fill_geo = fill_geo;
             }
             Kind::NowPlaying => {
                 let (title, artist, has, playing) = self.track.clone().unwrap_or_default();
@@ -1038,9 +1066,9 @@ impl Cc {
         let frac = if m.vertical { (1.0 - (y - t.1) / t.3).clamp(0.0, 1.0) } else { ((x - t.0) / t.2).clamp(0.0, 1.0) };
         if let Some(f) = &m.fill {
             if m.vertical {
-                place_slider_v(f, &m.thumb, t, frac, p.dpi);
+                place_slider_v(f, m.fill_geo.as_ref(), &m.thumb, t, frac, p.dpi);
             } else {
-                place_slider(f, &m.thumb, t, frac, p.dpi);
+                place_slider(f, m.fill_geo.as_ref(), &m.thumb, t, frac, p.dpi);
             }
         }
         let kind = m.placed.kind;
@@ -1513,34 +1541,43 @@ impl Cc {
             if let (Some(t), Some(f)) = (m.track, &m.fill) {
                 let frac = if m.placed.kind == Kind::Display { brightness::latest().map(|v| v as f32 / 100.0).unwrap_or(0.5) } else { audio::latest().level };
                 if m.vertical {
-                    place_slider_v(f, &m.thumb, t, frac, p.dpi);
+                    place_slider_v(f, m.fill_geo.as_ref(), &m.thumb, t, frac, p.dpi);
                 } else {
-                    place_slider(f, &m.thumb, t, frac, p.dpi);
+                    place_slider(f, m.fill_geo.as_ref(), &m.thumb, t, frac, p.dpi);
                 }
             }
         }
     }
 }
 
-fn place_slider(fill: &SpriteVisual, thumb: &[SpriteVisual], t: Rect, frac: f32, dpi: f32) {
+fn place_slider(fill: &SpriteVisual, geo: Option<&CompositionRoundedRectangleGeometry>, thumb: &[SpriteVisual], t: Rect, frac: f32, dpi: f32) {
     let th = t.3 - 20.0 * dpi;
     let (kw, kh) = (KNOB.0 * dpi, KNOB.1 * dpi);
     let kx = (t.0 + t.2 * frac).clamp(t.0 + kw / 2.0, t.0 + t.2 - kw / 2.0);
     let cy = t.1 + t.3 / 2.0;
-    let _ = fill.SetSize(Vector2 { X: (kx - t.0).max(th), Y: th });
+    let w = (kx - t.0 + kw / 2.0).clamp(th, t.2);
+    let _ = fill.SetSize(Vector2 { X: w, Y: th });
+    if let Some(g) = geo {
+        let _ = g.SetSize(Vector2 { X: w, Y: th });
+    }
     for (j, s) in thumb.iter().enumerate() {
         let inset = [-1.0, 0.0, 1.5].get(j).copied().unwrap_or(0.0) * dpi;
         let _ = s.SetOffset(Vector3 { X: kx - kw / 2.0 + inset, Y: cy - kh / 2.0 + inset, Z: 0.0 });
     }
 }
 
-fn place_slider_v(fill: &SpriteVisual, thumb: &[SpriteVisual], t: Rect, frac: f32, dpi: f32) {
+fn place_slider_v(fill: &SpriteVisual, geo: Option<&CompositionRoundedRectangleGeometry>, thumb: &[SpriteVisual], t: Rect, frac: f32, dpi: f32) {
     let tw = t.2 - 28.0 * dpi;
     let (kw, kh) = (KNOB.1 * dpi, KNOB.0 * dpi);
     let ky = (t.1 + t.3 * (1.0 - frac)).clamp(t.1 + kh / 2.0, t.1 + t.3 - kh / 2.0);
     let cx = t.0 + t.2 / 2.0;
-    let _ = fill.SetOffset(Vector3 { X: cx - tw / 2.0, Y: ky, Z: 0.0 });
-    let _ = fill.SetSize(Vector2 { X: tw, Y: (t.1 + t.3 - ky).max(tw) });
+    let top = (ky - kh / 2.0).max(t.1);
+    let h = (t.1 + t.3 - top).clamp(tw, t.3);
+    let _ = fill.SetOffset(Vector3 { X: cx - tw / 2.0, Y: top, Z: 0.0 });
+    let _ = fill.SetSize(Vector2 { X: tw, Y: h });
+    if let Some(g) = geo {
+        let _ = g.SetSize(Vector2 { X: tw, Y: h });
+    }
     for (j, s) in thumb.iter().enumerate() {
         let inset = [-1.0, 0.0, 1.5].get(j).copied().unwrap_or(0.0) * dpi;
         let _ = s.SetOffset(Vector3 { X: cx - kw / 2.0 + inset, Y: ky - kh / 2.0 + inset, Z: 0.0 });
