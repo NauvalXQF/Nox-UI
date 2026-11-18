@@ -1,5 +1,5 @@
 use nacre_platform::wins::tracker;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, Ordering};
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_core::BOOL;
@@ -8,9 +8,18 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_RAISE: u32 = WM_APP + 150;
 const T_RAISE: usize = 1;
-const T_RAISE2: usize = 2;
 
 static CTL: AtomicIsize = AtomicIsize::new(0);
+
+static RAISE_QUEUED: AtomicBool = AtomicBool::new(false);
+static LAST_RAISE: AtomicI64 = AtomicI64::new(0);
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 fn noop() {}
 
@@ -106,13 +115,21 @@ pub fn raise_all() {
 unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_RAISE => {
-            SetTimer(Some(hwnd), T_RAISE, 50, None);
-            SetTimer(Some(hwnd), T_RAISE2, 600, None);
-            LRESULT(0)
+            if RAISE_QUEUED.swap(true, Ordering::Relaxed) {
+                LRESULT(0)
+            } else {
+                SetTimer(Some(hwnd), T_RAISE, 80, None);
+                LRESULT(0)
+            }
         }
         WM_TIMER => {
             let _ = KillTimer(Some(hwnd), wp.0);
-            raise_all();
+            RAISE_QUEUED.store(false, Ordering::Relaxed);
+            let now = now_ms();
+            if now - LAST_RAISE.load(Ordering::Relaxed) >= 250 {
+                LAST_RAISE.store(now, Ordering::Relaxed);
+                raise_all();
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

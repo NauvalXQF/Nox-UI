@@ -1694,11 +1694,15 @@ impl Dock {
         match id {
             TIMER_WINDOWS => self.refresh_windows(),
             TIMER_POLL => {
+                let prev = self.overlap;
                 self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.screen);
                 if self.overlap.fullscreen && crate::prefs::get().above_fullscreen {
                     self.overlap = overlap::Overlap { overlapped: false, fullscreen: false };
                 }
-                self.update_visibility();
+                if self.overlap != prev {
+                    self.update_visibility();
+                }
+                self.sync_strip();
                 timer(self.hwnd, TIMER_POLL, 1200);
             }
             TIMER_APPBAR => {
