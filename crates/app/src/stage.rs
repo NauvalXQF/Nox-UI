@@ -88,6 +88,12 @@ struct St {
     refused: Vec<String>,
     busy_until: std::time::Instant,
     cfg: (bool, u8, u8, u8, u8),
+    wins: Vec<nacre_core::dock::items::Win>,
+    wins_dirty: bool,
+    last_fg: isize,
+    last_desk: bool,
+    strip_sig: String,
+    parked_sig: String,
 }
 
 static PAUSED: std::sync::Mutex<Vec<(String, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
@@ -122,6 +128,9 @@ fn with<R>(f: impl FnOnce(&mut St) -> R) -> Option<R> {
 fn hook(ev: u32, hwnd: isize) {
     let target = ST.with(|c| c.try_borrow().ok().and_then(|b| b.as_ref().map(|s| (s.ctl, s.active))));
     let Some((ctl, true)) = target else { return };
+    if matches!(ev, tracker::EV_UNCLOAKED | tracker::EV_SHOW | tracker::EV_DESTROY | tracker::EV_MINIMIZE_START | tracker::EV_MINIMIZE_END) {
+        let _ = with(|s| s.wins_dirty = true);
+    }
     unsafe {
         if ev == tracker::EV_FOREGROUND {
             let _ = PostMessageW(Some(ctl), WM_FG, WPARAM(0), LPARAM(0));
@@ -164,10 +173,16 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
                 refused: Vec::new(),
                 busy_until: std::time::Instant::now(),
                 cfg: (false, 0, 0, 0, 0),
+                wins: Vec::new(),
+                wins_dirty: true,
+                last_fg: 0,
+                last_desk: false,
+                strip_sig: String::new(),
+                parked_sig: String::new(),
             })
         });
         prefs::listen(hwnd);
-        tracker::install(noop);
+        tracker::install(mark_dirty);
         tracker::install_fx(hook);
     }
     sync();
@@ -175,7 +190,9 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
     Ok(())
 }
 
-fn noop() {}
+fn mark_dirty() {
+    let _ = with(|s| s.wins_dirty = true);
+}
 
 fn running_apps(wins: &[nacre_core::dock::items::Win], refused: &[String]) -> Vec<String> {
     let mut running: Vec<String> = Vec::new();
@@ -257,6 +274,7 @@ fn sync() {
                 s.cfg = cfg;
                 s.model.max = p.stage_count as usize;
                 s.edge = None;
+                s.strip_sig.clear();
                 s.destroy_strip();
                 s.rebuild();
                 s.check_overlap();
@@ -308,7 +326,7 @@ impl St {
         self.apply_icons();
         unsafe {
             SetTimer(Some(self.ctl), T_SHOT, 3000, None);
-            SetTimer(Some(self.ctl), T_LIVE, 33, None);
+            SetTimer(Some(self.ctl), T_LIVE, 50, None);
         }
     }
 
@@ -337,6 +355,12 @@ impl St {
         self.destroy_strip();
         self.shots.clear();
         self.model = Stage::default();
+        self.wins.clear();
+        self.wins_dirty = true;
+        self.last_fg = 0;
+        self.last_desk = false;
+        self.strip_sig.clear();
+        self.parked_sig.clear();
         log::line("stage", "nonaktif");
     }
 
@@ -355,12 +379,30 @@ impl St {
         }
     }
 
-    fn save(&self) {
+    fn save(&mut self) {
+        let mut parts: Vec<String> = self.parked.iter().map(|(p, a)| format!("{}:{}", p.hwnd, a)).collect();
+        parts.sort();
+        let sig = parts.join(";");
+        if sig == self.parked_sig {
+            return;
+        }
+        self.parked_sig = sig;
         let list: Vec<Parked> = self.parked.iter().map(|(p, _)| *p).collect();
         park::save(&parked_file(), &list);
     }
 
+    fn ensure_wins(&mut self) {
+        if !self.wins_dirty && !self.wins.is_empty() {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        self.wins = enumerate::list(std::process::id());
+        self.wins_dirty = false;
+        log::line("stage", &format!("enum {}j {}us", self.wins.len(), t0.elapsed().as_micros()));
+    }
+
     fn refresh(&mut self) {
+        let t_all = std::time::Instant::now();
         let now = std::time::Instant::now();
         if self.fly.is_some() || now < self.busy_until {
             let wait = self.busy_until.saturating_duration_since(now).as_millis() as u32 + 60;
@@ -371,6 +413,10 @@ impl St {
         }
         let fg = focus::foreground();
         if fg == 0 || is_own(fg) {
+            return;
+        }
+        let desk = is_desktop(fg);
+        if fg == self.last_fg && desk == self.last_desk && !self.wins_dirty {
             return;
         }
         if self.want_fg != 0 {
@@ -384,30 +430,50 @@ impl St {
                 return;
             }
         }
-        let wins = enumerate::list(std::process::id());
-        let running = running_apps(&wins, &self.refused);
+        self.last_fg = fg;
+        self.last_desk = desk;
+        self.ensure_wins();
+        let running = running_apps(&self.wins, &self.refused);
         self.model.prune(&running);
-        let ch = if is_desktop(fg) {
+        let ch = if desk {
             if !prefs::get().stage_desktop_click {
                 return;
             }
             self.model.desktop()
         } else {
-            let Some(w) = wins.iter().find(|w| w.hwnd == fg) else { return };
+            let Some(w) = self.wins.iter().find(|w| w.hwnd == fg).cloned() else {
+                self.wins_dirty = true;
+                self.ensure_wins();
+                let Some(w) = self.wins.iter().find(|w| w.hwnd == fg).cloned() else { return };
+                let app = key_of(&w.path);
+                if app.is_empty() || excluded(&app) || self.refused.contains(&app) {
+                    return;
+                }
+                let running = running_apps(&self.wins, &self.refused);
+                self.model.prune(&running);
+                let ch = self.model.focus(&app, &running);
+                let wins = self.wins.clone();
+                self.apply(ch, &wins, 0);
+                log::line("stage", &format!("refresh {}us", t_all.elapsed().as_micros()));
+                return;
+            };
             let app = key_of(&w.path);
             if app.is_empty() || excluded(&app) || self.refused.contains(&app) {
                 return;
             }
             self.model.focus(&app, &running)
         };
+        let wins = self.wins.clone();
         self.apply(ch, &wins, 0);
+        log::line("stage", &format!("refresh {}us", t_all.elapsed().as_micros()));
     }
 
     fn focus_app(&mut self, app: &str, _from: isize) {
-        let wins = enumerate::list(std::process::id());
-        let running = running_apps(&wins, &self.refused);
-        let target = self.parked.iter().find(|(_, a)| a == app).map(|(p, _)| p.hwnd).or_else(|| wins.iter().find(|w| key_of(&w.path) == app).map(|w| w.hwnd)).unwrap_or(0);
+        self.ensure_wins();
+        let running = running_apps(&self.wins, &self.refused);
+        let target = self.parked.iter().find(|(_, a)| a == app).map(|(p, _)| p.hwnd).or_else(|| self.wins.iter().find(|w| key_of(&w.path) == app).map(|w| w.hwnd)).unwrap_or(0);
         let ch = self.model.focus(app, &running);
+        let wins = self.wins.clone();
         self.apply(ch, &wins, target);
     }
 
@@ -433,6 +499,11 @@ impl St {
 
     fn apply(&mut self, ch: Change, wins: &[nacre_core::dock::items::Win], activate: isize) {
         self.finish_fly();
+        if ch.park.is_empty() && ch.show.is_empty() && activate == 0 {
+            self.apply_icons();
+            self.check_overlap();
+            return;
+        }
         if activate != 0 {
             self.want_fg = activate;
         }
@@ -721,9 +792,16 @@ impl St {
     fn rebuild(&mut self) {
         let groups = self.model.strip.clone();
         if groups.is_empty() {
+            self.strip_sig.clear();
             self.destroy_strip();
             return;
         }
+        let cfg = prefs::get();
+        let strip_sig = format!("{:?}|{}|{}|{}|{}|{}|{}", groups, cfg.stage_right, cfg.stage_size, cfg.stage_gap, cfg.stage_count, cfg.stage_titles, self.hold.join(","));
+        if strip_sig == self.strip_sig && self.strip.is_some() {
+            return;
+        }
+        self.strip_sig = strip_sig;
         if !self.ensure_strip() {
             return;
         }
@@ -957,16 +1035,20 @@ impl St {
             }
         }
         if first {
+            self.strip_sig.clear();
             self.rebuild();
         }
     }
 
     fn check_overlap(&mut self) {
+        let Some(strip) = self.strip.as_ref() else { return };
+        if !strip.shown && !self.peek {
+            return;
+        }
         let fg = focus::foreground();
         if fg == 0 || is_own(fg) || is_desktop(fg) {
             return;
         }
-        let Some(strip) = self.strip.as_ref() else { return };
         let mut r = RECT::default();
         unsafe {
             if GetWindowRect(HWND(fg as *mut _), &mut r).is_err() {
@@ -1037,6 +1119,7 @@ impl St {
             self.shots.insert(app, shot.bmp);
         }
         if need_rebuild {
+            self.strip_sig.clear();
             self.rebuild();
         }
     }
@@ -1111,11 +1194,11 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             LRESULT(0)
         }
         WM_FG => {
-            SetTimer(Some(hwnd), T_FG, 140, None);
+            SetTimer(Some(hwnd), T_FG, 60, None);
             LRESULT(0)
         }
         WM_LOC => {
-            SetTimer(Some(hwnd), T_OVERLAP, 160, None);
+            SetTimer(Some(hwnd), T_OVERLAP, 300, None);
             LRESULT(0)
         }
         WM_EDGE_IN => {
