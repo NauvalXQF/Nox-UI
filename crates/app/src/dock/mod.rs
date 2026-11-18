@@ -62,6 +62,7 @@ const TIMER_REGION: usize = 109;
 const TIMER_RECONF: usize = 110;
 const TIMER_TRASH: usize = 111;
 const TIMER_REVEAL: usize = 112;
+const TIMER_POLL: usize = 113;
 const TRASH_POLL_MS: u32 = 4000;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_DPICHANGED: u32 = 0x02E0;
@@ -432,6 +433,7 @@ impl Dock {
             });
             timer(hwnd, TIMER_START, 1600);
             timer(hwnd, TIMER_TRASH, TRASH_POLL_MS);
+            timer(hwnd, TIMER_POLL, 1200);
             log::line("dock", &format!("dibuat tier={tier:?} mode={mode:?}"));
             Ok(hwnd)
         }
@@ -650,7 +652,7 @@ impl Dock {
             self.signature = sig;
             self.rebuild();
         }
-        self.overlap = overlap::evaluate(tracker::external_foreground(), std::process::id(), self.card_screen_rect(), self.screen);
+        self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.screen);
         if self.overlap.fullscreen && crate::prefs::get().above_fullscreen {
             self.overlap = overlap::Overlap { overlapped: false, fullscreen: false };
         }
@@ -1691,6 +1693,14 @@ impl Dock {
         kill(self.hwnd, id);
         match id {
             TIMER_WINDOWS => self.refresh_windows(),
+            TIMER_POLL => {
+                self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.screen);
+                if self.overlap.fullscreen && crate::prefs::get().above_fullscreen {
+                    self.overlap = overlap::Overlap { overlapped: false, fullscreen: false };
+                }
+                self.update_visibility();
+                timer(self.hwnd, TIMER_POLL, 1200);
+            }
             TIMER_APPBAR => {
                 if self.opts.appbar {
                     self.reserve_strip();

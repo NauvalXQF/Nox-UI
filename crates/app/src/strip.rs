@@ -1,6 +1,6 @@
 use std::sync::Once;
 use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
@@ -22,6 +22,14 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
     match m {
         WM_MOUSEMOVE if !st.is_null() => {
             let s = &mut *st;
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_err() {
+                return LRESULT(0);
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_err() || pt.x < r.left || pt.x >= r.right {
+                return LRESULT(0);
+            }
             if !s.inside {
                 s.inside = true;
                 let mut t = TRACKMOUSEEVENT {
