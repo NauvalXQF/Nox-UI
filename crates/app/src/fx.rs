@@ -5,7 +5,7 @@ use nacre_platform::{log, sys};
 use nacre_ui::gfx::Gfx;
 use nacre_ui::host::{attach, Host, Surface};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 use windows::core::w;
@@ -78,6 +78,7 @@ struct Fx {
     surface: Surface,
     screen: (i32, i32),
     snap: Option<Snap>,
+    snaps: HashMap<isize, (Snap, std::time::Instant)>,
     parked: Vec<Snap>,
     current: isize,
     sprite: Option<SpriteVisual>,
@@ -161,6 +162,7 @@ pub fn init(host: &Host) -> windows_core::Result<()> {
                 surface,
                 screen,
                 snap: None,
+                snaps: HashMap::new(),
                 parked: Vec::new(),
                 current: 0,
                 sprite: None,
@@ -600,15 +602,29 @@ impl Fx {
         }
     }
 
-    fn capture_current(&mut self) {
+    fn capture_current(&mut self, refresh: bool) {
         let h = self.current;
         if h == 0 || !enabled() || !eligible(h) || focus::is_minimized(h) || park::is_parked(h) {
             return;
         }
-        let Some(shot) = snapshot::capture(h, 1) else { return };
+        let frame = snapshot::frame_rect(h);
+        if let Some((s, at)) = self.snaps.get(&h) {
+            if frame == Some(s.rect) && (!refresh || at.elapsed() < std::time::Duration::from_secs(30)) {
+                self.snap = Some(s.clone());
+                return;
+            }
+        }
+        let Some(shot) = snapshot::capture(h, 2) else { return };
         if let Ok(surface) = self.gfx.surface_from_bgra(shot.bmp.w, shot.bmp.h, &shot.bmp.bgra) {
             log::line("fx", &format!("tangkap hwnd={h} {}x{} (px {}x{})", shot.rect.2, shot.rect.3, shot.bmp.w, shot.bmp.h));
-            self.snap = Some(Snap { hwnd: h, rect: shot.rect, surface });
+            let s = Snap { hwnd: h, rect: shot.rect, surface };
+            self.snaps.insert(h, (s.clone(), std::time::Instant::now()));
+            if self.snaps.len() > 4 {
+                if let Some(old) = self.snaps.iter().max_by_key(|(_, (_, at))| at.elapsed()).map(|(k, _)| *k) {
+                    self.snaps.remove(&old);
+                }
+            }
+            self.snap = Some(s);
         }
     }
 
@@ -654,6 +670,7 @@ impl Fx {
             }
             tracker::EV_DESTROY => {
                 self.parked.retain(|p| p.hwnd != h);
+                self.snaps.remove(&h);
                 self.opened.remove(&h);
                 if self.opening.as_ref().is_some_and(|o| o.hwnd == h) {
                     self.opening = None;
@@ -885,7 +902,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 T_SHADOW_WATCH => fx.watch_shadow(),
                 T_OPEN_POLL => fx.poll_open(),
                 T_OPEN_END => fx.end_open(),
-                T_CAPTURE | T_REFRESH => fx.capture_current(),
+                T_CAPTURE => fx.capture_current(false),
+                T_REFRESH => fx.capture_current(true),
                 T_HIDE => {
                     fx.hide_overlay();
                     fx.pending_restore = None;

@@ -92,6 +92,16 @@ pub fn load(path: &str, px: i32) -> Option<Bitmap> {
             return Some(b);
         }
     }
+    if path.to_ascii_lowercase().contains("\\windowsapps\\") {
+        if let Some(family) = nacre_core::dock::items::package_family(path) {
+            let prefix = format!("shell:appsfolder\\{}!", family.to_ascii_lowercase());
+            if let Some(app) = crate::apps::find_prefix(&prefix) {
+                if let Some(b) = load_shell(&app.path, px) {
+                    return Some(b);
+                }
+            }
+        }
+    }
     load_shell(path, px)
 }
 

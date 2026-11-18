@@ -169,6 +169,7 @@ impl Ctl {
     }
 
     fn open(&mut self, backwards: bool) {
+        let started = std::time::Instant::now();
         let wins = enumerate::list(std::process::id());
         let mut apps: Vec<(i64, Entry)> = Vec::new();
         for w in &wins {
@@ -206,11 +207,17 @@ impl Ctl {
             let dpi = unsafe { GetDpiForWindow(popup.hwnd) }.max(96) as f32 / 96.0;
             let (sw, sh) = nacre_platform::sys::screen_size();
 
+            let mut live_budget = 2;
             let shots: Vec<Option<Bitmap>> = entries
                 .iter()
                 .map(|e| {
-                    let live = nacre_platform::wins::snapshot::capture(e.hwnd, 2).map(|s| s.bmp).filter(|b| !crate::stage::blank(b));
-                    live.or_else(|| crate::stage::shot_for(&e.path))
+                    crate::stage::shot_for(&e.path).or_else(|| {
+                        if live_budget == 0 {
+                            return None;
+                        }
+                        live_budget -= 1;
+                        nacre_platform::wins::snapshot::capture(e.hwnd, 2).map(|s| s.bmp).filter(|b| !crate::stage::blank(b))
+                    })
                 })
                 .collect();
             let (hdr, thumb_h, gap, pad) = (38.0f32, 258.0f32, 35.0f32, 58.0f32);
@@ -306,6 +313,7 @@ impl Ctl {
             Ok(mut ui) => {
                 ui.sel = if backwards { ui.entries.len() - 1 } else { 1 };
                 OPEN.store(true, Ordering::Relaxed);
+                nacre_platform::log::line("switcher", &format!("buka {} entri {} ms", ui.entries.len(), started.elapsed().as_millis()));
                 self.ui = Some(ui);
                 self.select(self.ui.as_ref().map(|u| u.sel).unwrap_or(1), false);
             }

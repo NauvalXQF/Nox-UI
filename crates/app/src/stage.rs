@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::UI::Color;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -31,6 +32,7 @@ const T_HIDE: usize = 5;
 const T_PEEK: usize = 6;
 const T_FLYEND: usize = 7;
 const T_LIVE: usize = 8;
+const T_FADE: usize = 9;
 
 const TILT: f32 = 22.0;
 const TILT_HOVER: f32 = 8.0;
@@ -306,7 +308,7 @@ impl St {
         self.apply_icons();
         unsafe {
             SetTimer(Some(self.ctl), T_SHOT, 3000, None);
-            SetTimer(Some(self.ctl), T_LIVE, 50, None);
+            SetTimer(Some(self.ctl), T_LIVE, 33, None);
         }
     }
 
@@ -448,6 +450,9 @@ impl St {
             }
         }
         for app in &ch.show {
+            if self.shots.contains_key(app) {
+                continue;
+            }
             if let Some((p, _)) = self.parked.iter().find(|(_, a)| a == app) {
                 if let Some(shot) = snapshot::capture(p.hwnd, 2) {
                     if !blank(&shot.bmp) || !self.shots.contains_key(app) {
@@ -477,14 +482,20 @@ impl St {
                 if focus::is_minimized(w.hwnd) || park::is_parked(w.hwnd) || self.parked.iter().any(|(p, _)| p.hwnd == w.hwnd) {
                     continue;
                 }
-                if let Some(shot) = snapshot::capture(w.hwnd, 2) {
-                    let first_of_app = !outs.iter().any(|(a, _)| a == app);
-                    let good = !blank(&shot.bmp);
-                    if first_of_app && good && outs.len() < 4 {
-                        outs.push((app.clone(), (shot.rect.0 as f32, shot.rect.1 as f32, shot.rect.2 as f32, shot.rect.3 as f32)));
+                let first_of_app = !outs.iter().any(|(a, _)| a == app);
+                if !self.shots.contains_key(app) {
+                    if let Some(shot) = snapshot::capture(w.hwnd, 2) {
+                        let good = !blank(&shot.bmp);
+                        if first_of_app && good && outs.len() < 4 {
+                            outs.push((app.clone(), (shot.rect.0 as f32, shot.rect.1 as f32, shot.rect.2 as f32, shot.rect.3 as f32)));
+                        }
+                        if good || !self.shots.contains_key(app) {
+                            self.shots.insert(app.clone(), shot.bmp);
+                        }
                     }
-                    if (first_of_app && good) || !self.shots.contains_key(app) {
-                        self.shots.insert(app.clone(), shot.bmp);
+                } else if first_of_app && outs.len() < 4 {
+                    if let Some((fx, fy, fw, fh)) = snapshot::frame_rect(w.hwnd) {
+                        outs.push((app.clone(), (fx as f32, fy as f32, fw as f32, fh as f32)));
                     }
                 }
                 if let Some(p) = park::park(w.hwnd) {
@@ -580,6 +591,12 @@ impl St {
             let mut popup = Popup::new(&comp, w!("AbraStageFly"), Some(fly_proc), WS_EX_TRANSPARENT, base)?;
             popup.set_rect(0, 0, sw, sh)?;
             popup.panel.set_rect(0.0, 0.0, 0.0, 0.0)?;
+            let scrim = comp.CreateSpriteVisual()?;
+            scrim.SetSize(Vector2 { X: sw as f32, Y: sh as f32 })?;
+            scrim.SetBrush(&comp.CreateColorBrushWithColor(Color { A: 170, R: 0, G: 0, B: 0 })?)?;
+            scrim.SetOpacity(0.0)?;
+            popup.root().Children()?.InsertAtBottom(&scrim)?;
+            motion::scalar(&comp, &scrim, "Opacity", 0.0, 1.0, 110)?;
             popup.content.SetTransformMatrix(perspective(sw as f32 / 2.0, sh as f32 / 2.0, 1400.0))?;
             for (bmp, from, to) in &items {
                 let surf = gfx.surface_from_bgra(bmp.w, bmp.h, &bmp.bgra)?;
@@ -645,18 +662,29 @@ impl St {
                     let _ = DestroyWindow(h);
                 }
             }
-            let _ = motion::scalar(&self.comp, f.popup.root(), "Opacity", 1.0, 0.0, 140);
-            let _ = f.popup.root().SetOpacity(0.0);
             self.dying = Some(f.popup);
             unsafe {
-                SetTimer(Some(self.ctl), T_FLYEND, 180, None);
+                SetTimer(Some(self.ctl), T_FADE, 80, None);
             }
+        }
+    }
+
+    fn start_fade(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.ctl), T_FADE);
+        }
+        let Some(p) = &self.dying else { return };
+        let _ = motion::scalar(&self.comp, p.root(), "Opacity", 1.0, 0.0, 150);
+        let _ = p.root().SetOpacity(0.0);
+        unsafe {
+            SetTimer(Some(self.ctl), T_FLYEND, 190, None);
         }
     }
 
     fn kill_dying(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.ctl), T_FLYEND);
+            let _ = KillTimer(Some(self.ctl), T_FADE);
         }
         if let Some(old) = self.dying.take() {
             let h = old.hwnd;
@@ -846,11 +874,11 @@ impl St {
                 match prev.get(&g[0]) {
                     _ if held => cont.SetOpacity(0.0)?,
                     Some(py) if (py - sy).abs() > 0.5 => {
-                        motion::vec3(&comp, &cont, "Offset", Vector3 { X: card_x, Y: *py, Z: 0.0 }, Vector3 { X: card_x, Y: sy, Z: 0.0 }, slide_ms)?;
+                        motion::vec3_spring(&comp, &cont, "Offset", Vector3 { X: card_x, Y: *py, Z: 0.0 }, Vector3 { X: card_x, Y: sy, Z: 0.0 }, slide_ms)?;
                     }
                     None if !prev.is_empty() => {
                         motion::scalar(&comp, &cont, "Opacity", 0.0, 1.0, slide_ms)?;
-                        motion::vec3(&comp, &cont, "Scale", Vector3 { X: 0.9, Y: 0.9, Z: 1.0 }, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }, slide_ms)?;
+                        motion::vec3_spring(&comp, &cont, "Scale", Vector3 { X: 0.9, Y: 0.9, Z: 1.0 }, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }, slide_ms)?;
                     }
                     _ => {}
                 }
@@ -964,7 +992,7 @@ impl St {
         let out = if s.right { s.w } else { -s.w };
         let from = if show { out } else { 0.0 };
         let to = if show { 0.0 } else { out };
-        let _ = motion::vec3(&comp, &s.popup.content, "Offset", Vector3 { X: from, Y: 0.0, Z: 0.0 }, Vector3 { X: to, Y: 0.0, Z: 0.0 }, motion::stage_ms(motion::STRIP_SLIDE_MS));
+        let _ = motion::vec3_spring(&comp, &s.popup.content, "Offset", Vector3 { X: from, Y: 0.0, Z: 0.0 }, Vector3 { X: to, Y: 0.0, Z: 0.0 }, motion::stage_ms(motion::STRIP_SLIDE_MS));
         unsafe {
             if show {
                 let _ = KillTimer(Some(self.ctl), T_HIDE);
@@ -1024,11 +1052,11 @@ impl St {
         let tilt = |sl: &Slot, on: bool| {
             let (a, b, sc) = if on { (sign * TILT, sign * TILT_HOVER, 1.06) } else { (sign * TILT_HOVER, sign * TILT, 1.0) };
             for c in &sl.cards {
-                let _ = motion::scalar(&comp, c, "RotationAngleInDegrees", a, b, ms);
+                let _ = motion::scalar_spring(&comp, c, "RotationAngleInDegrees", a, b, ms);
                 let _ = c.SetRotationAngleInDegrees(b);
             }
             let from = if on { 1.0 } else { 1.06 };
-            let _ = motion::vec3(&comp, &sl.cont, "Scale", Vector3 { X: from, Y: from, Z: 1.0 }, Vector3 { X: sc, Y: sc, Z: 1.0 }, ms);
+            let _ = motion::vec3_spring(&comp, &sl.cont, "Scale", Vector3 { X: from, Y: from, Z: 1.0 }, Vector3 { X: sc, Y: sc, Z: 1.0 }, ms);
             let _ = sl.cont.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
             if let Some(l) = &sl.label {
                 let (o0, o1) = if on { (0.0, 1.0) } else { (1.0, 0.0) };
@@ -1113,6 +1141,9 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }
                 T_FLY => {
                     with(|s| s.finish_fly());
+                }
+                T_FADE => {
+                    with(|s| s.start_fade());
                 }
                 T_FLYEND => {
                     with(|s| s.kill_dying());

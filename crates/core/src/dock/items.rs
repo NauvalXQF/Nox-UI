@@ -109,6 +109,7 @@ pub fn merge(pins: &[Pin], wins: &[Win], recent: &dyn Fn(isize) -> i64, seen: &m
                 if i.hwnds.is_empty() && !w.path.is_empty() {
                     i.path = w.path.clone();
                 }
+                i.name = display_name(w);
                 i.hwnds.push(w.hwnd);
             }
             None => extra.push(Item {

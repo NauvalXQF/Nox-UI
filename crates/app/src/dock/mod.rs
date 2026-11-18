@@ -160,7 +160,7 @@ pub struct Dock {
     recents_path: PathBuf,
     stack_files: Vec<String>,
     items: Vec<Item>,
-    signature: Vec<(String, bool, usize, String)>,
+    signature: Vec<(String, bool, usize, String, String)>,
     icon_key: (nacre_core::settings::IconStyle, u8, bool, bool),
     seen: Vec<String>,
 
@@ -644,7 +644,7 @@ impl Dock {
         self.heal_pins(&mut items);
         self.track_recents(&items);
         self.append_recents(&mut items);
-        let sig: Vec<_> = items.iter().map(|i| (i.key.clone(), i.pinned, i.hwnds.len(), i.path.clone())).collect();
+        let sig: Vec<_> = items.iter().map(|i| (i.key.clone(), i.pinned, i.hwnds.len(), i.path.clone(), i.name.clone())).collect();
         self.items = items;
         if sig != self.signature {
             self.signature = sig;
@@ -1011,7 +1011,13 @@ impl Dock {
             Some(Entry::App(i)) => match self.items.get(*i) {
                 Some(it) => {
                     let f = nacre_platform::wins::names::friendly(&it.path);
-                    if f.is_empty() { it.name.clone() } else { f }
+                    if !it.name.is_empty() {
+                        it.name.clone()
+                    } else if f.is_empty() {
+                        it.name.clone()
+                    } else {
+                        f
+                    }
                 }
                 None => return,
             },
@@ -1423,9 +1429,15 @@ impl Dock {
         let mut changed = false;
         for it in items.iter_mut().filter(|i| i.pinned) {
             if it.running() {
-                for p in self.pins.iter_mut().filter(|p| key_of(&p.path) == it.key && p.path != it.path) {
-                    p.path = it.path.clone();
-                    changed = true;
+                for p in self.pins.iter_mut().filter(|p| key_of(&p.path) == it.key) {
+                    if p.path != it.path {
+                        p.path = it.path.clone();
+                        changed = true;
+                    }
+                    if p.name != it.name {
+                        p.name = it.name.clone();
+                        changed = true;
+                    }
                 }
             } else if !std::path::Path::new(&it.path).exists() {
                 if let Some(family) = package_family(&it.path) {
@@ -1449,7 +1461,12 @@ impl Dock {
         }
         let mut changed = false;
         for it in items.iter().filter(|i| i.running() && !i.pinned && !i.path.is_empty() && !i.path.contains('?')).rev() {
-            if !self.recents.iter().any(|r| key_of(&r.path) == it.key) {
+            if let Some(r) = self.recents.iter_mut().find(|r| key_of(&r.path) == it.key) {
+                if r.name != it.name {
+                    r.name = it.name.clone();
+                    changed = true;
+                }
+            } else {
                 self.recents.insert(0, Pin { path: it.path.clone(), name: it.name.clone() });
                 changed = true;
             }

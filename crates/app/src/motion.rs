@@ -24,6 +24,29 @@ pub fn ease(comp: &Compositor) -> Result<CompositionEasingFunction> {
     comp.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?.cast()
 }
 
+pub fn spring_ease(comp: &Compositor) -> Result<CompositionEasingFunction> {
+    use windows::UI::Composition::CompositionEasingFunctionMode;
+    CompositionEasingFunction::CreateElasticEasingFunction(comp, CompositionEasingFunctionMode::Out, 1, 0.35)
+        .and_then(|f| f.cast())
+        .or_else(|_| ease(comp))
+}
+
+pub fn scalar_spring(comp: &Compositor, obj: &impl Interface, prop: &str, from: f32, to: f32, ms: u32) -> Result<()> {
+    let a = comp.CreateScalarKeyFrameAnimation()?;
+    a.InsertKeyFrame(0.0, from)?;
+    a.InsertKeyFrameWithEasingFunction(1.0, to, &spring_ease(comp)?)?;
+    a.SetDuration(dur(ms))?;
+    obj.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from(prop), &a)
+}
+
+pub fn vec3_spring(comp: &Compositor, obj: &impl Interface, prop: &str, from: Vector3, to: Vector3, ms: u32) -> Result<()> {
+    let a = comp.CreateVector3KeyFrameAnimation()?;
+    a.InsertKeyFrame(0.0, from)?;
+    a.InsertKeyFrameWithEasingFunction(1.0, to, &spring_ease(comp)?)?;
+    a.SetDuration(dur(ms))?;
+    obj.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from(prop), &a)
+}
+
 pub fn pop_in(comp: &Compositor, v: &ContainerVisual, center: Vector3, from: f32, over: f32, delay_ms: u32, ms: u32) -> Result<()> {
     v.SetCenterPoint(center)?;
     let e = ease(comp)?;

@@ -19,6 +19,7 @@ parked.txt
 
 # data pribadi / hasil uji: jangan pernah di-commit
 /scratch/
+/.commandcode/
 *.local
 .env
 .env.*

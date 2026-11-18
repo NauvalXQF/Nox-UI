@@ -127,6 +127,7 @@ unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return BOOL(1);
     }
     let mut path = path;
+    let mut pwa = false;
     if file == "applicationframehost.exe" {
         if class != "ApplicationFrameWindow" {
             return BOOL(1);
@@ -135,8 +136,27 @@ unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
             Some(id) => super::identity::shell_path(&id),
             None => format!("{path}?{title}"),
         };
+    } else if matches!(file, "msedge.exe" | "chrome.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe") {
+        if let Some(id) = super::identity::aumid(hwnd.0 as isize) {
+            if id.to_ascii_lowercase().ends_with("!app") {
+                path = super::identity::shell_path(&id);
+                pwa = true;
+            }
+        }
     }
-    let name = super::names::friendly(&path);
+    let mut name = if pwa {
+        crate::apps::name_for_path(&path).unwrap_or_else(|| title.clone())
+    } else {
+        super::names::friendly(&path)
+    };
+    if !pwa && path.to_ascii_lowercase().contains("\\windowsapps\\") {
+        if let Some(family) = nacre_core::dock::items::package_family(&path) {
+            let prefix = format!("shell:appsfolder\\{}!", family.to_ascii_lowercase());
+            if let Some(n) = crate::apps::name_for_prefix(&prefix) {
+                name = n;
+            }
+        }
+    }
     ctx.out.push(Win { hwnd: hwnd.0 as isize, path, title, name });
     BOOL(1)
 }

@@ -1,5 +1,5 @@
 use crate::popup::Popup;
-use crate::prefs;
+use crate::{motion, prefs};
 use nacre_core::mission::{grid, Rect};
 use nacre_platform::icons::Bitmap;
 use nacre_platform::text::{measure, render, Style};
@@ -13,6 +13,7 @@ use windows::core::w;
 use windows::UI::Color;
 use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual, SpriteVisual};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT, VK_ESCAPE, VK_UP};
@@ -21,7 +22,11 @@ use windows_numerics::{Vector2, Vector3};
 
 const HOTKEY_ID: i32 = 0xAB03;
 const T_ANIM: usize = 1;
+const T_CLOSE: usize = 2;
+const T_SWITCH: usize = 3;
 const ANIM_MS: f32 = 240.0;
+const ANIM_STEP_MS: u32 = 8;
+const SWITCH_GAP_MS: u32 = 360;
 
 struct Tile {
     hwnd: isize,
@@ -29,6 +34,7 @@ struct Tile {
     from: Rect,
     to: Rect,
     title: String,
+    last: Option<(i32, i32, i32, i32, u8)>,
 }
 
 struct Mc {
@@ -39,6 +45,8 @@ struct Mc {
     tiles: Vec<Tile>,
     t0: Instant,
     done: bool,
+    fast: bool,
+    closing: bool,
     hover: Option<usize>,
     highlight: SpriteVisual,
     label: Option<SpriteVisual>,
@@ -56,6 +64,7 @@ struct Ctl {
 thread_local! {
     static MC: RefCell<Option<Box<Mc>>> = const { RefCell::new(None) };
     static CTL: RefCell<Option<Ctl>> = const { RefCell::new(None) };
+    static SWITCH: RefCell<(u32, u16)> = const { RefCell::new((0, 0)) };
 }
 
 fn with_mc<R>(f: impl FnOnce(&mut Mc) -> R) -> Option<R> {
@@ -105,25 +114,55 @@ pub fn toggle() {
     let comp = CTL.with(|c| c.borrow().as_ref().map(|c| c.comp.clone()));
     let Some(comp) = comp else { return };
     match create(&comp) {
-        Ok(Some(m)) => {
+        Ok(m) => {
+            unsafe {
+                timeBeginPeriod(1);
+            }
             MC.with(|c| *c.borrow_mut() = Some(m));
             with_mc(|m| {
+                m.fast = true;
                 m.popup.show_active();
+                m.draw_desktops();
                 m.t0 = Instant::now();
                 m.step();
                 unsafe {
-                    SetTimer(Some(m.popup.hwnd), T_ANIM, 16, None);
+                    SetTimer(Some(m.popup.hwnd), T_ANIM, ANIM_STEP_MS, None);
                 }
             });
         }
-        Ok(None) => log::line("mission", "tidak ada jendela untuk ditampilkan"),
         Err(e) => log::line("mission", &format!("gagal: {e}")),
     }
 }
 
 pub fn close() {
+    with_mc(|m| {
+        if m.closing {
+            return;
+        }
+        m.closing = true;
+        if m.fast {
+            m.fast = false;
+            unsafe {
+                timeEndPeriod(1);
+            }
+        }
+        let from = m.popup.root().Opacity().unwrap_or(1.0);
+        let _ = motion::scalar(&m.comp, m.popup.root(), "Opacity", from, 0.0, 130);
+        unsafe {
+            let _ = KillTimer(Some(m.popup.hwnd), T_ANIM);
+            SetTimer(Some(m.popup.hwnd), T_CLOSE, 150, None);
+        }
+    });
+}
+
+fn destroy() {
     let m = MC.with(|c| c.borrow_mut().take());
     if let Some(m) = m {
+        if m.fast {
+            unsafe {
+                timeEndPeriod(1);
+            }
+        }
         for t in &m.tiles {
             thumbnail::unregister(t.handle);
         }
@@ -136,7 +175,7 @@ pub fn close() {
     }
 }
 
-fn create(comp: &Compositor) -> windows_core::Result<Option<Box<Mc>>> {
+fn create(comp: &Compositor) -> windows_core::Result<Box<Mc>> {
     let screen = sys::screen_size();
     let mut look = prefs::look(prefs::Role::Dark);
     look.blur_sigma = look.blur_sigma.max(20.0);
@@ -160,10 +199,7 @@ fn create(comp: &Compositor) -> windows_core::Result<Option<Box<Mc>>> {
         let (fx, fy, fw, fh) = snapshot::frame_rect(w.hwnd).unwrap_or((0, 0, sw, sh));
         sizes.push((sw as f32, sh as f32));
         let title = if w.name.is_empty() { focus::title(w.hwnd) } else { w.name.clone() };
-        tiles.push(Tile { hwnd: w.hwnd, handle, from: Rect { x: fx as f32, y: fy as f32, w: fw as f32, h: fh as f32 }, to: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, title });
-    }
-    if tiles.is_empty() {
-        return Ok(None);
+        tiles.push(Tile { hwnd: w.hwnd, handle, from: Rect { x: fx as f32, y: fy as f32, w: fw as f32, h: fh as f32 }, to: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, title, last: None });
     }
     let area = Rect { x: 60.0 * dpi, y: 150.0 * dpi, w: screen.0 as f32 - 120.0 * dpi, h: screen.1 as f32 - 210.0 * dpi };
     let g = grid(&sizes, area, 30.0 * dpi, 34.0 * dpi);
@@ -174,18 +210,29 @@ fn create(comp: &Compositor) -> windows_core::Result<Option<Box<Mc>>> {
     highlight.SetOpacity(0.0)?;
     popup.content.Children()?.InsertAtTop(&highlight)?;
     let gfx = Gfx::shared(comp)?;
-    Ok(Some(Box::new(Mc { popup, gfx, comp: comp.clone(), dpi, tiles, t0: Instant::now(), done: false, hover: None, highlight, label: None, desks: vec![], plus: None, cur_desk: 0, text_cache: HashMap::new() })))
+    Ok(Box::new(Mc { popup, gfx, comp: comp.clone(), dpi, tiles, t0: Instant::now(), done: false, fast: false, closing: false, hover: None, highlight, label: None, desks: vec![], plus: None, cur_desk: 0, text_cache: HashMap::new() }))
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+fn spring(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (w, z) = (10.0f32, 0.8f32);
+    let wd = w * (1.0 - z * z).sqrt();
+    let damp = (-z * w * t).exp();
+    (1.0 - damp * ((wd * t).cos() + (z * w / wd) * (wd * t).sin())).clamp(0.0, 1.05)
+}
+
 impl Mc {
     fn step(&mut self) {
         let t = (self.t0.elapsed().as_millis() as f32 / ANIM_MS).clamp(0.0, 1.0);
-        let e = 1.0 - (1.0 - t).powi(3);
-        for tile in &self.tiles {
+        let e = spring(t);
+        let fade = (t * ANIM_MS / 90.0).clamp(0.0, 1.0);
+        let _ = self.popup.root().SetOpacity(fade);
+        let op = (fade * 255.0).round() as u8;
+        for tile in &mut self.tiles {
             let (f, to) = (tile.from, tile.to);
             let r = (
                 lerp(f.x, to.x, e).round() as i32,
@@ -193,14 +240,24 @@ impl Mc {
                 (lerp(f.x, to.x, e) + lerp(f.w, to.w, e)).round() as i32,
                 (lerp(f.y, to.y, e) + lerp(f.h, to.h, e)).round() as i32,
             );
-            thumbnail::place(tile.handle, r, 255);
+            let last = (r.0, r.1, r.2, r.3, op);
+            if tile.last != Some(last) {
+                tile.last = Some(last);
+                thumbnail::place(tile.handle, r, op);
+            }
         }
         if t >= 1.0 && !self.done {
             self.done = true;
+            if self.fast {
+                self.fast = false;
+                unsafe {
+                    timeEndPeriod(1);
+                }
+            }
+            let _ = self.popup.root().SetOpacity(1.0);
             unsafe {
                 let _ = KillTimer(Some(self.popup.hwnd), T_ANIM);
             }
-            self.draw_desktops();
         }
     }
 
@@ -327,10 +384,42 @@ impl Mc {
     }
 }
 
+fn step_switch(hwnd: HWND) {
+    let (rem, vk) = SWITCH.with(|s| *s.borrow());
+    if rem == 0 {
+        return;
+    }
+    nacre_platform::keys::chord(&[nacre_platform::keys::WIN, nacre_platform::keys::CTRL, vk]);
+    let next = rem - 1;
+    SWITCH.with(|s| *s.borrow_mut() = (next, vk));
+    unsafe {
+        if next > 0 {
+            SetTimer(Some(hwnd), T_SWITCH, SWITCH_GAP_MS, None);
+        } else {
+            let _ = KillTimer(Some(hwnd), T_SWITCH);
+        }
+    }
+}
+
+fn switch_desks(delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    let Some(hwnd) = CTL.with(|c| c.borrow().as_ref().map(|c| c.hwnd)) else { return };
+    let vk = if delta > 0 { 0x27 } else { 0x25 };
+    log::line("mission", &format!("pindah desktop {delta}"));
+    SWITCH.with(|s| *s.borrow_mut() = (delta.unsigned_abs(), vk));
+    step_switch(hwnd);
+}
+
 unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_HOTKEY => {
             toggle();
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == T_SWITCH => {
+            step_switch(hwnd);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -341,6 +430,10 @@ unsafe extern "system" fn mc_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     match msg {
         WM_TIMER if wp.0 == T_ANIM => {
             with_mc(|m| m.step());
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == T_CLOSE => {
+            destroy();
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
@@ -372,11 +465,7 @@ unsafe extern "system" fn mc_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 close();
                 match act {
                     Err(()) => nacre_platform::keys::chord(&[nacre_platform::keys::WIN, nacre_platform::keys::CTRL, 0x44]),
-                    Ok(delta) => {
-                        for _ in 0..delta.abs() {
-                            nacre_platform::keys::chord(&[nacre_platform::keys::WIN, nacre_platform::keys::CTRL, if delta > 0 { 0x27 } else { 0x25 }]);
-                        }
-                    }
+                    Ok(delta) => switch_desks(delta),
                 }
                 return LRESULT(0);
             }

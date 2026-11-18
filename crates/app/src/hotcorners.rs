@@ -39,6 +39,16 @@ pub fn raise() {
     apply();
 }
 
+pub fn raise_strips() {
+    HC.with(|c| {
+        let g = c.borrow();
+        let Some(hc) = g.as_ref() else { return };
+        for s in hc.strips.iter().flatten() {
+            s.to_top();
+        }
+    });
+}
+
 fn apply() {
     let hot = prefs::get().hot;
     let (sw, sh) = sys::screen_size();

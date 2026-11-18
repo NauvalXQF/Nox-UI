@@ -69,6 +69,36 @@ pub fn snapshot() -> Vec<App> {
     CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
 }
 
+pub fn name_for_path(path: &str) -> Option<String> {
+    let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref()?.iter().find(|a| a.path.eq_ignore_ascii_case(path)).map(|a| a.name.clone())
+}
+
+pub fn ensure_loaded() {
+    if is_loaded() {
+        return;
+    }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let list = load();
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        *g = Some(list);
+    }
+}
+
+pub fn find_prefix(prefix: &str) -> Option<App> {
+    ensure_loaded();
+    let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref()?.iter().find(|a| a.path.to_ascii_lowercase().starts_with(prefix)).cloned()
+}
+
+pub fn name_for_prefix(prefix: &str) -> Option<String> {
+    let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref()?.iter().find(|a| a.path.to_ascii_lowercase().starts_with(prefix)).map(|a| a.name.clone())
+}
+
 pub fn is_loaded() -> bool {
     CACHE.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }

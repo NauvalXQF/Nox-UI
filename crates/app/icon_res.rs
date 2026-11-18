@@ -50,7 +50,9 @@ fn ico_to_res(ico: &[u8], group: u16) -> Vec<u8> {
 fn embed_icon() {
     let ico = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/abra.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
         return;
     }
     let data = std::fs::read(&ico).expect("assets/abra.ico tidak terbaca");

@@ -4,6 +4,7 @@ use crate::{motion, paths, prefs};
 use nacre_core::island::calendar;
 use nacre_core::widgets::{self, Category, Kind, Placed};
 use nacre_platform::text::{measure, render, render_face, Style, ICON_FACE};
+use nacre_platform::wins::{focus, tracker};
 use nacre_platform::{launch, log, sys, time};
 use nacre_ui::gfx::Gfx;
 use nacre_ui::glass::{GlassParams, Tier};
@@ -26,6 +27,7 @@ const T_TICK: usize = 1;
 const T_REMOVE: usize = 2;
 const T_GCLOSE: usize = 3;
 const T_SNAP: usize = 4;
+const T_DESK: usize = 5;
 const SNAP_MS: f32 = 220.0;
 const CMD_EDIT: usize = 1;
 const CMD_REMOVE: usize = 2;
@@ -38,6 +40,11 @@ const GREEN: [u8; 3] = [52, 199, 89];
 const BLUE: [u8; 3] = [10, 132, 255];
 
 static FLOAT: AtomicBool = AtomicBool::new(false);
+static ON_DESKTOP: AtomicBool = AtomicBool::new(false);
+
+pub fn floating() -> bool {
+    FLOAT.load(Ordering::Relaxed)
+}
 
 type Rect = (f32, f32, f32, f32);
 
@@ -99,6 +106,7 @@ struct Mgr {
     slot: Option<Popup>,
     slot_at: Option<(i32, i32, i32, i32)>,
     snap: Option<(HWND, (i32, i32), (i32, i32), std::time::Instant)>,
+    on_desktop: bool,
 }
 
 thread_local! {
@@ -204,6 +212,8 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ctl_proc), hInstance: hi, lpszClassName: class, ..Default::default() });
         let ctl = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("abra-widgets"), WS_POPUP, 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hi), None)?;
         let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f32 / 96.0;
+        let on_desktop = desktop_shown(focus::foreground());
+        ON_DESKTOP.store(on_desktop, Ordering::Relaxed);
         MGR.with(|c| {
             *c.borrow_mut() = Some(Mgr {
                 ctl,
@@ -225,10 +235,13 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
                 slot: None,
                 slot_at: None,
                 snap: None,
+                on_desktop,
             })
         });
         prefs::listen(ctl);
+        tracker::install_fx(fg_hook);
         SetTimer(Some(ctl), T_TICK, 1000, None);
+        SetTimer(Some(ctl), T_DESK, 250, None);
     }
     with(|m| m.load());
     Ok(())
@@ -335,8 +348,10 @@ impl Mgr {
             let _ = popup.panel.set_rect(0.0, 0.0, 0.0, 0.0);
         }
         let _ = popup.content.SetOffset(Vector3 { X: m, Y: m, Z: 0.0 });
+        let after = self.back_z();
         unsafe {
-            let _ = SetWindowPos(popup.hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(popup.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(popup.hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         popup.show();
         self.list.push(Widget { kind, popup, pos, size: (w, h), hands: vec![], sig: String::new(), hover: false, tracking: false });
@@ -345,6 +360,9 @@ impl Mgr {
         if pop {
             let wd = &self.list[i];
             let _ = motion::pop_in(&self.comp, wd.popup.root(), self.center(i), 0.4, 1.06, 0, 380);
+        }
+        if self.on_desktop {
+            crate::topmost::raise_all();
         }
         Some(i)
     }
@@ -704,11 +722,43 @@ impl Mgr {
         let _ = motion::hover_pop(&self.comp, self.list[i].popup.root(), c, if on { 1.03 } else { 1.0 });
     }
 
+    fn back_z(&self) -> HWND {
+        if self.on_desktop { HWND_TOPMOST } else { HWND_BOTTOM }
+    }
+
+    fn sync_desktop(&mut self) {
+        self.set_desktop(desktop_shown(focus::foreground()));
+    }
+
+    fn set_desktop(&mut self, on: bool) {
+        if self.on_desktop == on {
+            return;
+        }
+        log::line("widgets", &format!("desktop={on} widget={}", self.list.len()));
+        self.on_desktop = on;
+        ON_DESKTOP.store(on, Ordering::Relaxed);
+        if FLOAT.load(Ordering::Relaxed) {
+            return;
+        }
+        let after = self.back_z();
+        for w in &self.list {
+            unsafe {
+                let _ = SetWindowPos(w.popup.hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+        if on {
+            crate::topmost::raise_all();
+        }
+    }
+
     fn move_to(&self, i: usize, pos: (i32, i32), topmost: bool) {
         let m = (MARGIN * self.dpi) as i32;
         let w = &self.list[i];
         unsafe {
-            let after = if topmost { HWND_TOPMOST } else { HWND_BOTTOM };
+            if !topmost {
+                let _ = SetWindowPos(w.popup.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            let after = if topmost { HWND_TOPMOST } else { self.back_z() };
             let _ = SetWindowPos(w.popup.hwnd, Some(after), pos.0 - m, pos.1 - m, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
@@ -833,8 +883,13 @@ impl Mgr {
         }
         if let Some((h, _, to, _)) = self.snap.take() {
             let m = (MARGIN * self.dpi) as i32;
+            let after = self.back_z();
             unsafe {
-                let _ = SetWindowPos(h, Some(HWND_BOTTOM), to.0 - m, to.1 - m, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                let _ = SetWindowPos(h, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                let _ = SetWindowPos(h, Some(after), to.0 - m, to.1 - m, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            if self.on_desktop {
+                crate::topmost::raise_all();
             }
         }
     }
@@ -1114,6 +1169,69 @@ fn xy(lp: LPARAM) -> (f32, f32) {
     ((lp.0 as i16) as f32, ((lp.0 >> 16) as i16) as f32)
 }
 
+fn is_desktop(hwnd: isize) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe {
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(HWND(hwnd as *mut _), &mut cls);
+        let c = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        matches!(c.as_str(), "Progman" | "WorkerW" | "SHELLDLL_DefView")
+    }
+}
+
+struct ZCtx {
+    own: u32,
+    desk: isize,
+    result: Option<bool>,
+}
+
+unsafe extern "system" fn zcb(h: HWND, lp: LPARAM) -> windows_core::BOOL {
+    let c = &mut *(lp.0 as *mut ZCtx);
+    if !IsWindowVisible(h).as_bool() {
+        return windows_core::BOOL(1);
+    }
+    if h.0 as isize == c.desk {
+        c.result = Some(true);
+        return windows_core::BOOL(0);
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(h, Some(&mut pid));
+    if pid == c.own {
+        return windows_core::BOOL(1);
+    }
+    let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+    if ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) != 0 {
+        return windows_core::BOOL(1);
+    }
+    if GetWindowTextLengthW(h) > 0 {
+        c.result = Some(false);
+        return windows_core::BOOL(0);
+    }
+    windows_core::BOOL(1)
+}
+
+fn desktop_shown(fg: isize) -> bool {
+    if !is_desktop(fg) {
+        return false;
+    }
+    unsafe {
+        let root = GetAncestor(HWND(fg as *mut _), GA_ROOT);
+        let desk = if root.0.is_null() { fg } else { root.0 as isize };
+        let mut c = ZCtx { own: std::process::id(), desk, result: None };
+        let _ = EnumWindows(Some(zcb), LPARAM(&mut c as *mut ZCtx as isize));
+        c.result.unwrap_or(true)
+    }
+}
+
+fn fg_hook(ev: u32, hwnd: isize) {
+    if ev == tracker::EV_FOREGROUND && is_desktop(hwnd) {
+        log::line("widgets", &format!("fg desktop shown={}", desktop_shown(hwnd)));
+        with(|m| m.set_desktop(desktop_shown(hwnd)));
+    }
+}
+
 unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_TIMER => {
@@ -1129,6 +1247,9 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }
                 T_SNAP => {
                     with(|m| m.step_snap());
+                }
+                T_DESK => {
+                    with(|m| m.sync_desktop());
                 }
                 _ => {}
             }
@@ -1175,7 +1296,11 @@ unsafe extern "system" fn widget_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_WINDOWPOSCHANGING => {
             let p = lp.0 as *mut WINDOWPOS;
-            if !p.is_null() && !FLOAT.load(Ordering::Relaxed) && (*p).flags.0 & SWP_NOZORDER.0 == 0 {
+            if !p.is_null()
+                && !FLOAT.load(Ordering::Relaxed)
+                && !ON_DESKTOP.load(Ordering::Relaxed)
+                && (*p).flags.0 & SWP_NOZORDER.0 == 0
+            {
                 (*p).hwndInsertAfter = HWND_BOTTOM;
             }
             DefWindowProcW(hwnd, msg, wp, lp)
