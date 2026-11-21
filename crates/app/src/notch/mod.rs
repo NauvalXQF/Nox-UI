@@ -56,8 +56,8 @@ const WM_MEDIA: u32 = WM_APP + 10;
 const WM_BANDS: u32 = WM_APP + 11;
 const WM_LYRICS: u32 = WM_APP + 18;
 const WM_DND: u32 = WM_APP + 19;
-const WM_AFTERDROP: u32 = WM_APP + 20;
-const WM_DOWNLOAD: u32 = WM_APP + 21;
+const WM_AFTERDROP: u32 = WM_APP + 33;
+const WM_DOWNLOAD: u32 = WM_APP + 34;
 const WM_AGENDA: u32 = WM_APP + 23;
 const WM_SEND: u32 = WM_APP + 24;
 const WM_PRIVACY: u32 = WM_APP + 25;
@@ -91,6 +91,8 @@ const T_TESTSEND: usize = 21;
 const T_NOTIF_TOAST: usize = 22;
 const T_CARET: usize = 23;
 const T_COPIED: usize = 24;
+const T_NAV_COLLAPSE: usize = 25;
+const NAV_COLLAPSE_MS: u32 = 180;
 const NOTIF_TOAST_MS: u32 = 4500;
 const SEND_IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
@@ -337,6 +339,10 @@ pub struct Notch {
     sp_ear: Spring,
     sp_y: Spring,
     sp_sh_op: Spring,
+    sp_nav: Spring,
+    nav_expanded: bool,
+    nav_collapse_armed: bool,
+    muted: bool,
     frame_active: bool,
     frame_last: Instant,
     frame_ms: u32,
@@ -378,7 +384,6 @@ pub struct Notch {
     lyr_worker: nacre_platform::lyrics::Lyrics,
     lyr: Option<nacre_core::notch::lyrics::Lyrics>,
     lyr_state: LyrState,
-    lyr_lrclib: bool,
     lyr_key: String,
     lyr_track: String,
     lyr_idx: Option<usize>,
@@ -510,6 +515,10 @@ impl Notch {
                 sp_ear: Spring::new(init_ear, SpringParams::swap()),
                 sp_y: Spring::new(init_y, SpringParams::stage_show()),
                 sp_sh_op: Spring::new(init_sh_op, SpringParams::swap()),
+                sp_nav: Spring::new(0.0, SpringParams::swap()),
+                nav_expanded: false,
+                nav_collapse_armed: false,
+                muted: nacre_platform::audio::latest().muted,
                 frame_active: false,
                 frame_last: Instant::now(),
                 frame_ms,
@@ -558,7 +567,6 @@ impl Notch {
                 lyr_worker: nacre_platform::lyrics::spawn(crate::paths::config_dir().join("lyrics"), move || post(hw, WM_LYRICS)),
                 lyr: None,
                 lyr_state: LyrState::Idle,
-                lyr_lrclib: false,
                 lyr_key: String::new(),
                 lyr_track: String::new(),
                 lyr_idx: None,
@@ -749,6 +757,14 @@ impl Notch {
             self.apply_springs_to_shell();
         } else if !self.shown && self.rgn_rect != (0, 0, 0, 0) {
             self.apply_springs_to_shell();
+        }
+
+        let nav_moving = self.sp_nav.step(dt);
+        if nav_moving {
+            if let Some(nav) = &self.live_vis.nav {
+                nav.set_progress(self.sp_nav.pos);
+            }
+            springs_moving = true;
         }
 
         // Smooth audio visualizer bar interpolation at monitor refresh rate.
@@ -1540,6 +1556,12 @@ impl Notch {
         if view_changed && self.focus.is_active() {
             self.blur_inputs(false);
         }
+        if !matches!(new.view, View::Open(_)) || (new.view == View::Open(Tab::Play) && self.lyrics_open) {
+            self.nav_expanded = false;
+            self.nav_collapse_armed = false;
+            self.sp_nav.snap(0.0);
+            kill(self.hwnd, T_NAV_COLLAPSE);
+        }
         if !matches!(new.view, View::Open(_)) {
             self.cal_sel = 0;
         }
@@ -1656,7 +1678,7 @@ impl Notch {
             tint: self.tint,
             drag: self.seek_drag.map(|(_, _, fr)| fr),
         });
-        let lyrics = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms, lrclib: self.lyr_lrclib };
+        let lyrics = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms };
         let shelf = self.shelf.items().iter().map(|i| (i.name(), self.shelf_icons.get(&i.path))).collect();
         let drop_count = if self.mode == Mode::Drop { self.dnd.borrow().len() } else { 0 };
         let now_unix = std::time::SystemTime::now()
@@ -1680,6 +1702,9 @@ impl Notch {
             media,
             lyrics,
             lyrics_open: self.lyrics_open,
+            muted: self.muted,
+            hovered: self.tracking,
+            nav_progress: self.sp_nav.pos,
             shelf,
             drop_zone: self.drop_zone,
             drop_count,
@@ -1723,7 +1748,7 @@ impl Notch {
                 self.gemini_input = Some(gi);
             }
         }
-        if let Some(r) = self.hover_act.and_then(|a| self.regions.iter().find(|r| r.action == a)) {
+        if let Some(r) = self.hover_act.and_then(|a| self.find_hover_region(a)) {
             if let Some(v) = &r.vis {
                 let k = hover_scale(r.action);
                 let _ = v.SetCenterPoint(Vector3 { X: r.x + r.w / 2.0, Y: r.y + r.h / 2.0, Z: 0.0 });
@@ -1827,7 +1852,6 @@ impl Notch {
     fn request_lyrics(&mut self) {
         self.lyr = None;
         self.lyr_idx = None;
-        self.lyr_lrclib = false;
         if !self.has_media {
             self.lyr_state = LyrState::Idle;
             self.lyr_key.clear();
@@ -1855,7 +1879,6 @@ impl Notch {
             got = true;
             let parsed = a.text.map(|t| nacre_core::notch::lyrics::parse(&t)).filter(|l| !l.is_empty());
             self.lyr_state = if parsed.is_some() { LyrState::Ready } else { LyrState::Missing };
-            self.lyr_lrclib = a.source == nacre_platform::lyrics::Source::Lrclib;
             log::line("lirik", &format!("{:?} sumber={:?} baris={}", self.lyr_state, a.source, parsed.as_ref().map_or(0, |l| l.lines.len())));
             self.lyr = parsed;
             self.lyr_idx = None;
@@ -1890,7 +1913,7 @@ impl Notch {
                 self.swap_lyric();
             } else if self.mode == Mode::Open(Tab::Play) || self.look.view == View::Compact(state::Activity::Player) {
                 if self.live_vis.lyrics_host.is_some() {
-                    let ly = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms: pos, lrclib: self.lyr_lrclib };
+                    let ly = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms: pos };
                     views::refresh_lyrics_in_place(&mut self.paint, &mut self.live_vis, self.has_media, &ly);
                 } else {
                     self.render();
@@ -2201,12 +2224,58 @@ impl Notch {
         }
     }
 
+    fn sync_hover_chrome(&self) {
+        if let Some(pin) = &self.live_vis.pin_vis {
+            let to = if self.pinned { 1.0 } else if self.tracking { 0.52 } else { 0.0 };
+            let from = pin.Opacity().unwrap_or(to);
+            if (from - to).abs() > 0.01 {
+                if let Ok(o) = pin.cast::<CompositionObject>() {
+                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, to, 140, 0);
+                }
+            }
+        }
+        if let Some(ch) = &self.live_vis.chevrons_vis {
+            let to = if self.tracking { 0.42 } else { 0.0 };
+            let from = ch.Opacity().unwrap_or(to);
+            if (from - to).abs() > 0.01 {
+                if let Ok(o) = ch.cast::<CompositionObject>() {
+                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, to, 140, 0);
+                }
+            }
+        }
+    }
+
+    fn update_nav_hover(&mut self, x: f32, y: f32) {
+        let Some(nav) = &self.live_vis.nav else { return };
+        if !self.nav_expanded {
+            if nav.hit_dots(x, y) {
+                kill(self.hwnd, T_NAV_COLLAPSE);
+                self.nav_collapse_armed = false;
+                self.nav_expanded = true;
+                self.sp_nav.set_target(1.0, SpringParams::swap());
+                self.start_frame();
+            }
+        } else if nav.hit_pill(x, y) {
+            if self.nav_collapse_armed {
+                kill(self.hwnd, T_NAV_COLLAPSE);
+                self.nav_collapse_armed = false;
+            }
+        } else if !self.nav_collapse_armed {
+            self.nav_collapse_armed = true;
+            timer(self.hwnd, T_NAV_COLLAPSE, NAV_COLLAPSE_MS);
+        }
+    }
+
     fn on_move(&mut self) {
+        let was_tracking = self.tracking;
         if !self.tracking {
             let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: self.hwnd, dwHoverTime: 0 };
             if unsafe { TrackMouseEvent(&mut t) }.is_ok() {
                 self.tracking = true;
             }
+        }
+        if !was_tracking && self.tracking {
+            self.sync_hover_chrome();
         }
         kill(self.hwnd, T_LEAVE);
         if self.grace {
@@ -2223,13 +2292,31 @@ impl Notch {
         }
     }
 
+    fn find_hover_region(&self, act: Action) -> Option<&Region> {
+        if self.nav_expanded {
+            if let Some(r) = self.live_vis.nav.as_ref().and_then(|n| n.pill_regions.iter().find(|r| r.action == act)) {
+                return Some(r);
+            }
+        }
+        self.regions.iter().find(|r| r.action == act)
+    }
+
     fn on_hover(&mut self, x: f32, y: f32) {
-        let hit = self.regions.iter().find(|r| r.vis.is_some() && r.hit(x, y)).map(|r| r.action);
+        self.update_nav_hover(x, y);
+        let nav_hit = if self.nav_expanded {
+            self.live_vis
+                .nav
+                .as_ref()
+                .and_then(|n| n.pill_regions.iter().find(|r| r.vis.is_some() && r.hit(x, y)).map(|r| r.action))
+        } else {
+            None
+        };
+        let hit = nav_hit.or_else(|| self.regions.iter().find(|r| r.vis.is_some() && r.hit(x, y)).map(|r| r.action));
         if hit == self.hover_act {
             return;
         }
         for (a, on) in [(self.hover_act, false), (hit, true)] {
-            let Some(r) = a.and_then(|a| self.regions.iter().find(|r| r.action == a)) else { continue };
+            let Some(r) = a.and_then(|a| self.find_hover_region(a)) else { continue };
             let Some(v) = &r.vis else { continue };
             let to = if on { hover_scale(r.action) } else { 1.0 };
             let Ok(comp) = v.Compositor() else { continue };
@@ -2241,7 +2328,15 @@ impl Notch {
     fn on_leave(&mut self) {
         self.on_hover(-1.0, -1.0);
         self.tracking = false;
+        self.sync_hover_chrome();
         kill(self.hwnd, T_DWELL);
+        if self.nav_expanded || self.nav_collapse_armed {
+            kill(self.hwnd, T_NAV_COLLAPSE);
+            self.nav_collapse_armed = false;
+            self.nav_expanded = false;
+            self.sp_nav.set_target(0.0, SpringParams::close());
+            self.start_frame();
+        }
         if self.seek_drag.is_some() || self.menu.as_ref().is_some_and(|m| m.is_open()) {
             return;
         }
@@ -2279,7 +2374,20 @@ impl Notch {
             self.dispatch(Event::Click);
             return;
         }
-        let Some(a) = self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action) else { return };
+        let mut hit_act = None;
+        if let Some(nav) = &self.live_vis.nav {
+            if self.nav_expanded || self.sp_nav.pos > 0.35 {
+                hit_act = nav.pill_regions.iter().find(|r| r.hit(x, y)).map(|r| r.action);
+            } else if nav.hit_dots(x, y) {
+                kill(self.hwnd, T_NAV_COLLAPSE);
+                self.nav_collapse_armed = false;
+                self.nav_expanded = true;
+                self.sp_nav.set_target(1.0, SpringParams::swap());
+                self.start_frame();
+                return;
+            }
+        }
+        let Some(a) = hit_act.or_else(|| self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action)) else { return };
         let now = self.now_ms();
         match a {
             Action::PlayPause => {
@@ -2293,11 +2401,22 @@ impl Notch {
             }
             Action::ToggleLyrics => {
                 self.lyrics_open = !self.lyrics_open;
+                if self.lyrics_open {
+                    self.nav_expanded = false;
+                    self.nav_collapse_armed = false;
+                    self.sp_nav.snap(0.0);
+                    kill(self.hwnd, T_NAV_COLLAPSE);
+                }
                 self.retire_content(motion::SWAP_FADE_MS);
                 self.apply_size(Some(SpringParams::swap()));
                 self.publish_notch();
                 self.render();
                 self.intro(false);
+            }
+            Action::ToggleMute => {
+                crate::services::toggle_mute();
+                self.muted = !self.muted;
+                self.render();
             }
             Action::PrevTab => self.step_tab(-1),
             Action::NextTab => self.step_tab(1),
@@ -2819,6 +2938,14 @@ impl Notch {
                     self.render();
                 }
             }
+            T_NAV_COLLAPSE => {
+                self.nav_collapse_armed = false;
+                if self.nav_expanded {
+                    self.nav_expanded = false;
+                    self.sp_nav.set_target(0.0, SpringParams::close());
+                    self.start_frame();
+                }
+            }
             T_DWELL => {
                 if self.tracking && !self.cursor_on_media_button() {
                     self.dispatch(Event::Dwell);
@@ -3060,6 +3187,18 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MEDIA => {
             with(hwnd, |d| d.on_media());
+            LRESULT(0)
+        }
+        crate::services::WM_VOLUME => {
+            with(hwnd, |d| {
+                let muted = nacre_platform::audio::latest().muted;
+                if muted != d.muted {
+                    d.muted = muted;
+                    if d.mode == Mode::Open(Tab::Play) {
+                        d.render();
+                    }
+                }
+            });
             LRESULT(0)
         }
         WM_BANDS => {

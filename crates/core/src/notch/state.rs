@@ -168,6 +168,23 @@ pub const COMPACT_MIN_W_DP: f32 = 190.0;
 pub const COMPACT_MAX_W_DP: f32 = 540.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavState {
+    Hidden,
+    Dots,
+    Pill,
+}
+
+pub fn nav_state(tab: Tab, lyrics_open: bool, nav_hovered: bool) -> NavState {
+    if tab == Tab::Play && lyrics_open {
+        NavState::Hidden
+    } else if nav_hovered {
+        NavState::Pill
+    } else {
+        NavState::Dots
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeContext {
     pub lyrics_open: bool,
     pub shelf_empty: bool,
@@ -197,14 +214,14 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
         View::Compact(_) => (292.0, 30.0, 15.0),
-        View::Open(Tab::Play) if ctx.lyrics_open => (600.0, 184.0, 28.0),
-        View::Open(Tab::Play) => (440.0, 176.0, 28.0),
-        View::Open(Tab::Shelf) if ctx.shelf_empty => (460.0, 172.0, 28.0),
-        View::Open(Tab::Shelf) => (520.0, 188.0, 28.0),
-        View::Open(Tab::Alerts) => (520.0, 236.0, 28.0),
-        View::Open(Tab::Todo) => (540.0, 232.0, 28.0),
-        View::Open(Tab::Gemini) => (560.0, 258.0, 28.0),
-        View::Open(Tab::Timer) => (520.0, 192.0, 28.0),
+        View::Open(Tab::Play) if ctx.lyrics_open => (600.0, 162.0, 28.0),
+        View::Open(Tab::Play) => (440.0, 160.0, 28.0),
+        View::Open(Tab::Shelf) if ctx.shelf_empty => (460.0, 156.0, 28.0),
+        View::Open(Tab::Shelf) => (520.0, 172.0, 28.0),
+        View::Open(Tab::Alerts) => (520.0, 220.0, 28.0),
+        View::Open(Tab::Todo) => (540.0, 214.0, 28.0),
+        View::Open(Tab::Gemini) => (560.0, 240.0, 28.0),
+        View::Open(Tab::Timer) => (520.0, 176.0, 28.0),
         View::Drop => (520.0, 120.0, 28.0),
     };
     if l.peek && matches!(l.view, View::Rest | View::Compact(_)) {
@@ -325,20 +342,26 @@ mod tests {
         assert!(music.w > rest.w && music.h == rest.h);
         assert!(lyr.w > music.w && lyr.h >= music.h && lyr.h < 40.0, "lirik ringkas: satu baris yang lebih lebar");
         let open_lyr = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: true, shelf_empty: true });
-        assert_eq!((open_lyr.w, open_lyr.h, open_lyr.radius), (600.0, 184.0, 28.0));
+        assert_eq!((open_lyr.w, open_lyr.h, open_lyr.radius), (600.0, 162.0, 28.0));
         let open_compact = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true });
-        assert_eq!((open_compact.w, open_compact.h), (440.0, 176.0));
+        assert_eq!((open_compact.w, open_compact.h), (440.0, 160.0));
         let shelf_empty = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: true });
         let shelf_filled = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: false });
-        assert_eq!((shelf_empty.w, shelf_empty.h), (460.0, 172.0));
+        assert_eq!((shelf_empty.w, shelf_empty.h), (460.0, 156.0));
         assert!(shelf_filled.w > shelf_empty.w && shelf_filled.h > shelf_empty.h);
         let gemini = size(look(Mode::Open(Tab::Gemini), None), 1.0);
-        assert_eq!((gemini.w, gemini.h), (560.0, 258.0));
+        assert_eq!((gemini.w, gemini.h), (560.0, 240.0));
         let b = size(look(Mode::Open(Tab::Play), None), 1.5);
         assert_eq!((b.w, b.radius), (900.0, 42.0));
         assert_eq!(adaptive_compact_w(40.0, 100.0, 190.0, 500.0), 190.0);
         assert_eq!(adaptive_compact_w(210.4, 100.0, 190.0, 500.0), 311.0);
         assert_eq!(adaptive_compact_w(600.0, 100.0, 190.0, 480.0), 480.0);
+        assert_eq!(nav_state(Tab::Play, true, false), NavState::Hidden);
+        assert_eq!(nav_state(Tab::Play, true, true), NavState::Hidden);
+        assert_eq!(nav_state(Tab::Play, false, false), NavState::Dots);
+        assert_eq!(nav_state(Tab::Play, false, true), NavState::Pill);
+        assert_eq!(nav_state(Tab::Shelf, true, false), NavState::Dots);
+        assert_eq!(nav_state(Tab::Shelf, true, true), NavState::Pill);
     }
 
     #[test]

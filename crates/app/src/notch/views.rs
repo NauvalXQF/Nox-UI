@@ -2,7 +2,7 @@ use super::draw::{white, Anchor, Painter, WHITE};
 use crate::prefs::tr;
 use nacre_core::island::timer::{format_mmss, Phase, Timer};
 use nacre_core::notch::glance::Item;
-use nacre_core::notch::state::{Activity, Look, Tab, View};
+use nacre_core::notch::state::{Activity, Look, NavState, Tab, View};
 use nacre_core::symbols::Sym;
 use windows::UI::Color;
 use windows::UI::Composition::{
@@ -17,6 +17,7 @@ pub enum Action {
     Next,
     Prev,
     ToggleLyrics,
+    ToggleMute,
     Seek(f32, f32),
     Tab(Tab),
     PrevTab,
@@ -103,6 +104,9 @@ pub struct Data<'a> {
     pub media: Option<MediaView<'a>>,
     pub lyrics: LyricsView<'a>,
     pub lyrics_open: bool,
+    pub muted: bool,
+    pub hovered: bool,
+    pub nav_progress: f32,
     pub shelf: Vec<(&'a str, Option<&'a CompositionDrawingSurface>)>,
     pub drop_zone: Option<usize>,
     pub drop_count: usize,
@@ -186,7 +190,6 @@ pub struct LyricsView<'a> {
     pub lines: Option<&'a nacre_core::notch::lyrics::Lyrics>,
     pub state: LyrState,
     pub pos_ms: i64,
-    pub lrclib: bool,
 }
 
 pub struct MediaView<'a> {
@@ -314,6 +317,57 @@ pub struct GeminiRespHost {
     pub h: f32,
 }
 
+pub struct NavLive {
+    pub cx: f32,
+    pub cy: f32,
+    pub dots_w: f32,
+    pub dots_h: f32,
+    pub pill_w: f32,
+    pub pill_h: f32,
+    pub bg: SpriteVisual,
+    pub bg_geo: CompositionRoundedRectangleGeometry,
+    pub bg_brush: CompositionColorBrush,
+    pub dots_group: ContainerVisual,
+    pub pill_group: ContainerVisual,
+    pub dots_rect: (f32, f32, f32, f32),
+    pub pill_rect: (f32, f32, f32, f32),
+    pub pill_regions: Vec<Region>,
+}
+
+impl NavLive {
+    pub fn set_progress(&self, raw_t: f32) {
+        let t = raw_t.clamp(0.0, 1.0);
+        let w = self.dots_w + (self.pill_w - self.dots_w) * t;
+        let h = self.dots_h + (self.pill_h - self.dots_h) * t;
+        let r = h / 2.0;
+        let _ = self.bg.SetSize(Vector2 { X: w, Y: h });
+        let _ = self.bg.SetOffset(Vector3 { X: (self.cx - w / 2.0).round(), Y: (self.cy - h / 2.0).round(), Z: 0.0 });
+        let _ = self.bg_geo.SetSize(Vector2 { X: w, Y: h });
+        let _ = self.bg_geo.SetCornerRadius(Vector2 { X: r, Y: r });
+        let alpha = (24.0 * t).round().clamp(0.0, 255.0) as u8;
+        let _ = self.bg_brush.SetColor(white(alpha));
+
+        let dots_op = (1.0 - t * 2.5).clamp(0.0, 1.0);
+        let _ = self.dots_group.SetOpacity(dots_op);
+        let _ = self.dots_group.SetScale(Vector3 { X: 1.0 + 0.32 * t, Y: 1.0, Z: 1.0 });
+
+        let pill_op = ((t - 0.18) / 0.82).clamp(0.0, 1.0);
+        let pill_sc = 0.84 + 0.16 * t;
+        let _ = self.pill_group.SetOpacity(pill_op);
+        let _ = self.pill_group.SetScale(Vector3 { X: pill_sc, Y: pill_sc, Z: 1.0 });
+    }
+
+    pub fn hit_dots(&self, x: f32, y: f32) -> bool {
+        let (rx, ry, rw, rh) = self.dots_rect;
+        x >= rx && x < rx + rw && y >= ry && y < ry + rh
+    }
+
+    pub fn hit_pill(&self, x: f32, y: f32) -> bool {
+        let (rx, ry, rw, rh) = self.pill_rect;
+        x >= rx && x < rx + rw && y >= ry && y < ry + rh
+    }
+}
+
 #[derive(Default)]
 pub struct Live {
     pub bars: Vec<SpriteVisual>,
@@ -330,12 +384,16 @@ pub struct Live {
     pub compact_left: Option<ContainerVisual>,
     pub compact_right: Option<ContainerVisual>,
     pub compact_glow: Option<SpriteVisual>,
+    pub nav: Option<NavLive>,
+    pub pin_vis: Option<ContainerVisual>,
+    pub chevrons_vis: Option<ContainerVisual>,
 }
 
 const ORANGE: [u8; 3] = [255, 159, 10];
 const GREEN: [u8; 3] = [48, 209, 88];
+const RED: [u8; 3] = [255, 59, 48];
 
-const NAV_H_DP: f32 = 34.0;
+const NAV_H_DP: f32 = 28.0;
 const EDGE_PAD_DP: f32 = 26.0;
 
 pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
@@ -364,9 +422,11 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
                 Tab::Gemini => gemini_tab(p, c, f, d, regions, live),
                 Tab::Timer => timer(p, c, f, d, regions),
             }
-            edge_chevrons(p, c, f, regions);
-            top_pin(p, c, f, d, regions);
-            bottom_nav(p, c, f, tab, d, regions);
+            edge_chevrons(p, c, f, tab, d, regions, live);
+            top_utilities(p, c, f, tab, d, regions, live);
+            if nacre_core::notch::state::nav_state(tab, d.lyrics_open, false) != NavState::Hidden {
+                bottom_nav(p, c, f, tab, d, live);
+            }
         }
         View::Drop => drop_zones(p, c, f, d, regions, live),
     }
@@ -394,53 +454,86 @@ pub(super) fn count_text(n: usize) -> String {
     }
 }
 
-fn top_pin(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
-    let px_btn = f.x0 + f.w - p.px(16.0);
-    let py_btn = p.px(16.0);
-    let n0 = kids(c);
-    let pin_rgb = if d.pinned { crate::prefs::accent() } else { WHITE };
-    p.sym(c, Sym::Pin, px_btn, py_btn, 12.0, pin_rgb, if d.pinned { 1.0 } else { 0.34 });
-    regions.push(Region {
-        x: px_btn - p.px(12.0),
-        y: py_btn - p.px(12.0),
-        w: p.px(24.0),
-        h: p.px(24.0),
-        action: Action::Pin,
-        vis: group_since(c, n0),
-    });
+fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
+    let mut right_x = f.x0 + f.w - p.px(20.0);
+    let cy = p.px(18.0);
+
+    // Unread alerts bell with crisp red badge dot (shown only when unread > 0 and not already on Alerts tab).
+    if d.notif_unread > 0 && cur != Tab::Alerts {
+        let n0 = kids(c);
+        p.sym(c, Sym::Bell, right_x, cy, 14.5, WHITE, 0.96);
+        let dot = p.px(5.0);
+        p.rect(c, right_x + p.px(3.5), cy - p.px(7.5), dot, dot, dot / 2.0, Color { A: 255, R: RED[0], G: RED[1], B: RED[2] });
+        regions.push(Region {
+            x: right_x - p.px(13.0),
+            y: cy - p.px(13.0),
+            w: p.px(26.0),
+            h: p.px(26.0),
+            action: Action::Tab(Tab::Alerts),
+            vis: group_since(c, n0),
+        });
+        right_x -= p.px(26.0);
+    }
+
+    // Pin button: hidden when not hovered (unless pinned), revealed cleanly via retained opacity.
+    if let Ok(pin_wrap) = p.comp.CreateContainerVisual() {
+        let op = if d.pinned { 1.0 } else if d.hovered { 0.52 } else { 0.0 };
+        let _ = pin_wrap.SetOpacity(op);
+        let _ = c.Children().and_then(|k| k.InsertAtTop(&pin_wrap));
+        let n0 = kids(&pin_wrap);
+        let pin_rgb = if d.pinned { crate::prefs::accent() } else { WHITE };
+        p.sym(&pin_wrap, Sym::Pin, right_x, cy, 12.0, pin_rgb, 1.0);
+        regions.push(Region {
+            x: right_x - p.px(12.0),
+            y: cy - p.px(12.0),
+            w: p.px(24.0),
+            h: p.px(24.0),
+            action: Action::Pin,
+            vis: group_since(&pin_wrap, n0),
+        });
+        live.pin_vis = Some(pin_wrap);
+    }
 }
 
-fn edge_chevrons(p: &mut Painter, c: &ContainerVisual, f: Frame, regions: &mut Vec<Region>) {
-    let cy = (f.h - p.px(NAV_H_DP)) / 2.0 + p.px(4.0);
+fn edge_chevrons(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
+    let hidden_nav = nacre_core::notch::state::nav_state(cur, d.lyrics_open, false) == NavState::Hidden;
+    let cy = if hidden_nav { f.h / 2.0 } else { (f.h - p.px(NAV_H_DP)) / 2.0 + p.px(4.0) };
     let lx = f.x0 + p.px(12.0);
     let rx = f.x0 + f.w - p.px(12.0);
     let hit_w = p.px(22.0);
     let hit_h = p.px(56.0);
 
-    let n0 = kids(c);
-    p.sym(c, Sym::ChevronLeft, lx, cy, 11.5, WHITE, 0.34);
-    regions.push(Region {
-        x: lx - hit_w / 2.0,
-        y: cy - hit_h / 2.0,
-        w: hit_w,
-        h: hit_h,
-        action: Action::PrevTab,
-        vis: group_since(c, n0),
-    });
+    if let Ok(wrap) = p.comp.CreateContainerVisual() {
+        let base_op = if d.hovered { 0.42 } else { 0.0 };
+        let _ = wrap.SetOpacity(base_op);
+        let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
 
-    let n1 = kids(c);
-    p.sym(c, Sym::ChevronRight, rx, cy, 11.5, WHITE, 0.34);
-    regions.push(Region {
-        x: rx - hit_w / 2.0,
-        y: cy - hit_h / 2.0,
-        w: hit_w,
-        h: hit_h,
-        action: Action::NextTab,
-        vis: group_since(c, n1),
-    });
+        let n0 = kids(&wrap);
+        p.sym(&wrap, Sym::ChevronLeft, lx, cy, 11.5, WHITE, 1.0);
+        regions.push(Region {
+            x: lx - hit_w / 2.0,
+            y: cy - hit_h / 2.0,
+            w: hit_w,
+            h: hit_h,
+            action: Action::PrevTab,
+            vis: group_since(&wrap, n0),
+        });
+
+        let n1 = kids(&wrap);
+        p.sym(&wrap, Sym::ChevronRight, rx, cy, 11.5, WHITE, 1.0);
+        regions.push(Region {
+            x: rx - hit_w / 2.0,
+            y: cy - hit_h / 2.0,
+            w: hit_w,
+            h: hit_h,
+            action: Action::NextTab,
+            vis: group_since(&wrap, n1),
+        });
+        live.chevrons_vis = Some(wrap);
+    }
 }
 
-fn bottom_nav(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>) {
+fn bottom_nav(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, live: &mut Live) {
     let items: [(Option<Tab>, Sym); 7] = [
         (Some(Tab::Play), Sym::Note),
         (Some(Tab::Alerts), Sym::Bell),
@@ -450,61 +543,125 @@ fn bottom_nav(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data
         (Some(Tab::Timer), Sym::Stopwatch),
         (None, Sym::Gear),
     ];
-    let slot_w = p.px(28.0);
-    let pill_h = p.px(22.0);
-    let pad_x = p.px(5.0);
-    let sep_w = p.px(7.0);
-    let total_w = items.len() as f32 * slot_w + sep_w + 2.0 * pad_x;
+
     let cx = f.x0 + f.w / 2.0;
-    let cy = f.h - p.px(16.0);
-    let x0 = (cx - total_w / 2.0).round();
-    let y0 = (cy - pill_h / 2.0).round();
+    let cy = f.h - p.px(14.5);
 
-    p.rect(c, x0, y0, total_w, pill_h, pill_h / 2.0, white(16));
+    // Collapsed page dots geometry (`— · · · · ·`): 16x4 active capsule + 4x4 inactive dots.
+    let active_w = p.px(16.0);
+    let dot_d = p.px(4.0);
+    let dot_gap = p.px(5.0);
+    let dots_w = active_w + (Tab::ALL.len().saturating_sub(1) as f32) * dot_d + (Tab::ALL.len().saturating_sub(1) as f32) * dot_gap;
+    let dots_h = p.px(8.0);
 
-    let mut x = x0 + pad_x;
-    let accent = crate::prefs::accent();
-    for (idx, (tab_opt, sym)) in items.into_iter().enumerate() {
-        if idx == 6 {
-            p.divider_v(c, x + sep_w / 2.0, y0 + p.px(5.0), pill_h - p.px(10.0));
-            x += sep_w;
+    // Expanded pill geometry (`Play | Alerts | Shelf | To-Do | Gemini | Timer | Settings`).
+    let slot_w = p.px(28.0);
+    let pill_h = p.px(24.0);
+    let pad_x = p.px(6.0);
+    let sep_w = p.px(7.0);
+    let pill_w = items.len() as f32 * slot_w + sep_w + 2.0 * pad_x;
+
+    let mut build = || -> windows_core::Result<NavLive> {
+        let bg_geo = p.comp.CreateRoundedRectangleGeometry()?;
+        let bg_clip = p.comp.CreateGeometricClip()?;
+        bg_clip.SetGeometry(&bg_geo)?;
+        let bg_brush = p.comp.CreateColorBrushWithColor(white(0))?;
+        let bg = p.comp.CreateSpriteVisual()?;
+        bg.SetBrush(&bg_brush)?;
+        bg.SetClip(&bg_clip)?;
+        c.Children()?.InsertAtTop(&bg)?;
+
+        // State 2 visual group: minimal page dots.
+        let dots_group = p.comp.CreateContainerVisual()?;
+        dots_group.SetCenterPoint(Vector3 { X: cx, Y: cy, Z: 0.0 })?;
+        c.Children()?.InsertAtTop(&dots_group)?;
+        let mut dx = (cx - dots_w / 2.0).round();
+        let dy = (cy - dot_d / 2.0).round();
+        for t in Tab::ALL {
+            let on = t == cur;
+            let dw = if on { active_w } else { dot_d };
+            let col = if on { white(245) } else { white(90) };
+            p.rect(&dots_group, dx, dy, dw, dot_d, dot_d / 2.0, col);
+            dx += dw + dot_gap;
         }
-        let on = tab_opt == Some(cur);
-        let icx = x + slot_w / 2.0;
-        let n0 = kids(c);
-        if on {
-            let iw = slot_w - p.px(2.0);
-            let ih = pill_h - p.px(4.0);
-            p.rect(c, (x + p.px(1.0)).round(), (y0 + p.px(2.0)).round(), iw, ih, ih / 2.0, white(44));
+
+        // State 3 visual group: full icon pill.
+        let pill_group = p.comp.CreateContainerVisual()?;
+        pill_group.SetCenterPoint(Vector3 { X: cx, Y: cy, Z: 0.0 })?;
+        c.Children()?.InsertAtTop(&pill_group)?;
+
+        let mut pill_regions = Vec::new();
+        let x0 = (cx - pill_w / 2.0).round();
+        let y0 = (cy - pill_h / 2.0).round();
+        let mut x = x0 + pad_x;
+        let accent = crate::prefs::accent();
+        for (idx, (tab_opt, sym)) in items.into_iter().enumerate() {
+            if idx == 6 {
+                p.divider_v(&pill_group, x + sep_w / 2.0, y0 + p.px(5.0), pill_h - p.px(10.0));
+                x += sep_w;
+            }
+            let on = tab_opt == Some(cur);
+            let icx = x + slot_w / 2.0;
+            let n0 = kids(&pill_group);
+            let (rgb, op) = match tab_opt {
+                Some(Tab::Timer) if d.timer_running => (ORANGE, 1.0),
+                Some(_) if on => (accent, 1.0),
+                _ => (WHITE, 0.56),
+            };
+            p.sym(&pill_group, sym, icx, cy, 12.0, rgb, op);
+
+            if tab_opt == Some(Tab::Alerts) && d.notif_unread > 0 {
+                let dot = p.px(4.5);
+                p.rect(&pill_group, icx + p.px(5.0), cy - p.px(7.5), dot, dot, dot / 2.0, Color { A: 255, R: RED[0], G: RED[1], B: RED[2] });
+            } else if tab_opt == Some(Tab::Shelf) && !d.shelf.is_empty() && !on {
+                let dot = p.px(3.5);
+                p.rect(&pill_group, icx + p.px(5.5), cy - p.px(6.5), dot, dot, dot / 2.0, white(150));
+            }
+
+            let act = match tab_opt {
+                Some(t) => Action::Tab(t),
+                None => Action::Settings,
+            };
+            pill_regions.push(Region {
+                x,
+                y: y0 - p.px(4.0),
+                w: slot_w,
+                h: pill_h + p.px(8.0),
+                action: act,
+                vis: group_since(&pill_group, n0),
+            });
+            x += slot_w;
         }
-        let (rgb, op) = match tab_opt {
-            Some(Tab::Timer) if d.timer_running => (ORANGE, 1.0),
-            Some(_) if on => (WHITE, 1.0),
-            _ => (WHITE, 0.48),
+
+        let dots_hit_w = dots_w + p.px(32.0);
+        let dots_hit_h = p.px(24.0);
+        let dots_rect = (cx - dots_hit_w / 2.0, f.h - dots_hit_h, dots_hit_w, dots_hit_h);
+
+        let pill_hit_w = pill_w + p.px(20.0);
+        let pill_hit_h = pill_h + p.px(12.0);
+        let pill_rect = (cx - pill_hit_w / 2.0, f.h - pill_hit_h, pill_hit_w, pill_hit_h);
+
+        let nav = NavLive {
+            cx,
+            cy,
+            dots_w,
+            dots_h,
+            pill_w,
+            pill_h,
+            bg,
+            bg_geo,
+            bg_brush,
+            dots_group,
+            pill_group,
+            dots_rect,
+            pill_rect,
+            pill_regions,
         };
-        p.sym(c, sym, icx, cy, 11.5, rgb, op);
-
-        if tab_opt == Some(Tab::Alerts) && d.notif_unread > 0 {
-            let dot = p.px(4.5);
-            p.rect(c, icx + p.px(5.0), cy - p.px(7.5), dot, dot, dot / 2.0, Color { A: 255, R: accent[0], G: accent[1], B: accent[2] });
-        } else if tab_opt == Some(Tab::Shelf) && !d.shelf.is_empty() && !on {
-            let dot = p.px(3.5);
-            p.rect(c, icx + p.px(5.5), cy - p.px(6.5), dot, dot, dot / 2.0, white(150));
-        }
-
-        let act = match tab_opt {
-            Some(t) => Action::Tab(t),
-            None => Action::Settings,
-        };
-        regions.push(Region {
-            x,
-            y: y0 - p.px(3.0),
-            w: slot_w,
-            h: pill_h + p.px(6.0),
-            action: act,
-            vis: group_since(c, n0),
-        });
-        x += slot_w;
+        nav.set_progress(d.nav_progress);
+        Ok(nav)
+    };
+    if let Ok(nav) = build() {
+        live.nav = Some(nav);
     }
 }
 
@@ -945,29 +1102,30 @@ fn music_column(
     h: f32,
     m: &MediaView,
     lyrics_open: bool,
+    muted: bool,
     regions: &mut Vec<Region>,
     live: &mut Live,
 ) {
-    let art = p.px(54.0);
+    let art = p.px(52.0);
     let (ax, ay) = (x, y);
     match m.art {
         Some(s) => {
-            p.image(c, s, ax, ay, art, art, p.px(13.0));
+            p.image(c, s, ax, ay, art, art, p.px(12.0));
         }
         None => {
-            p.rect(c, ax, ay, art, art, p.px(13.0), white(24));
+            p.rect(c, ax, ay, art, art, p.px(12.0), white(24));
             p.sym(c, Sym::Note, ax + art / 2.0, ay + art / 2.0, 22.0, WHITE, 0.8);
         }
     }
     let tx = ax + art + p.px(12.0);
-    let tw = (x + w - tx).max(p.px(40.0));
+    let tw = (x + w - tx - if lyrics_open { 0.0 } else { p.px(30.0) }).max(p.px(40.0));
     let title = p.fit(m.title, 14.5, 700, tw);
-    p.text(c, &title, tx, ay + p.px(9.0), 14.5, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
+    p.text(c, &title, tx, ay + p.px(8.0), 14.5, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
     let artist = p.fit(m.artist, 12.0, 500, tw);
-    p.text(c, &artist, tx, ay + p.px(30.0), 12.0, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
+    p.text(c, &artist, tx, ay + p.px(29.0), 12.0, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
 
     // Inline Nusa scrub row: `00:34  [=====-----]  -02:27`
-    let sy = ay + art + p.px(20.0);
+    let sy = ay + art + p.px(18.0);
     let left_time_w = p.px(40.0);
     let right_time_w = p.px(46.0);
     let sx = x + left_time_w;
@@ -998,10 +1156,10 @@ fn music_column(
         c.Children()?.InsertAtTop(&knob)?;
 
         let pos_vis = p.comp.CreateSpriteVisual()?;
-        pos_vis.SetOpacity(0.76)?;
+        pos_vis.SetOpacity(0.84)?;
         c.Children()?.InsertAtTop(&pos_vis)?;
         let rem_vis = p.comp.CreateSpriteVisual()?;
-        rem_vis.SetOpacity(0.76)?;
+        rem_vis.SetOpacity(0.84)?;
         c.Children()?.InsertAtTop(&rem_vis)?;
 
         Ok(ScrubLive {
@@ -1031,20 +1189,34 @@ fn music_column(
         regions.push(Region { x: sx - p.px(6.0), y: sy - p.px(12.0), w: sw + p.px(12.0), h: p.px(24.0), action: Action::Seek(sx, sw), vis: None });
     }
 
-    // Playback controls row + Lyrics Quote toggle icon (exact Nusa ordering: Quote | << | || | >>)
-    let cy = (y + h - p.px(16.0)).max(sy + p.px(24.0));
-    let step = p.px(42.0);
+    // Playback controls row: [Quote]  [<<] [||] [>>]  [Speaker/Mute]
+    let cy = (y + h - p.px(15.0)).max(sy + p.px(25.0));
     let cx = x + w / 2.0;
-    let controls = [
-        (Sym::Quote, cx - 1.5 * step, 15.5, Action::ToggleLyrics, if lyrics_open { 1.0 } else { 0.42 }),
-        (Sym::Backward, cx - 0.5 * step, 16.5, Action::Prev, 0.96),
-        (if m.playing { Sym::Pause } else { Sym::Play }, cx + 0.5 * step, 21.0, Action::PlayPause, 1.0),
-        (Sym::Forward, cx + 1.5 * step, 16.5, Action::Next, 0.96),
-    ];
+    let vol_sym = if muted { Sym::SpeakerMute } else { Sym::SpeakerMid };
+    let vol_op = if muted { 0.48 } else { 0.92 };
+    let controls = if lyrics_open {
+        let step = p.px(39.0);
+        [
+            (Sym::Quote, cx - 2.0 * step, 15.0, Action::ToggleLyrics, 1.0),
+            (Sym::Backward, cx - step, 16.0, Action::Prev, 0.96),
+            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 20.5, Action::PlayPause, 1.0),
+            (Sym::Forward, cx + step, 16.0, Action::Next, 0.96),
+            (vol_sym, cx + 2.0 * step, 15.0, Action::ToggleMute, vol_op),
+        ]
+    } else {
+        let step = p.px(44.0);
+        [
+            (Sym::Quote, x + p.px(18.0), 15.5, Action::ToggleLyrics, 0.50),
+            (Sym::Backward, cx - step, 16.5, Action::Prev, 0.96),
+            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 21.0, Action::PlayPause, 1.0),
+            (Sym::Forward, cx + step, 16.5, Action::Next, 0.96),
+            (vol_sym, x + w - p.px(18.0), 15.5, Action::ToggleMute, vol_op),
+        ]
+    };
     for (s, bx, size, a, op) in controls {
         let n0 = kids(c);
         p.sym(c, s, bx, cy, size, WHITE, op);
-        regions.push(Region { x: bx - p.px(18.0), y: cy - p.px(15.0), w: p.px(36.0), h: p.px(30.0), action: a, vis: group_since(c, n0) });
+        regions.push(Region { x: bx - p.px(17.0), y: cy - p.px(14.0), w: p.px(34.0), h: p.px(28.0), action: a, vis: group_since(c, n0) });
     }
 }
 
@@ -1364,17 +1536,21 @@ fn draw_gemini_response(
 }
 
 fn play(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
-    if let Some(m) = &d.media {
-        let glow = accent_or(m.tint);
-        p.ambient_glow(c, f.x0, 0.0, f.w, f.h, 0.0, glow, false);
+    // Contextual ambient glow: ONLY when lyrics panel is open (pure #000000 in compact Player mode).
+    if d.lyrics_open {
+        if let Some(m) = &d.media {
+            let glow = accent_or(m.tint);
+            p.ambient_glow(c, f.x0, 0.0, f.w, f.h, 0.0, glow, false);
+        }
     }
 
     let pad = p.px(EDGE_PAD_DP);
     let top = p.px(14.0);
-    let bot = f.h - p.px(NAV_H_DP + 4.0);
-    let h = (bot - top).max(p.px(80.0));
 
     if d.lyrics_open {
+        // State 1 (Hidden bottom nav): clean edge-to-edge height down to the bottom bezel.
+        let bot = f.h - p.px(12.0);
+        let h = (bot - top).max(p.px(80.0));
         let mx = f.x0 + pad;
         let mw = p.px(248.0).min((f.w - 2.0 * pad) * 0.48);
         let div_x = mx + mw + p.px(16.0);
@@ -1382,11 +1558,10 @@ fn play(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut 
         let lw = (f.x0 + f.w - pad - lx).max(p.px(80.0));
 
         match &d.media {
-            Some(m) => music_column(p, c, mx, top, mw, h, m, true, regions, live),
+            Some(m) => music_column(p, c, mx, top, mw, h, m, true, d.muted, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
                 p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
-                // Keep Lyrics toggle reachable even when idle.
                 let qx = mx + mw / 2.0;
                 let qy = top + h - p.px(14.0);
                 let n0 = kids(c);
@@ -1394,13 +1569,16 @@ fn play(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut 
                 regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0) });
             }
         }
-        p.divider_v(c, div_x, top + p.px(6.0), h - p.px(12.0));
+        p.divider_v(c, div_x, top + p.px(4.0), h - p.px(8.0));
         lyrics_slot(p, c, lx, top, lw, h, d, live, false);
     } else {
+        // State 2/3 (Collapsed Dots / Expanded Pill): reserve sleek bottom strip without jumping height.
+        let bot = f.h - p.px(NAV_H_DP + 4.0);
+        let h = (bot - top).max(p.px(80.0));
         let mx = f.x0 + pad + p.px(4.0);
         let mw = (f.w - 2.0 * pad - p.px(8.0)).max(p.px(180.0));
         match &d.media {
-            Some(m) => music_column(p, c, mx, top, mw, h, m, false, regions, live),
+            Some(m) => music_column(p, c, mx, top, mw, h, m, false, d.muted, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
                 p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
@@ -1476,7 +1654,7 @@ fn lyrics_3line_stack(
         frame.Children()?.InsertAtTop(&scroll)?;
         Ok((frame, scroll))
     };
-    let Ok((frame, sc)) = go() else { return };
+    let Ok((_frame, sc)) = go() else { return };
 
     let maxw = (rw - p.px(6.0)).max(p.px(40.0));
     let active_sz = if compact_player { 15.0 } else { 15.5 };
@@ -1559,16 +1737,6 @@ fn lyrics_3line_stack(
                 yy += dim_lh;
             }
             yy += gap * 0.6;
-        }
-    }
-    if !compact_player {
-        let note = match l.synced {
-            false => tr("Lirik tanpa waktu"),
-            true if ly.lrclib => "LRCLIB",
-            true => "",
-        };
-        if !note.is_empty() {
-            p.text(&frame, note, rw - p.px(2.0), rh - p.px(12.0), 9.0, 500, WHITE, 0.24, Anchor::Right, rw * 0.5);
         }
     }
 }
