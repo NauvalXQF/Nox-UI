@@ -160,6 +160,10 @@ pub fn parse_sse_data(payload: &str) -> Option<SsePiece> {
         .and_then(Json::as_arr)?;
     let mut text = String::new();
     for p in parts {
+        // Skip internal reasoning/thought chunks emitted by Gemini 2.5/3/4 thinking models.
+        if p.get("thought").and_then(Json::as_bool) == Some(true) {
+            continue;
+        }
         if let Some(t) = p.get("text").and_then(Json::as_str) {
             text.push_str(t);
         }

@@ -108,9 +108,25 @@ pub fn force_foreground(target: isize) -> bool {
     }
 }
 
+fn is_cloaked(hwnd: HWND) -> bool {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    let mut cloaked: u32 = 0;
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+    }
+}
+
 /// Locates the window matching a notification's `aumid` / `app_name` (including minimized windows),
 /// restores it if minimized, and brings it to the foreground. Falls back to launching/activating via
-/// `shell:AppsFolder\<aumid>` for apps minimized to the system tray (e.g. WhatsApp, Discord, Telegram).
+/// `shell:AppsFolder\<aumid>` (resolved directly or via `apps::find_by_name`) for apps minimized to
+/// the system tray or living on another Virtual Desktop (e.g. WhatsApp, Discord, Telegram).
 pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
     use windows::core::BOOL;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -118,7 +134,25 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
     };
 
     let own_pid = std::process::id();
-    let aumid_lo = aumid.trim().to_ascii_lowercase();
+    let mut resolved_aumid = aumid.trim().to_string();
+    let mut resolved_shell = if !resolved_aumid.is_empty() {
+        Some(super::identity::shell_path(&resolved_aumid))
+    } else {
+        None
+    };
+
+    let name_clean = app_name.trim();
+    let is_generic_windows = name_clean.eq_ignore_ascii_case("windows") || name_clean.is_empty();
+    if resolved_shell.is_none() && !is_generic_windows {
+        if let Some(app) = crate::apps::find_by_name(name_clean) {
+            if let Some(id) = app.path.strip_prefix("shell:AppsFolder\\") {
+                resolved_aumid = id.to_string();
+            }
+            resolved_shell = Some(app.path);
+        }
+    }
+
+    let aumid_lo = resolved_aumid.to_ascii_lowercase();
     let family_lo = aumid_lo.split('!').next().unwrap_or("").to_string();
     let exe_hint = aumid_lo
         .rsplit(['\\', '/', '!'])
@@ -126,7 +160,11 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
         .filter(|s| s.ends_with(".exe"))
         .unwrap_or("")
         .to_string();
-    let name_lo = app_name.trim().to_ascii_lowercase();
+    let name_lo = if is_generic_windows { String::new() } else { name_clean.to_ascii_lowercase() };
+
+    if aumid_lo.is_empty() && name_lo.is_empty() {
+        return false;
+    }
 
     struct Search {
         own_pid: u32,
@@ -136,6 +174,7 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
         name_lo: String,
         best_score: u8,
         best_hwnd: isize,
+        best_cloaked: bool,
     }
 
     unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> BOOL {
@@ -176,23 +215,31 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
                     let stem = file.strip_suffix(".exe").unwrap_or(file);
                     if friendly == s.name_lo || stem == s.name_lo {
                         score = score.max(65);
-                    } else if friendly.contains(&s.name_lo) || s.name_lo.contains(&friendly) && friendly.len() >= 3 {
+                    } else if friendly.contains(&s.name_lo) || (s.name_lo.contains(&friendly) && friendly.len() >= 3) {
                         score = score.max(45);
                     }
                 }
             }
         }
-        if score < 40 && !s.name_lo.is_empty() {
+        if score < 70 && !s.name_lo.is_empty() {
             let t = title(hwnd.0 as isize).to_ascii_lowercase();
-            if t == s.name_lo || t.ends_with(&format!(" - {}", s.name_lo)) || t.contains(&s.name_lo) {
-                score = score.max(35);
+            if t == s.name_lo {
+                score = score.max(70);
+            } else if t.ends_with(&format!(" - {}", s.name_lo)) || t.contains(&s.name_lo) {
+                score = score.max(40);
             }
         }
-        if score > s.best_score {
-            s.best_score = score;
-            s.best_hwnd = hwnd.0 as isize;
-            if score >= 100 {
-                return BOOL(0);
+        if score > 0 {
+            let cloaked = is_cloaked(hwnd);
+            // Prefer visible/uncloaked windows on the active virtual desktop over cloaked ones.
+            let better = score > s.best_score || (score == s.best_score && s.best_cloaked && !cloaked);
+            if better {
+                s.best_score = score;
+                s.best_hwnd = hwnd.0 as isize;
+                s.best_cloaked = cloaked;
+                if score >= 100 && !cloaked {
+                    return BOOL(0);
+                }
             }
         }
         BOOL(1)
@@ -206,16 +253,24 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
         name_lo,
         best_score: 0,
         best_hwnd: 0,
+        best_cloaked: false,
     };
     unsafe {
         let _ = EnumWindows(Some(cb), LPARAM(&mut search as *mut Search as isize));
     }
+    // If matched window is on the current virtual desktop (not cloaked), focus it directly.
+    if search.best_hwnd != 0 && !search.best_cloaked {
+        if force_foreground(search.best_hwnd) {
+            return true;
+        }
+    }
+    // Otherwise (minimized to tray, closed, or cloaked on another virtual desktop), activate via AppsFolder.
+    if let Some(shell) = resolved_shell {
+        crate::launch::open(&shell);
+        return true;
+    }
     if search.best_hwnd != 0 {
         return force_foreground(search.best_hwnd);
-    }
-    if !aumid.trim().is_empty() {
-        crate::launch::open(&super::identity::shell_path(aumid.trim()));
-        return true;
     }
     false
 }

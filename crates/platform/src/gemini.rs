@@ -81,12 +81,15 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Gemini {
                         notify();
                         continue;
                     };
+                    let clean_model = model.trim().strip_prefix("models/").unwrap_or(model.trim());
                     let url = format!(
-                        "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
+                        "https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:streamGenerateContent?alt=sse"
                     );
                     let body = build_request_body(&prompt);
                     let headers = [
                         ("Content-Type", "application/json"),
+                        ("Accept", "text/event-stream"),
+                        ("Cache-Control", "no-cache"),
                         ("x-goog-api-key", key.as_str()),
                     ];
 
@@ -134,6 +137,7 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Gemini {
                             let msg = nacre_core::notch::json::parse(&raw_err)
                                 .and_then(|j| j.get("error")?.get("message")?.as_str().map(String::from))
                                 .unwrap_or_else(|| format!("HTTP {status}"));
+                            crate::log::line("gemini", &format!("model={clean_model} HTTP {status}: {msg}"));
                             let _ = ev_tx.send(Event::Error { id, message: msg });
                         }
                         Ok(_) => {
@@ -147,6 +151,7 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Gemini {
                             }
                         }
                         Err(e) => {
+                            crate::log::line("gemini", &format!("model={clean_model} error: {e}"));
                             let _ = ev_tx.send(Event::Error { id, message: e });
                         }
                     }

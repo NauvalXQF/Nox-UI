@@ -20,12 +20,11 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
     IUIAutomationEventHandler, IUIAutomationEventHandler_Impl, SetWinEventHook, TreeScope_Descendants,
-    TreeScope_Subtree, UnhookWinEvent, HWINEVENTHOOK, UIA_ControlTypePropertyId,
-    UIA_EVENT_ID, UIA_TextControlTypeId, UIA_Window_WindowOpenedEventId,
+    TreeScope_Subtree, UnhookWinEvent, HWINEVENTHOOK, UIA_EVENT_ID, UIA_TextControlTypeId,
+    UIA_Window_WindowOpenedEventId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
@@ -272,7 +271,9 @@ fn is_chrome_noise(s: &str) -> bool {
             "close"
                 | "tutup"
                 | "dismiss"
+                | "dismiss notification"
                 | "abaikan"
+                | "abaikan notifikasi"
                 | "settings"
                 | "pengaturan"
                 | "more options"
@@ -289,6 +290,12 @@ fn is_chrome_noise(s: &str) -> bool {
                 | "baru saja"
                 | "notification"
                 | "notifikasi"
+                | "mark as read"
+                | "tandai sudah dibaca"
+                | "mute"
+                | "bisukan"
+                | "open"
+                | "buka"
         )
 }
 
@@ -301,17 +308,43 @@ fn is_toast_window_name(name: &str) -> bool {
         || l.contains("toast")
 }
 
-fn parse_toast_lines(
+/// Extracts the sender application name from Windows 11's accessibility toast title
+/// (e.g. `"New notification from WhatsApp, Budi, Halo"` -> `"WhatsApp"`).
+fn extract_app_from_win_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    for marker in [
+        "new notification from ",
+        "notification from ",
+        "notifikasi baru dari ",
+        "notifikasi dari ",
+    ] {
+        if let Some(pos) = lower.find(marker) {
+            let after = name[pos + marker.len()..].trim();
+            let app = after
+                .split([',', '\n', '\r', ':', '·'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !app.is_empty() && !is_chrome_noise(app) {
+                return Some(app.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parses `(automation_id, name, is_text)` tuples extracted from a Windows toast UIA tree.
+fn parse_toast_nodes(
     win_name: &str,
-    items: &[(String, String)],
+    nodes: &[(String, String, bool)],
 ) -> Option<(String, String, String)> {
     let mut has_toast_marker = is_toast_window_name(win_name);
-    let mut app_id: Option<String> = None;
+    let mut app_id: Option<String> = extract_app_from_win_name(win_name);
     let mut title_id: Option<String> = None;
     let mut body_parts: Vec<String> = Vec::new();
-    let mut generic_lines: Vec<String> = Vec::new();
+    let mut generic_texts: Vec<String> = Vec::new();
 
-    for (aid, txt) in items {
+    for (aid, txt, is_text) in nodes {
         let al = aid.to_ascii_lowercase();
         if al.contains("toast")
             || al == "appnametext"
@@ -319,17 +352,37 @@ fn parse_toast_lines(
             || al == "messagetext"
             || al == "attributiontext"
             || al == "headertitle"
+            || al == "headerbutton"
+            || al == "applogo"
             || al == "dismissbutton"
         {
             has_toast_marker = true;
         }
         let clean = txt.trim();
+        if clean.is_empty() {
+            continue;
+        }
+        if app_id.is_none() {
+            if let Some(from_name) = extract_app_from_win_name(clean) {
+                app_id = Some(from_name);
+                has_toast_marker = true;
+                continue;
+            }
+        }
         if is_chrome_noise(clean) {
             continue;
         }
-        if al == "appnametext" || al == "headertitle" {
+        if al == "appnametext" || al == "headertitle" || al == "headerbutton" || al == "applogo" {
             if app_id.is_none() {
-                app_id = Some(clean.to_string());
+                // Strip leading "Open "/"Buka " on header buttons if present.
+                let stripped = clean
+                    .strip_prefix("Open ")
+                    .or_else(|| clean.strip_prefix("Buka "))
+                    .unwrap_or(clean)
+                    .trim();
+                if !stripped.is_empty() && !is_chrome_noise(stripped) {
+                    app_id = Some(stripped.to_string());
+                }
             }
             continue;
         }
@@ -345,8 +398,9 @@ fn parse_toast_lines(
             }
             continue;
         }
-        if !generic_lines.iter().any(|x| x == clean) {
-            generic_lines.push(clean.to_string());
+        // Only collect generic lines from Text controls so action buttons don't pollute body text.
+        if *is_text && !generic_texts.iter().any(|x| x == clean) {
+            generic_texts.push(clean.to_string());
         }
     }
 
@@ -357,7 +411,7 @@ fn parse_toast_lines(
     // Prefer explicit toast AutomationId slots when present.
     if app_id.is_some() || title_id.is_some() || !body_parts.is_empty() {
         let mut all_extra = body_parts;
-        for g in generic_lines {
+        for g in generic_texts {
             if app_id.as_deref() != Some(g.as_str())
                 && title_id.as_deref() != Some(g.as_str())
                 && !all_extra.iter().any(|x| x == &g)
@@ -381,26 +435,26 @@ fn parse_toast_lines(
     }
 
     // Positional fallback across extracted Text controls.
-    if generic_lines.is_empty() {
+    if generic_texts.is_empty() {
         return None;
     }
-    if generic_lines.len() >= 3 {
-        let app = generic_lines.remove(0);
-        let title = generic_lines.remove(0);
-        let body = generic_lines.join(" \u{00B7} ");
+    if generic_texts.len() >= 3 {
+        let app = generic_texts.remove(0);
+        let title = generic_texts.remove(0);
+        let body = generic_texts.join(" \u{00B7} ");
         Some((app, title, body))
-    } else if generic_lines.len() == 2 {
-        let a = generic_lines.remove(0);
-        let b = generic_lines.remove(0);
+    } else if generic_texts.len() == 2 {
+        let a = generic_texts.remove(0);
+        let b = generic_texts.remove(0);
         Some((a.clone(), a, b))
     } else {
-        Some(("Windows".to_string(), generic_lines.remove(0), String::new()))
+        Some(("Windows".to_string(), generic_texts.remove(0), String::new()))
     }
 }
 
 fn extract_uia_toast(
     el: &IUIAutomationElement,
-    text_cond: &IUIAutomationCondition,
+    all_cond: &IUIAutomationCondition,
     fallback_win_name: &str,
 ) -> Option<RawNotification> {
     let win_name = unsafe { el.CurrentName() }
@@ -413,17 +467,19 @@ fn extract_uia_toast(
         .map(|b| b.to_string())
         .unwrap_or_default();
 
-    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut nodes: Vec<(String, String, bool)> = Vec::new();
     if !root_aid.is_empty() {
-        pairs.push((root_aid, String::new()));
+        nodes.push((root_aid, win_name.clone(), false));
     }
 
-    let arr = unsafe { el.FindAll(TreeScope_Descendants, text_cond) }.ok()?;
-    let n = unsafe { arr.Length() }.unwrap_or(0).min(32);
+    let arr = unsafe { el.FindAll(TreeScope_Descendants, all_cond) }.ok()?;
+    let n = unsafe { arr.Length() }.unwrap_or(0).min(48);
     for i in 0..n {
         let Ok(child) = (unsafe { arr.GetElement(i) }) else {
             continue;
         };
+        let ctype = unsafe { child.CurrentControlType() }.ok();
+        let is_text = ctype == Some(UIA_TextControlTypeId);
         let aid = unsafe { child.CurrentAutomationId() }
             .ok()
             .map(|b| b.to_string())
@@ -433,16 +489,44 @@ fn extract_uia_toast(
             .map(|b| b.to_string())
             .unwrap_or_default();
         if !aid.is_empty() || !name.trim().is_empty() {
-            pairs.push((aid, name));
+            nodes.push((aid, name, is_text));
         }
     }
 
-    let (app_name, title, body) = parse_toast_lines(&win_name, &pairs)?;
+    let (mut app_name, title, body) = parse_toast_nodes(&win_name, &nodes)?;
+
+    // Resolve AUMID (and refine app_name if it fell back to "Windows") from installed AppsFolder cache.
+    let mut aumid = String::new();
+    if let Some(app) = crate::apps::find_by_name(&app_name) {
+        app_name = app.name;
+        if let Some(id) = app.path.strip_prefix("shell:AppsFolder\\") {
+            aumid = id.to_string();
+        }
+    } else if app_name.eq_ignore_ascii_case("windows") {
+        // Check if any non-text node or title starts with an installed app name (e.g. "WhatsApp").
+        for (_, candidate, _) in &nodes {
+            let c = candidate.trim();
+            if c.len() >= 3 && c.len() <= 40 && !is_chrome_noise(c) {
+                if let Some(app) = crate::apps::find_by_name(c) {
+                    app_name = app.name;
+                    if let Some(id) = app.path.strip_prefix("shell:AppsFolder\\") {
+                        aumid = id.to_string();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    crate::log::line(
+        "notif",
+        &format!("uia app={app_name} aumid={aumid} title={title}"),
+    );
     let id = UIA_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     Some(RawNotification {
         id,
         app_name,
-        aumid: String::new(),
+        aumid,
         title,
         body,
         timestamp_s: now_unix_s(),
@@ -538,12 +622,7 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
         }
     };
 
-    let Ok(text_cond) = (unsafe {
-        uia.CreatePropertyCondition(
-            UIA_ControlTypePropertyId,
-            &VARIANT::from(UIA_TextControlTypeId.0 as i32),
-        )
-    }) else {
+    let Ok(all_cond) = (unsafe { uia.CreateTrueCondition() }) else {
         set_status(Status::Unsupported);
         let _ = emit(tx, notify, Event::Status(Status::Unsupported));
         if com {
@@ -644,7 +723,7 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
             }
             let title = window_title(hwnd);
             if let Ok(el) = unsafe { uia.ElementFromHandle(hwnd) } {
-                if let Some(raw) = extract_uia_toast(&el, &text_cond, &title) {
+                if let Some(raw) = extract_uia_toast(&el, &all_cond, &title) {
                     if dedup.accept(&raw.app_name, &raw.title, &raw.body) {
                         if !emit(tx, notify, Event::Arrived(raw)) {
                             flag.store(true, Ordering::Relaxed);
@@ -827,14 +906,14 @@ mod tests {
     #[test]
     fn parses_toast_automation_ids_and_filters_chrome() {
         let items = vec![
-            ("NormalToastView".into(), String::new()),
-            ("AppNameText".into(), "WhatsApp".into()),
-            ("TitleText".into(), "Budi".into()),
-            ("MessageText".into(), "Halo jadi meeting jam 3?".into()),
-            ("DismissButton".into(), "Close".into()),
+            ("NormalToastView".into(), String::new(), false),
+            ("AppNameText".into(), "WhatsApp".into(), true),
+            ("TitleText".into(), "Budi".into(), true),
+            ("MessageText".into(), "Halo jadi meeting jam 3?".into(), true),
+            ("DismissButton".into(), "Close".into(), false),
         ];
         assert_eq!(
-            parse_toast_lines("New notification", &items),
+            parse_toast_nodes("New notification", &items),
             Some((
                 "WhatsApp".into(),
                 "Budi".into(),
@@ -844,11 +923,34 @@ mod tests {
     }
 
     #[test]
+    fn extracts_app_name_from_win11_toast_header_and_win_name() {
+        let items = vec![
+            ("NormalToastView".into(), "New notification from WhatsApp, Budi, Halo".into(), false),
+            ("TitleText".into(), "Budi".into(), true),
+            ("MessageText".into(), "Halo".into(), true),
+        ];
+        assert_eq!(
+            parse_toast_nodes("New notification", &items),
+            Some(("WhatsApp".into(), "Budi".into(), "Halo".into()))
+        );
+
+        let header_btn = vec![
+            ("HeaderButton".into(), "WhatsApp".into(), false),
+            ("TitleText".into(), "Ani".into(), true),
+            ("MessageText".into(), "Otw".into(), true),
+        ];
+        assert_eq!(
+            parse_toast_nodes("Notifikasi baru", &header_btn),
+            Some(("WhatsApp".into(), "Ani".into(), "Otw".into()))
+        );
+    }
+
+    #[test]
     fn ignores_non_toast_shell_windows() {
         let items = vec![
-            ("QuickSettings".into(), "Wi-Fi".into()),
-            ("".into(), "Bluetooth".into()),
+            ("QuickSettings".into(), "Wi-Fi".into(), false),
+            ("".into(), "Bluetooth".into(), true),
         ];
-        assert_eq!(parse_toast_lines("Quick settings", &items), None);
+        assert_eq!(parse_toast_nodes("Quick settings", &items), None);
     }
 }

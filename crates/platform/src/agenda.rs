@@ -1,6 +1,7 @@
 use nacre_core::island::calendar::add_days;
 use nacre_core::notch::json::{self, Json};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::{Duration, Instant};
 use windows::ApplicationModel::Appointments::{
     AppointmentManager, AppointmentProperties, AppointmentStore, AppointmentStoreAccessType,
     FindAppointmentsOptions,
@@ -85,22 +86,51 @@ fn url_enc(s: &str) -> String {
     out
 }
 
-/// Parses an RFC3339 `dateTime` string (either `...Z` UTC or `...+HH:MM` local offset)
-/// into `(local_date, minute_of_day)`.
-fn parse_gcal_datetime(s: &str, target_date: Date) -> Option<(Date, u32)> {
-    let (date_part, time_part) = s.split_once('T')?;
-    let mut dp = date_part.split('-');
+fn parse_ymd(s: &str) -> Option<Date> {
+    let mut dp = s.get(0..10)?.split('-');
     let y: i32 = dp.next()?.parse().ok()?;
     let m: u32 = dp.next()?.parse().ok()?;
-    let day: u32 = dp.next()?.parse().ok()?;
+    let d: u32 = dp.next()?.parse().ok()?;
+    Some((y, m, d))
+}
 
+fn all_day_includes(start: Date, end_excl: Option<Date>, target: Date) -> bool {
+    match end_excl {
+        Some(e) if e > start => target >= start && target < e,
+        _ => target == start,
+    }
+}
+
+/// Parses an RFC3339 `dateTime` string (`...Z` or `...±HH:MM`) and converts it accurately
+/// into the machine's local `(Date, minute_of_day)`.
+fn parse_gcal_datetime(s: &str) -> Option<(Date, u32)> {
+    let (date_part, time_part) = s.split_once('T')?;
+    let (y, m, day) = parse_ymd(date_part)?;
     let h: u32 = time_part.get(0..2)?.parse().ok()?;
     let min: u32 = time_part.get(3..5)?.parse().ok()?;
     let sec: u32 = time_part.get(6..8).and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    if time_part.ends_with('Z') || time_part.ends_with('z') {
+    // Parse timezone suffix (`Z` or `±HH:MM`) into signed offset minutes from UTC.
+    let tz_part = time_part.get(8..).unwrap_or("");
+    let offset_min: Option<i64> = if tz_part.ends_with('Z') || tz_part.ends_with('z') {
+        Some(0)
+    } else if let Some(pos) = tz_part.rfind(['+', '-']) {
+        let sign: i64 = if tz_part.as_bytes()[pos] == b'-' { -1 } else { 1 };
+        let rest = &tz_part[pos + 1..];
+        let oh: i64 = rest.get(0..2).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let om: i64 = rest
+            .get(3..5)
+            .or_else(|| rest.get(2..4))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        Some(sign * (oh * 60 + om))
+    } else {
+        None
+    };
+
+    if let Some(off_m) = offset_min {
         unsafe {
-            let utc = SYSTEMTIME {
+            let st = SYSTEMTIME {
                 wYear: y as u16,
                 wMonth: m as u16,
                 wDay: day as u16,
@@ -109,42 +139,97 @@ fn parse_gcal_datetime(s: &str, target_date: Date) -> Option<(Date, u32)> {
                 wSecond: sec as u16,
                 ..Default::default()
             };
-            let mut local = SYSTEMTIME::default();
-            if SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok() {
-                return Some((
-                    (local.wYear as i32, local.wMonth as u32, local.wDay as u32),
-                    local.wHour as u32 * 60 + local.wMinute as u32,
-                ));
+            let mut ft = FILETIME::default();
+            if SystemTimeToFileTime(&st, &mut ft).is_ok() {
+                let raw = (((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64) as i64;
+                // Subtract offset to get true UTC ticks (100ns units).
+                let utc_ticks = raw - off_m * 60 * 10_000_000;
+                if let Some(res) = to_local(DateTime { UniversalTime: utc_ticks }) {
+                    return Some(res);
+                }
             }
         }
     }
-    // Offset-qualified timestamp returned by Google Calendar uses the calendar's local timezone.
-    let parsed_date = (y, m, day);
-    if parsed_date == target_date {
-        Some((parsed_date, h * 60 + min))
-    } else {
-        Some((parsed_date, h * 60 + min))
+    Some(((y, m, day), h * 60 + min))
+}
+
+struct GCalState {
+    cal_ids: Vec<String>,
+    cal_ids_at: Option<Instant>,
+    logged_no_token: bool,
+}
+
+impl GCalState {
+    fn new() -> Self {
+        Self {
+            cal_ids: Vec::new(),
+            cal_ids_at: None,
+            logged_no_token: false,
+        }
+    }
+
+    fn calendar_ids(&mut self, token: &str) -> Vec<String> {
+        let fresh = self
+            .cal_ids_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(300));
+        if fresh && !self.cal_ids.is_empty() {
+            return self.cal_ids.clone();
+        }
+        let auth = format!("Bearer {token}");
+        let mut ids = vec!["primary".to_string()];
+        if let Ok((status, body)) = crate::http::request(
+            "GET",
+            "https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader&maxResults=25",
+            &[("Authorization", auth.as_str())],
+            None,
+        ) {
+            if status < 400 {
+                if let Some(root) = json::parse(&body) {
+                    if let Some(items) = root.get("items").and_then(Json::as_arr) {
+                        for item in items {
+                            if item.get("selected").and_then(Json::as_bool) == Some(false) {
+                                continue;
+                            }
+                            if item.get("primary").and_then(Json::as_bool) == Some(true) {
+                                continue;
+                            }
+                            let Some(id) = item.get("id").and_then(Json::as_str) else { continue };
+                            if id.is_empty() || ids.iter().any(|x| x == id) {
+                                continue;
+                            }
+                            ids.push(id.to_string());
+                            if ids.len() >= 6 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.cal_ids = ids.clone();
+        self.cal_ids_at = Some(Instant::now());
+        ids
     }
 }
 
-fn fetch_google_calendar(d: Date) -> Option<Vec<Event>> {
-    let token = crate::gtasks::access_token()?;
-    let start_utc = local_midnight_utc_st(d)?;
-    let next_day = add_days(d.0, d.1, d.2, 1);
-    let end_utc = local_midnight_utc_st(next_day)?;
-
+fn fetch_single_calendar(token: &str, cal_id: &str, d: Date, time_min: &str, time_max: &str) -> Result<Vec<Event>, String> {
     let url = format!(
-        "https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={}&timeMax={}&singleEvents=true&orderBy=startTime&maxResults=12",
-        url_enc(&format_rfc3339_utc(start_utc)),
-        url_enc(&format_rfc3339_utc(end_utc)),
+        "https://www.googleapis.com/calendar/v3/calendars/{}/events?timeMin={}&timeMax={}&singleEvents=true&orderBy=startTime&maxResults=15",
+        url_enc(cal_id),
+        url_enc(time_min),
+        url_enc(time_max),
     );
     let auth = format!("Bearer {token}");
-    let (status, body) = crate::http::request("GET", &url, &[("Authorization", auth.as_str())], None).ok()?;
+    let (status, body) = crate::http::request("GET", &url, &[("Authorization", auth.as_str())], None)?;
     if status >= 400 {
-        crate::log::line("kalender", &format!("Google Calendar HTTP {status}"));
-        return None;
+        let msg = json::parse(&body)
+            .and_then(|j| j.get("error")?.get("message")?.as_str().map(String::from))
+            .unwrap_or_default();
+        return Err(format!("HTTP {status} {msg}"));
     }
-    let root = json::parse(&body)?;
+    let Some(root) = json::parse(&body) else {
+        return Err("respons bukan JSON".into());
+    };
     let mut out = Vec::new();
     if let Some(items) = root.get("items").and_then(Json::as_arr) {
         for item in items {
@@ -159,16 +244,78 @@ fn fetch_google_calendar(d: Date) -> Option<Vec<Event>> {
                 .unwrap_or("(Tanpa judul)")
                 .to_string();
             let start = item.get("start");
-            let minute = start
-                .and_then(|st| st.get("dateTime"))
-                .and_then(Json::as_str)
-                .and_then(|dt| parse_gcal_datetime(dt, d))
-                .and_then(|(ev_d, m)| (ev_d == d).then_some(m));
-            out.push(Event { title, minute });
+            let end = item.get("end");
+
+            if let Some(dt) = start.and_then(|st| st.get("dateTime")).and_then(Json::as_str) {
+                if let Some((ev_d, m)) = parse_gcal_datetime(dt) {
+                    if ev_d == d {
+                        out.push(Event { title, minute: Some(m) });
+                    }
+                }
+            } else if let Some(sd_str) = start.and_then(|st| st.get("date")).and_then(Json::as_str) {
+                if let Some(sd) = parse_ymd(sd_str) {
+                    let ed = end
+                        .and_then(|en| en.get("date"))
+                        .and_then(Json::as_str)
+                        .and_then(parse_ymd);
+                    if all_day_includes(sd, ed, d) {
+                        out.push(Event { title, minute: None });
+                    }
+                }
+            }
         }
     }
-    out.sort_by_key(|e| e.minute.map_or(0, |m| m + 1));
-    Some(out)
+    Ok(out)
+}
+
+fn fetch_google_calendar(state: &mut GCalState, d: Date) -> Option<Vec<Event>> {
+    let Some(token) = crate::gtasks::access_token() else {
+        if !state.logged_no_token {
+            state.logged_no_token = true;
+            crate::log::line("kalender", "Google Calendar: belum ada token OAuth");
+        }
+        return None;
+    };
+    state.logged_no_token = false;
+
+    let start_utc = local_midnight_utc_st(d)?;
+    let next_day = add_days(d.0, d.1, d.2, 1);
+    let end_utc = local_midnight_utc_st(next_day)?;
+    let time_min = format_rfc3339_utc(start_utc);
+    let time_max = format_rfc3339_utc(end_utc);
+
+    let cals = state.calendar_ids(&token);
+    let mut combined = Vec::new();
+    let mut any_ok = false;
+    for cal_id in &cals {
+        match fetch_single_calendar(&token, cal_id, d, &time_min, &time_max) {
+            Ok(list) => {
+                any_ok = true;
+                for ev in list {
+                    if !combined
+                        .iter()
+                        .any(|x: &Event| x.minute == ev.minute && x.title.eq_ignore_ascii_case(&ev.title))
+                    {
+                        combined.push(ev);
+                    }
+                }
+            }
+            Err(e) => {
+                if cal_id == "primary" {
+                    crate::log::line("kalender", &format!("Google Calendar ({cal_id}) gagal: {e}"));
+                }
+            }
+        }
+    }
+    if !any_ok {
+        return None;
+    }
+    combined.sort_by_key(|e| e.minute.map_or(0, |m| m + 1));
+    crate::log::line(
+        "kalender",
+        &format!("Google Calendar {:04}-{:02}-{:02} ({} kalender) -> {} acara", d.0, d.1, d.2, cals.len(), combined.len()),
+    );
+    Some(combined)
 }
 
 fn read(store: &AppointmentStore, d: Date) -> Option<Vec<Event>> {
@@ -257,6 +404,7 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {
                 },
             );
         }
+        let mut gcal_state = GCalState::new();
         while let Ok(mut d) = req_rx.recv() {
             while let Ok(n) = req_rx.try_recv() {
                 d = n;
@@ -265,7 +413,7 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {
                 let t = crate::time::local_now();
                 fake(d, (t.year, t.month, t.day))
             } else {
-                let gcal = fetch_google_calendar(d);
+                let gcal = fetch_google_calendar(&mut gcal_state, d);
                 let win = store.as_ref().and_then(|s| read(s, d));
                 merge_events(gcal, win)
             };
@@ -276,4 +424,22 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {
         }
     });
     Agenda { requests: req_tx, answers: ans_rx }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_day_range_excludes_previous_day() {
+        assert!(!all_day_includes((2026, 11, 20), Some((2026, 11, 21)), (2026, 11, 21)));
+        assert!(all_day_includes((2026, 11, 21), Some((2026, 11, 22)), (2026, 11, 21)));
+        assert!(all_day_includes((2026, 11, 20), Some((2026, 11, 23)), (2026, 11, 21)));
+    }
+
+    #[test]
+    fn parses_rfc3339_with_offset() {
+        assert!(parse_gcal_datetime("2026-11-21T14:30:00+07:00").is_some());
+        assert!(parse_gcal_datetime("2026-11-21T07:30:00Z").is_some());
+    }
 }

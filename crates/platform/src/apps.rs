@@ -94,6 +94,36 @@ pub fn find_prefix(prefix: &str) -> Option<App> {
     g.as_ref()?.iter().find(|a| a.path.to_ascii_lowercase().starts_with(prefix)).cloned()
 }
 
+/// Finds an installed Windows app by display name (exact match first, then substring/token match).
+pub fn find_by_name(query: &str) -> Option<App> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.len() < 2 || q == "windows" {
+        return None;
+    }
+    ensure_loaded();
+    let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let list = g.as_ref()?;
+    // 1. Exact case-insensitive match (e.g. "WhatsApp" == "WhatsApp").
+    if let Some(a) = list.iter().find(|a| a.name.trim().eq_ignore_ascii_case(&q)) {
+        return Some(a.clone());
+    }
+    // 2. Display name starts with or ends with query (e.g. "Chrome" -> "Google Chrome").
+    if let Some(a) = list.iter().find(|a| {
+        let n = a.name.trim().to_ascii_lowercase();
+        n.starts_with(&q) || n.ends_with(&q)
+    }) {
+        return Some(a.clone());
+    }
+    // 3. Substring match on name or AUMID (e.g. "WhatsApp" in "5319275A.WhatsAppDesktop_...").
+    list.iter()
+        .find(|a| {
+            let n = a.name.to_ascii_lowercase();
+            let p = a.path.to_ascii_lowercase();
+            n.contains(&q) || (q.len() >= 4 && p.contains(&q))
+        })
+        .cloned()
+}
+
 pub fn name_for_prefix(prefix: &str) -> Option<String> {
     let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     g.as_ref()?.iter().find(|a| a.path.to_ascii_lowercase().starts_with(prefix)).map(|a| a.name.clone())

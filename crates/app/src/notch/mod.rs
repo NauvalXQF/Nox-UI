@@ -462,6 +462,8 @@ pub struct Notch {
     cal_sel: i32,
     agenda: Option<nacre_platform::agenda::Agenda>,
     cal_events: Option<(views::Date, Option<Vec<nacre_platform::agenda::Event>>)>,
+    cal_fetched_at: Option<Instant>,
+    cal_in_flight: bool,
     send: Option<SendSess>,
     send_err: bool,
     media_app: String,
@@ -661,6 +663,8 @@ impl Notch {
                 send: None,
                 send_err: false,
                 cal_events: None,
+                cal_fetched_at: None,
+                cal_in_flight: false,
                 media_app: String::new(),
                 app_icons: std::collections::HashMap::new(),
                 vis: opts.mode,
@@ -1090,7 +1094,12 @@ impl Notch {
 
     fn ensure_events(&mut self) {
         let date = self.cal_date();
-        if self.cal_events.as_ref().is_some_and(|(d, _)| *d == date) {
+        let same_date = self.cal_events.as_ref().is_some_and(|(d, _)| *d == date);
+        let fresh = same_date
+            && self
+                .cal_fetched_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30));
+        if fresh || (same_date && self.cal_in_flight) {
             return;
         }
         if self.agenda.is_none() {
@@ -1098,6 +1107,7 @@ impl Notch {
             self.agenda = Some(nacre_platform::agenda::spawn(move || post(hw, WM_AGENDA)));
         }
         if let Some(a) = &self.agenda {
+            self.cal_in_flight = true;
             let _ = a.requests.send(date);
         }
     }
@@ -1107,6 +1117,8 @@ impl Notch {
         let mut got = false;
         while let Ok(ans) = a.answers.try_recv() {
             self.cal_events = Some(ans);
+            self.cal_fetched_at = Some(Instant::now());
+            self.cal_in_flight = false;
             got = true;
         }
         if got && self.mode == Mode::Open(Tab::Timer) {
@@ -1353,12 +1365,19 @@ impl Notch {
                     if newly_synced {
                         // Refresh Google Calendar agendas right after unified Google OAuth syncs.
                         self.cal_events = None;
+                        self.cal_fetched_at = None;
+                        self.cal_in_flight = false;
                         self.ensure_events();
                     }
                 }
                 nacre_platform::gtasks::Event::Synced(list) => {
                     self.todos.merge_remote(list, now);
                     self.save_todos();
+                    // Allow calendar to re-fetch fresh events from Google Calendar on next open / immediately if open.
+                    self.cal_fetched_at = None;
+                    if self.mode == Mode::Open(Tab::Timer) {
+                        self.ensure_events();
+                    }
                     changed = true;
                 }
                 nacre_platform::gtasks::Event::Created { local_id, remote_id } => {
@@ -2825,6 +2844,14 @@ impl Notch {
             Action::SendDone => self.stop_send(),
             Action::CalDay(n) => {
                 self.cal_sel = (self.cal_sel + n).clamp(-3650, 3650);
+                self.cal_fetched_at = None;
+                self.cal_in_flight = false;
+                self.render();
+            }
+            Action::CalRefresh => {
+                self.cal_fetched_at = None;
+                self.cal_in_flight = false;
+                self.ensure_events();
                 self.render();
             }
             Action::NotifFocus(id) => {

@@ -30,6 +30,7 @@ pub enum Action {
     TimerPlus,
     TimerMinus,
     CalDay(i32),
+    CalRefresh,
     SendDone,
     NotifFocus(u32),
     NotifDismiss(u32),
@@ -2057,26 +2058,74 @@ fn calendar_col(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h:
         }
     }
     let is_today = cal.sel == cal.today;
-    let line = match &cal.events {
-        Events::Loading => "\u{2026}".to_string(),
-        Events::Unavailable => String::new(),
-        Events::List([]) => tr(if is_today { "Tidak ada acara hari ini" } else { "Tidak ada acara" }).to_string(),
-        Events::List(list) => {
-            let e = &list[0];
-            let when = match e.minute {
-                Some(m) if crate::prefs::get().clock_24h => format!("{:02}.{:02}  ", m / 60, m % 60),
-                Some(m) => format!("{}.{:02} {}  ", (m / 60 + 11) % 12 + 1, m % 60, if m < 720 { "AM" } else { "PM" }),
-                None => String::new(),
-            };
-            let more = if list.len() > 1 { format!("  +{}", list.len() - 1) } else { String::new() };
-            format!("{when}{}{more}", e.title)
+    let agenda_top = ny + dia + p.px(12.0);
+    let agenda_bot = y + h - p.px(4.0);
+    let agenda_h = (agenda_bot - agenda_top).max(p.px(22.0));
+    regions.push(Region {
+        x,
+        y: agenda_top,
+        w,
+        h: agenda_h,
+        action: Action::CalRefresh,
+        vis: None,
+        hover_bg: None,
+    });
+
+    match &cal.events {
+        Events::Loading => {
+            let ly = y + h - p.px(18.0);
+            p.sym(c, Sym::Calendar, x + p.px(8.0), ly + p.px(6.5), 10.5, WHITE, 0.5);
+            p.text(c, "\u{2026}", x + p.px(18.0), ly, 10.5, 500, WHITE, 0.60, Anchor::Left, w - p.px(20.0));
         }
-    };
-    if !line.is_empty() {
-        let ly = y + h - p.px(18.0);
-        p.sym(c, Sym::Calendar, x + p.px(8.0), ly + p.px(6.5), 10.5, WHITE, 0.5);
-        let maxw = w - p.px(20.0);
-        let shown = p.fit(&line, 10.5, 500, maxw);
-        p.text(c, &shown, x + p.px(18.0), ly, 10.5, 500, WHITE, 0.72, Anchor::Left, maxw + p.px(4.0));
+        Events::Unavailable => {}
+        Events::List([]) => {
+            let ly = y + h - p.px(18.0);
+            p.sym(c, Sym::Calendar, x + p.px(8.0), ly + p.px(6.5), 10.5, WHITE, 0.5);
+            let maxw = w - p.px(20.0);
+            let msg = tr(if is_today { "Tidak ada acara hari ini" } else { "Tidak ada acara" });
+            p.text(c, &p.fit(msg, 10.5, 500, maxw), x + p.px(18.0), ly, 10.5, 500, WHITE, 0.62, Anchor::Left, maxw + p.px(4.0));
+        }
+        Events::List(list) => {
+            let row_h = p.px(20.0);
+            let show_n = list.len().min(2);
+            let start_y = (agenda_bot - show_n as f32 * row_h).max(agenda_top);
+            let maxw = w - p.px(16.0);
+            for (idx, e) in list.iter().take(show_n).enumerate() {
+                let ry = start_y + idx as f32 * row_h;
+                let when = match e.minute {
+                    Some(m) if crate::prefs::get().clock_24h => format!("{:02}:{:02} ", m / 60, m % 60),
+                    Some(m) => format!("{}:{:02}{} ", (m / 60 + 11) % 12 + 1, m % 60, if m < 720 { "a" } else { "p" }),
+                    None => String::new(),
+                };
+                let extra = if idx == show_n - 1 && list.len() > show_n {
+                    format!("  +{}", list.len() - show_n)
+                } else {
+                    String::new()
+                };
+                let dot = p.px(4.5);
+                p.rect(
+                    c,
+                    x + p.px(4.0),
+                    ry + p.px(5.0),
+                    dot,
+                    dot,
+                    dot / 2.0,
+                    Color { A: 240, R: accent[0], G: accent[1], B: accent[2] },
+                );
+                let line = format!("{when}{}{extra}", e.title);
+                p.text(
+                    c,
+                    &p.fit(&line, 10.5, if idx == 0 { 600 } else { 500 }, maxw),
+                    x + p.px(13.0),
+                    ry,
+                    10.5,
+                    if idx == 0 { 600 } else { 500 },
+                    WHITE,
+                    if idx == 0 { 0.90 } else { 0.66 },
+                    Anchor::Left,
+                    maxw + p.px(4.0),
+                );
+            }
+        }
     }
 }

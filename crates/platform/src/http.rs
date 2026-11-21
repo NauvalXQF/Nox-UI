@@ -84,7 +84,7 @@ fn open_and_send(
             PCWSTR::null(),
             0,
         ))?;
-        let _ = WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, recv_timeout_ms);
+        let _ = WinHttpSetTimeouts(session.0, 15_000, 15_000, 30_000, recv_timeout_ms);
         let connect = Handle::new(WinHttpConnect(session.0, &host_h, parsed.port, 0))?;
         let flags = if parsed.https { WINHTTP_FLAG_SECURE } else { windows::Win32::Networking::WinHttp::WINHTTP_OPEN_REQUEST_FLAGS(0) };
         let req = Handle::new(WinHttpOpenRequest(
@@ -96,6 +96,7 @@ fn open_and_send(
             std::ptr::null(),
             flags,
         ))?;
+        let _ = WinHttpSetTimeouts(req.0, 15_000, 15_000, 30_000, recv_timeout_ms);
 
         for (k, v) in headers {
             let line = format!("{k}: {v}\r\n");
@@ -112,9 +113,9 @@ fn open_and_send(
             _ => (None, 0),
         };
         WinHttpSendRequest(req.0, None, ptr, len, len, 0)
-            .map_err(|e| format!("WinHttpSendRequest: {e}"))?;
+            .map_err(|e| format_winhttp_err("WinHttpSendRequest", &e))?;
         WinHttpReceiveResponse(req.0, std::ptr::null_mut())
-            .map_err(|e| format!("WinHttpReceiveResponse: {e}"))?;
+            .map_err(|e| format_winhttp_err("WinHttpReceiveResponse", &e))?;
 
         let mut status: u32 = 0;
         let mut sz = std::mem::size_of::<u32>() as u32;
@@ -165,6 +166,17 @@ pub fn request(
     Ok((status, String::from_utf8_lossy(&out).into_owned()))
 }
 
+fn format_winhttp_err(stage: &str, e: &windows_core::Error) -> String {
+    let code = e.code().0 as u32;
+    if code == 0x8007_2EE2 || (code & 0xFFFF) == 12002 {
+        "Waktu habis (timeout) menunggu respons server. Coba lagi atau pilih model Flash.".into()
+    } else if code == 0x8007_2EE7 || (code & 0xFFFF) == 12007 {
+        "Tidak dapat menjangkau server (periksa koneksi internet).".into()
+    } else {
+        format!("{stage}: {e}")
+    }
+}
+
 /// Streams a POST response incrementally chunk-by-chunk (e.g. Gemini SSE) while respecting `cancel`.
 pub fn stream_post(
     url: &str,
@@ -173,7 +185,8 @@ pub fn stream_post(
     cancel: &AtomicBool,
     mut on_chunk: impl FnMut(&[u8]),
 ) -> Result<u16, String> {
-    let (_s, _c, req, status) = open_and_send("POST", url, headers, Some(body), 60_000)?;
+    // Thinking/reasoning models (Gemini 3.5/3.6/4) can spend >60s before flushing first SSE bytes.
+    let (_s, _c, req, status) = open_and_send("POST", url, headers, Some(body), 180_000)?;
     let mut buf = [0u8; 4096];
     unsafe {
         loop {
