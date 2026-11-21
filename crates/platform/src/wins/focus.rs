@@ -128,6 +128,37 @@ fn is_cloaked(hwnd: HWND) -> bool {
 /// `shell:AppsFolder\<aumid>` (resolved directly or via `apps::find_by_name`) for apps minimized to
 /// the system tray or living on another Virtual Desktop (e.g. WhatsApp, Discord, Telegram).
 pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
+    focus_app_by_identity_hwnd(aumid, app_name).is_some()
+}
+
+/// Finds the best top-level window HWND matching `aumid` / `app_name` without changing focus.
+pub fn find_app_window(aumid: &str, app_name: &str) -> Option<isize> {
+    let (hwnd, _, _) = locate_app_window(aumid, app_name);
+    (hwnd != 0).then_some(hwnd)
+}
+
+/// Focuses the app matching `aumid` / `app_name` and returns its top-level `HWND` (or `0` when
+/// woken asynchronously via `shell:AppsFolder\<aumid>` and not yet visible as a top-level window).
+pub fn focus_app_by_identity_hwnd(aumid: &str, app_name: &str) -> Option<isize> {
+    let (best_hwnd, best_cloaked, resolved_shell) = locate_app_window(aumid, app_name);
+    // If matched window is on the current virtual desktop (not cloaked), focus it directly.
+    if best_hwnd != 0 && !best_cloaked {
+        if force_foreground(best_hwnd) {
+            return Some(best_hwnd);
+        }
+    }
+    // Otherwise (minimized to tray, closed, or cloaked on another virtual desktop), activate via AppsFolder.
+    if let Some(shell) = resolved_shell {
+        crate::launch::open(&shell);
+        return Some(best_hwnd);
+    }
+    if best_hwnd != 0 && force_foreground(best_hwnd) {
+        return Some(best_hwnd);
+    }
+    None
+}
+
+fn locate_app_window(aumid: &str, app_name: &str) -> (isize, bool, Option<String>) {
     use windows::core::BOOL;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowLongW, GetWindowThreadProcessId, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
@@ -163,7 +194,7 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
     let name_lo = if is_generic_windows { String::new() } else { name_clean.to_ascii_lowercase() };
 
     if aumid_lo.is_empty() && name_lo.is_empty() {
-        return false;
+        return (0, false, resolved_shell);
     }
 
     struct Search {
@@ -258,19 +289,5 @@ pub fn focus_app_by_identity(aumid: &str, app_name: &str) -> bool {
     unsafe {
         let _ = EnumWindows(Some(cb), LPARAM(&mut search as *mut Search as isize));
     }
-    // If matched window is on the current virtual desktop (not cloaked), focus it directly.
-    if search.best_hwnd != 0 && !search.best_cloaked {
-        if force_foreground(search.best_hwnd) {
-            return true;
-        }
-    }
-    // Otherwise (minimized to tray, closed, or cloaked on another virtual desktop), activate via AppsFolder.
-    if let Some(shell) = resolved_shell {
-        crate::launch::open(&shell);
-        return true;
-    }
-    if search.best_hwnd != 0 {
-        return force_foreground(search.best_hwnd);
-    }
-    false
+    (search.best_hwnd, search.best_cloaked, resolved_shell)
 }

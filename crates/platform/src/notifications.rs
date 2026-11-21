@@ -12,7 +12,7 @@ use windows::UI::Notifications::{
     KnownNotificationBindings, NotificationKinds, UserNotification,
     UserNotificationChangedEventArgs, UserNotificationChangedKind,
 };
-use windows::Win32::Foundation::{CloseHandle, APPMODEL_ERROR_NO_PACKAGE, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, APPMODEL_ERROR_NO_PACKAGE, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -20,18 +20,26 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    IUIAutomationEventHandler, IUIAutomationEventHandler_Impl, SetWinEventHook, TreeScope_Descendants,
-    TreeScope_Subtree, UnhookWinEvent, HWINEVENTHOOK, UIA_EVENT_ID, UIA_TextControlTypeId,
+    IUIAutomationEventHandler, IUIAutomationEventHandler_Impl, IUIAutomationInvokePattern,
+    IUIAutomationSelectionItemPattern, SetWinEventHook, TreeScope_Descendants, TreeScope_Subtree,
+    UnhookWinEvent, HWINEVENTHOOK, UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
+    UIA_DataItemControlTypeId, UIA_EVENT_ID, UIA_InvokePatternId, UIA_ListItemControlTypeId,
+    UIA_SelectionItemPatternId, UIA_TextControlTypeId, UIA_TreeItemControlTypeId,
     UIA_Window_WindowOpenedEventId,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    PeekMessageW, TranslateMessage, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, MSG, PM_REMOVE,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, SetCursorPos,
+    TranslateMessage, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, MSG, PM_REMOVE,
     WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
-use windows_core::implement;
+use windows_core::{implement, BOOL};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -899,6 +907,562 @@ pub fn spawn(notify: impl Fn() + Send + Sync + 'static) -> Notifications {
     Notifications { stop, events: rx }
 }
 
+// =============================================================================
+// Deep Notification Activation (Live Toast Invoke + Chat Room UIA Navigation)
+// =============================================================================
+
+/// Strips invisible Unicode bidi/format markers (WhatsApp/Telegram routinely wrap contact names
+/// in `\u{2068}`/`\u{2069}`/`\u{200e}`/`\u{200f}`) and collapses whitespace for robust matching.
+fn normalize_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true;
+    for ch in s.chars() {
+        if matches!(
+            ch,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        ) {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
+            prev_space = false;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Strips trailing unread count suffixes like `"papa (3 messages)"` or `"Grup Kelas (2 pesan)"`.
+fn strip_count_suffix(s: &str) -> &str {
+    let trimmed = s.trim();
+    if let Some(open) = trimmed.rfind(" (") {
+        if trimmed.ends_with(')') {
+            let inside = &trimmed[open + 2..trimmed.len() - 1];
+            let starts_digit = inside.chars().next().is_some_and(|c| c.is_ascii_digit());
+            if starts_digit {
+                return trimmed[..open].trim();
+            }
+        }
+    }
+    trimmed
+}
+
+/// Extracts ordered chat-room search candidates from a notification's `(title, body)`.
+/// Handles direct chats (`"papa"`), unread counters (`"papa (2 messages)"`), and group formats
+/// (`"Budi @ Grup Kelas"`, `"Grup Kelas: Budi"`, `"Budi in Grup Kelas"`).
+fn extract_chat_targets(title: &str, app_name: &str) -> Vec<String> {
+    let clean = strip_count_suffix(title);
+    let norm_app = normalize_label(app_name);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let n = normalize_label(strip_count_suffix(raw));
+        if n.len() >= 2 && n != norm_app && !out.iter().any(|x| x == &n) {
+            out.push(n);
+        }
+    };
+
+    // Group notifications: prefer the group/room name first.
+    if let Some((left, right)) = clean.split_once(" @ ") {
+        push(right);
+        push(left);
+    } else if let Some((left, right)) = clean.split_once(": ") {
+        push(left);
+        push(right);
+    } else if let Some((left, right)) = clean.split_once(" in ") {
+        push(right);
+        push(left);
+    }
+    push(clean);
+    out
+}
+
+fn is_chat_app(aumid: &str, app_name: &str) -> bool {
+    let hay = format!("{} {}", aumid.to_ascii_lowercase(), app_name.to_ascii_lowercase());
+    [
+        "whatsapp",
+        "telegram",
+        "discord",
+        "slack",
+        "teams",
+        "line",
+        "signal",
+        "messenger",
+        "wechat",
+        "viber",
+        "element",
+    ]
+    .iter()
+    .any(|k| hay.contains(k))
+}
+
+fn score_chat_candidate(candidate_norm: &str, target_norm: &str) -> u8 {
+    if candidate_norm.is_empty() || target_norm.is_empty() {
+        return 0;
+    }
+    if candidate_norm == target_norm {
+        return 100;
+    }
+    if let Some(rest) = candidate_norm.strip_prefix(target_norm) {
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| matches!(c, ' ' | ',' | ':' | ';' | '·' | '-' | '–' | '—' | '(' | '\n'))
+        {
+            return 90;
+        }
+    }
+    if let Some(pos) = candidate_norm.find(target_norm) {
+        let before_ok = pos == 0
+            || candidate_norm[..pos]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_alphanumeric());
+        let after_pos = pos + target_norm.len();
+        let after_ok = after_pos == candidate_norm.len()
+            || candidate_norm[after_pos..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return 78;
+        }
+    }
+    0
+}
+
+/// Tier 1: If Windows' native toast banner matching `(app_name, title)` is still alive on screen,
+/// invoke it via `IUIAutomationInvokePattern` so Windows delivers the app's native `launch` payload.
+fn try_invoke_live_toast(app_name: &str, title: &str) -> bool {
+    let target_title = normalize_label(strip_count_suffix(title));
+    if target_title.is_empty() {
+        return false;
+    }
+    let target_app = normalize_label(app_name);
+
+    let mut toast_hwnds: Vec<isize> = Vec::new();
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lp: LPARAM) -> BOOL {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if is_toast_host_pid(pid)
+            && window_class_name(hwnd) == "Windows.UI.Core.CoreWindow"
+            && looks_like_toast_rect(hwnd)
+        {
+            let list = &mut *(lp.0 as *mut Vec<isize>);
+            list.push(hwnd.0 as isize);
+        }
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut toast_hwnds as *mut Vec<isize> as isize));
+    }
+    if toast_hwnds.is_empty() {
+        return false;
+    }
+
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+    let invoked = (|| -> bool {
+        let Ok(uia) = (unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }) else {
+            return false;
+        };
+        let Ok(all_cond) = (unsafe { uia.CreateTrueCondition() }) else {
+            return false;
+        };
+        for raw_h in toast_hwnds {
+            let hwnd = HWND(raw_h as *mut core::ffi::c_void);
+            let Ok(el) = (unsafe { uia.ElementFromHandle(hwnd) }) else {
+                continue;
+            };
+            let win_name = unsafe { el.CurrentName() }
+                .ok()
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| window_title(hwnd));
+            let Ok(arr) = (unsafe { el.FindAll(TreeScope_Descendants, &all_cond) }) else {
+                continue;
+            };
+            let n = unsafe { arr.Length() }.unwrap_or(0).min(48);
+            let mut nodes: Vec<(String, String, bool)> = Vec::new();
+            let mut invoke_target: Option<IUIAutomationElement> = None;
+            for i in 0..n {
+                let Ok(child) = (unsafe { arr.GetElement(i) }) else {
+                    continue;
+                };
+                let ctype = unsafe { child.CurrentControlType() }.ok();
+                let is_text = ctype == Some(UIA_TextControlTypeId);
+                let aid = unsafe { child.CurrentAutomationId() }
+                    .ok()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default();
+                let name = unsafe { child.CurrentName() }
+                    .ok()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default();
+                let al = aid.to_ascii_lowercase();
+                if invoke_target.is_none()
+                    && (al.contains("normaltoastview") || al.contains("toastcontent") || al == "toastbackground")
+                    && unsafe { child.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }.is_ok()
+                {
+                    invoke_target = Some(child);
+                }
+                if !aid.is_empty() || !name.trim().is_empty() {
+                    nodes.push((aid, name, is_text));
+                }
+            }
+            let Some((parsed_app, parsed_title, _)) = parse_toast_nodes(&win_name, &nodes) else {
+                continue;
+            };
+            let pt = normalize_label(strip_count_suffix(&parsed_title));
+            let pa = normalize_label(&parsed_app);
+            let title_match = pt == target_title || pt.contains(&target_title) || target_title.contains(&pt);
+            let app_match = target_app.is_empty()
+                || target_app == "windows"
+                || pa == "windows"
+                || pa == target_app
+                || pa.contains(&target_app)
+                || target_app.contains(&pa);
+            if !title_match || !app_match {
+                continue;
+            }
+            let target_el = invoke_target.unwrap_or(el);
+            if let Ok(pat) = unsafe { target_el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) } {
+                if unsafe { pat.Invoke() }.is_ok() {
+                    crate::log::line("notif", &format!("nav app={app_name} target=\"{title}\" via=live_toast"));
+                    return true;
+                }
+            }
+        }
+        false
+    })();
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    invoked
+}
+
+fn click_point_safely(expected_hwnd: HWND, cx: i32, cy: i32) -> bool {
+    unsafe {
+        if GetForegroundWindow() != expected_hwnd {
+            return false;
+        }
+        let mut prev = POINT::default();
+        let have_prev = GetCursorPos(&mut prev).is_ok();
+        if SetCursorPos(cx, cy).is_err() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(12));
+        let inputs = [
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: MOUSEEVENTF_LEFTDOWN,
+                        ..Default::default()
+                    },
+                },
+            },
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: MOUSEEVENTF_LEFTUP,
+                        ..Default::default()
+                    },
+                },
+            },
+        ];
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(Duration::from_millis(18));
+        if have_prev {
+            let _ = SetCursorPos(prev.x, prev.y);
+        }
+        sent == 2
+    }
+}
+
+fn has_webview_child(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
+    struct Found(bool);
+    unsafe extern "system" fn cb(child: HWND, lp: LPARAM) -> BOOL {
+        let cls = window_class_name(child);
+        if cls.starts_with("Chrome_") || cls.contains("WebView") {
+            let f = &mut *(lp.0 as *mut Found);
+            f.0 = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut found = Found(false);
+    unsafe {
+        let _ = EnumChildWindows(Some(hwnd), Some(cb), LPARAM(&mut found as *mut Found as isize));
+    }
+    found.0
+}
+
+fn try_select_chat_in_hwnd(
+    uia: &IUIAutomation,
+    cond: &IUIAutomationCondition,
+    hwnd: HWND,
+    targets: &[String],
+    app_name: &str,
+) -> bool {
+    let mut win_rc = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut win_rc) }.is_err() {
+        return false;
+    }
+    let win_w = win_rc.right - win_rc.left;
+    let win_h = win_rc.bottom - win_rc.top;
+    if win_w < 240 || win_h < 200 {
+        return false;
+    }
+
+    // Chat lists live in the left sidebar (below titlebar + search box); widen when app is compact.
+    let left_min = win_rc.left + 8;
+    let left_max = if win_w < 680 {
+        win_rc.left + (win_w as f32 * 0.85) as i32
+    } else {
+        win_rc.left + (win_w as f32 * 0.46) as i32
+    };
+    let top_min = win_rc.top + 86;
+    let bottom_max = win_rc.bottom - 12;
+
+    let Ok(root) = (unsafe { uia.ElementFromHandle(hwnd) }) else {
+        return false;
+    };
+    let Ok(arr) = (unsafe { root.FindAll(TreeScope_Descendants, cond) }) else {
+        return false;
+    };
+    let total = unsafe { arr.Length() }.unwrap_or(0).min(500);
+
+    let mut best: Option<(u8, u8, i32, IUIAutomationElement, RECT)> = None;
+    for i in 0..total {
+        let Ok(el) = (unsafe { arr.GetElement(i) }) else {
+            continue;
+        };
+        let Ok(rc) = (unsafe { el.CurrentBoundingRectangle() }) else {
+            continue;
+        };
+        let ew = rc.right - rc.left;
+        let eh = rc.bottom - rc.top;
+        if ew <= 4 || eh <= 4 || eh > 150 {
+            continue;
+        }
+        let cx = (rc.left + rc.right) / 2;
+        let cy = (rc.top + rc.bottom) / 2;
+        if cx < left_min || cx > left_max || cy < top_min || cy > bottom_max {
+            continue;
+        }
+        let Ok(name_bstr) = (unsafe { el.CurrentName() }) else {
+            continue;
+        };
+        let norm_name = normalize_label(&name_bstr.to_string());
+        if norm_name.is_empty() {
+            continue;
+        }
+        let mut score = 0u8;
+        for (ti, t) in targets.iter().enumerate() {
+            let s = score_chat_candidate(&norm_name, t);
+            // Slightly favor higher-priority extracted target (e.g. group name before sender).
+            let adjusted = s.saturating_sub((ti as u8).saturating_mul(3));
+            if adjusted > score {
+                score = adjusted;
+            }
+        }
+        if score == 0 {
+            continue;
+        }
+        let ctype = unsafe { el.CurrentControlType() }.ok();
+        let is_row = ctype == Some(UIA_ListItemControlTypeId)
+            || ctype == Some(UIA_DataItemControlTypeId)
+            || ctype == Some(UIA_TreeItemControlTypeId);
+        let kind_rank: u8 = if is_row { 2 } else { 1 };
+        let better = match &best {
+            None => true,
+            Some((bs, bk, by, _, _)) => {
+                score > *bs || (score == *bs && (kind_rank > *bk || (kind_rank == *bk && cy < *by)))
+            }
+        };
+        if better {
+            best = Some((score, kind_rank, cy, el, rc));
+        }
+    }
+
+    let Some((score, _, _, matched_el, matched_rc)) = best else {
+        return false;
+    };
+
+    // If we matched a child Text node inside a chat row, walk up to its enclosing row item if present.
+    let mut activate_el = matched_el;
+    let mut activate_rc = matched_rc;
+    if let Ok(walker) = unsafe { uia.ControlViewWalker() } {
+        let mut cur = activate_el.clone();
+        for _ in 0..4 {
+            let Ok(parent) = (unsafe { walker.GetParentElement(&cur) }) else {
+                break;
+            };
+            let ptype = unsafe { parent.CurrentControlType() }.ok();
+            if ptype == Some(UIA_ListItemControlTypeId)
+                || ptype == Some(UIA_DataItemControlTypeId)
+                || ptype == Some(UIA_TreeItemControlTypeId)
+                || ptype == Some(UIA_ButtonControlTypeId)
+            {
+                if let Ok(prc) = unsafe { parent.CurrentBoundingRectangle() } {
+                    let ph = prc.bottom - prc.top;
+                    if ph > 12 && ph <= 140 && prc.left >= win_rc.left && prc.right <= left_max + 80 {
+                        activate_el = parent;
+                        activate_rc = prc;
+                        break;
+                    }
+                }
+            }
+            cur = parent;
+        }
+    }
+
+    let is_webview = has_webview_child(hwnd);
+    if !is_webview {
+        if let Ok(sel) = unsafe {
+            activate_el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+        } {
+            if unsafe { sel.Select() }.is_ok() {
+                crate::log::line(
+                    "notif",
+                    &format!("nav app={app_name} target=\"{}\" score={score} via=uia_select", targets[0]),
+                );
+                return true;
+            }
+        }
+        if let Ok(inv) =
+            unsafe { activate_el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
+        {
+            if unsafe { inv.Invoke() }.is_ok() {
+                crate::log::line(
+                    "notif",
+                    &format!("nav app={app_name} target=\"{}\" score={score} via=uia_invoke", targets[0]),
+                );
+                return true;
+            }
+        }
+    }
+
+    // Chromium/WebView2 & Electron chat rows (including WhatsApp WebView2) reliably switch rooms on click.
+    let cx = (activate_rc.left + activate_rc.right) / 2;
+    let cy = (activate_rc.top + activate_rc.bottom) / 2;
+    if click_point_safely(hwnd, cx, cy) {
+        crate::log::line(
+            "notif",
+            &format!(
+                "nav app={app_name} target=\"{}\" score={score} via=uia_click({cx},{cy}) webview={is_webview}",
+                targets[0]
+            ),
+        );
+        return true;
+    }
+    false
+}
+
+fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, targets: Vec<String>) {
+    let _ = std::thread::Builder::new().name("abra-notif-nav".into()).spawn(move || {
+        // Wait briefly for window restoration/foreground transition to settle.
+        std::thread::sleep(Duration::from_millis(140));
+        let mut raw_hwnd = initial_hwnd;
+        for _ in 0..8 {
+            if raw_hwnd != 0 && unsafe { GetForegroundWindow().0 as isize == raw_hwnd } {
+                break;
+            }
+            if let Some(found) = crate::wins::focus::find_app_window(&aumid, &app_name) {
+                raw_hwnd = found;
+                if unsafe { GetForegroundWindow().0 as isize == raw_hwnd } {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(90));
+        }
+        if raw_hwnd == 0 {
+            crate::log::line("notif", &format!("nav app={app_name} aborted: window not found"));
+            return;
+        }
+        let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
+        if unsafe { GetForegroundWindow() != hwnd } {
+            crate::log::line("notif", &format!("nav app={app_name} aborted: window not foreground"));
+            return;
+        }
+
+        let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+        if let Ok(uia) = unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
+            let cond = (|| -> windows_core::Result<IUIAutomationCondition> {
+                let c_list = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_ListItemControlTypeId.0))
+                }?;
+                let c_data = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_DataItemControlTypeId.0))
+                }?;
+                let c_tree = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_TreeItemControlTypeId.0))
+                }?;
+                let c_text = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_TextControlTypeId.0))
+                }?;
+                let c1 = unsafe { uia.CreateOrCondition(&c_list, &c_data) }?;
+                let c2 = unsafe { uia.CreateOrCondition(&c_tree, &c_text) }?;
+                unsafe { uia.CreateOrCondition(&c1, &c2) }
+            })();
+            if let Ok(cond) = cond {
+                if !try_select_chat_in_hwnd(&uia, &cond, hwnd, &targets, &app_name) {
+                    // Retry once after 280ms in case the app was just restored from tray and still rendering.
+                    std::thread::sleep(Duration::from_millis(280));
+                    if unsafe { GetForegroundWindow() == hwnd }
+                        && !try_select_chat_in_hwnd(&uia, &cond, hwnd, &targets, &app_name)
+                    {
+                        crate::log::line(
+                            "notif",
+                            &format!("nav app={app_name} target=\"{}\" not visible in chat sidebar", targets[0]),
+                        );
+                    }
+                }
+            }
+        }
+        if com {
+            unsafe { CoUninitialize() };
+        }
+    });
+}
+
+/// Activates a clicked notification:
+/// 1. If Windows' native toast banner is still visible on screen, invokes it directly so the app
+///    receives its original deep-link `launch` payload.
+/// 2. Otherwise brings the source app window to the foreground.
+/// 3. For messaging apps (WhatsApp, Telegram, Discord, Slack, Teams, etc.), navigates to the
+///    matching chat room (`title`) inside the app's sidebar via UI Automation.
+pub fn activate_notification(aumid: &str, app_name: &str, title: &str, _body: &str) -> bool {
+    if try_invoke_live_toast(app_name, title) {
+        return true;
+    }
+    let Some(hwnd) = crate::wins::focus::focus_app_by_identity_hwnd(aumid, app_name) else {
+        return false;
+    };
+    if is_chat_app(aumid, app_name) {
+        let targets = extract_chat_targets(title, app_name);
+        if !targets.is_empty() {
+            spawn_chat_navigator(aumid.to_string(), app_name.to_string(), hwnd, targets);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,5 +1516,26 @@ mod tests {
             ("".into(), "Bluetooth".into(), true),
         ];
         assert_eq!(parse_toast_nodes("Quick settings", &items), None);
+    }
+
+    #[test]
+    fn normalizes_bidi_markers_and_extracts_chat_targets() {
+        assert_eq!(normalize_label("\u{2068}Papa\u{2069} \u{200E}"), "papa");
+        assert_eq!(
+            extract_chat_targets("\u{2068}Papa\u{2069} (2 messages)", "WhatsApp"),
+            vec!["papa"]
+        );
+        assert_eq!(
+            extract_chat_targets("Budi @ Grup Kelas", "WhatsApp"),
+            vec!["grup kelas", "budi", "budi @ grup kelas"]
+        );
+        assert_eq!(
+            score_chat_candidate("papa, 22:15, lagi dimana?", "papa"),
+            90
+        );
+        assert_eq!(score_chat_candidate("papa", "papa"), 100);
+        assert_eq!(score_chat_candidate("papaya", "papa"), 0);
+        assert!(is_chat_app("5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App", "WhatsApp"));
+        assert!(!is_chat_app("Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "Notepad"));
     }
 }

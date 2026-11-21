@@ -2855,7 +2855,10 @@ impl Notch {
                 self.render();
             }
             Action::NotifFocus(id) => {
-                let target = self.notifs.get(id).map(|n| (n.aumid.clone(), n.app_name.clone()));
+                let target = self
+                    .notifs
+                    .get(id)
+                    .map(|n| (n.aumid.clone(), n.app_name.clone(), n.title.clone(), n.body.clone()));
                 self.notifs.mark_read(id);
                 if self.toast_id == Some(id) {
                     self.toast_id = None;
@@ -2868,10 +2871,18 @@ impl Notch {
                     self.refresh();
                     self.update_visibility();
                 }
-                if let Some((aumid, app_name)) = target {
+                if let Some((aumid, app_name, title, body)) = target {
                     if !aumid.is_empty() || !app_name.is_empty() {
-                        let ok = nacre_platform::wins::focus::focus_app_by_identity(&aumid, &app_name);
-                        log::line("notif", &format!("fokus app={app_name} aumid={aumid} ok={ok}"));
+                        let ok = nacre_platform::notifications::activate_notification(
+                            &aumid,
+                            &app_name,
+                            &title,
+                            &body,
+                        );
+                        log::line(
+                            "notif",
+                            &format!("fokus app={app_name} aumid={aumid} title={title} ok={ok}"),
+                        );
                     }
                 }
             }
