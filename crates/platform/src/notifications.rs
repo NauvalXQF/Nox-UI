@@ -267,8 +267,15 @@ fn looks_like_toast_rect(hwnd: HWND) -> bool {
     }
     let w = rc.right - rc.left;
     let h = rc.bottom - rc.top;
-    // Standard Windows 10/11 toast cards are compact popups (~320-480dp wide, ~60-380dp tall).
-    w >= 160 && w <= 900 && h >= 44 && h <= 640
+    // Allow high-DPI (175%-250%) and Win11 tall/reused ShellExperienceHost toast windows;
+    // parse_toast_nodes strictly verifies toast AutomationIds/markers so non-toast shells are rejected.
+    w >= 120 && w <= 1600 && h >= 40 && h <= 1600
+}
+
+fn is_toast_host_class(cls: &str) -> bool {
+    cls == "Windows.UI.Core.CoreWindow"
+        || cls == "XamlExplorerHostIslandWindow"
+        || cls == "ApplicationFrameWindow"
 }
 
 fn is_chrome_noise(s: &str) -> bool {
@@ -481,7 +488,7 @@ fn extract_uia_toast(
     }
 
     let arr = unsafe { el.FindAll(TreeScope_Descendants, all_cond) }.ok()?;
-    let n = unsafe { arr.Length() }.unwrap_or(0).min(48);
+    let n = unsafe { arr.Length() }.unwrap_or(0).min(96);
     for i in 0..n {
         let Ok(child) = (unsafe { arr.GetElement(i) }) else {
             continue;
@@ -591,13 +598,14 @@ unsafe extern "system" fn win_event_proc(
     _hook: HWINEVENTHOOK,
     _event: u32,
     hwnd: HWND,
-    id_object: i32,
+    _id_object: i32,
     _id_child: i32,
     _thread: u32,
     _time: u32,
 ) {
-    // Filter to top-level window events (`OBJID_WINDOW == 0`).
-    if hwnd.0.is_null() || id_object != 0 {
+    // Accept both top-level and child XAML events (`id_object != 0`), because Windows 11 reuses
+    // ShellExperienceHost's CoreWindow for consecutive toasts and updates child NormalToastView nodes.
+    if hwnd.0.is_null() {
         return;
     }
     let mut pid = 0u32;
@@ -605,7 +613,8 @@ unsafe extern "system" fn win_event_proc(
     if !is_toast_host_pid(pid) {
         return;
     }
-    if window_class_name(hwnd) != "Windows.UI.Core.CoreWindow" {
+    let cls = window_class_name(hwnd);
+    if !is_toast_host_class(&cls) {
         return;
     }
     if let Ok(guard) = HOOK_TX.lock() {
@@ -613,6 +622,26 @@ unsafe extern "system" fn win_event_proc(
             let _ = tx.send(hwnd.0 as isize);
         }
     }
+}
+
+fn collect_visible_toast_hosts() -> Vec<isize> {
+    let mut out: Vec<isize> = Vec::new();
+    unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> BOOL {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if is_toast_host_pid(pid) && is_toast_host_class(&window_class_name(hwnd)) && looks_like_toast_rect(hwnd) {
+            let list = &mut *(lp.0 as *mut Vec<isize>);
+            list.push(hwnd.0 as isize);
+        }
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&mut out as *mut Vec<isize> as isize));
+    }
+    out
 }
 
 fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: &AtomicBool) {
@@ -696,6 +725,8 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
 
     let mut dedup = DedupCache::new();
     let mut pending: Vec<(isize, Instant)> = Vec::new();
+    let mut last_sweep = Instant::now();
+    let mut active_keys: HashSet<String> = HashSet::new();
 
     while !flag.load(Ordering::Relaxed) {
         // Pump WinEventHook messages on this thread.
@@ -714,6 +745,11 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
         }
 
         let now = Instant::now();
+        let do_sweep = now.duration_since(last_sweep) >= Duration::from_millis(400);
+        if do_sweep {
+            last_sweep = now;
+        }
+
         let mut ready = Vec::new();
         pending.retain(|&(h, at)| {
             if now >= at {
@@ -724,15 +760,30 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
             }
         });
 
+        let mut seen_this_sweep: HashSet<String> = HashSet::new();
+        if do_sweep {
+            for h in collect_visible_toast_hosts() {
+                if !ready.contains(&h) {
+                    ready.push(h);
+                }
+            }
+        }
+
         for raw_hwnd in ready {
             let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
-            if !looks_like_toast_rect(hwnd) {
+            if !unsafe { IsWindowVisible(hwnd).as_bool() } || !looks_like_toast_rect(hwnd) {
                 continue;
             }
             let title = window_title(hwnd);
             if let Ok(el) = unsafe { uia.ElementFromHandle(hwnd) } {
                 if let Some(raw) = extract_uia_toast(&el, &all_cond, &title) {
+                    let key = format!("{}\u{1}{}\u{1}{}", raw.app_name.trim(), raw.title.trim(), raw.body.trim());
+                    seen_this_sweep.insert(key.clone());
+                    if active_keys.contains(&key) {
+                        continue;
+                    }
                     if dedup.accept(&raw.app_name, &raw.title, &raw.body) {
+                        active_keys.insert(key);
                         if !emit(tx, notify, Event::Arrived(raw)) {
                             flag.store(true, Ordering::Relaxed);
                             break;
@@ -740,6 +791,9 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
                     }
                 }
             }
+        }
+        if do_sweep {
+            active_keys.retain(|k| seen_this_sweep.contains(k));
         }
 
         std::thread::sleep(Duration::from_millis(40));
@@ -1059,7 +1113,7 @@ fn try_invoke_live_toast(app_name: &str, title: &str) -> bool {
         let mut pid = 0u32;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if is_toast_host_pid(pid)
-            && window_class_name(hwnd) == "Windows.UI.Core.CoreWindow"
+            && is_toast_host_class(&window_class_name(hwnd))
             && looks_like_toast_rect(hwnd)
         {
             let list = &mut *(lp.0 as *mut Vec<isize>);

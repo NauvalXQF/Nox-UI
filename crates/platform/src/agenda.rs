@@ -115,6 +115,62 @@ pub fn parse_schedule_input(raw: &str) -> Option<(Option<(u8, u8)>, String)> {
     Some((None, trimmed.to_string()))
 }
 
+fn parse_inline_date_token(tok: &str, base: Date) -> Option<Date> {
+    let lo = tok.to_ascii_lowercase();
+    if lo == "besok" || lo == "tomorrow" {
+        return Some(add_days(base.0, base.1, base.2, 1));
+    }
+    if lo == "lusa" {
+        return Some(add_days(base.0, base.1, base.2, 2));
+    }
+    // YYYY-MM-DD
+    if tok.len() == 10 && tok.as_bytes()[4] == b'-' && tok.as_bytes()[7] == b'-' {
+        if let Some((y, m, d)) = parse_ymd(tok) {
+            if (1..=12).contains(&m) && (1..=31).contains(&d) {
+                return Some((y, m, d));
+            }
+        }
+    }
+    // DD/MM or DD/MM/YYYY or DD-MM
+    let sep = if tok.contains('/') { '/' } else if tok.contains('-') { '-' } else { return None };
+    let parts: Vec<&str> = tok.split(sep).collect();
+    if parts.len() == 2 {
+        let d: u32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        if (1..=31).contains(&d) && (1..=12).contains(&m) {
+            return Some((base.0, m, d));
+        }
+    } else if parts.len() == 3 {
+        let d: u32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        let y: i32 = parts[2].parse().ok()?;
+        if (2000..=2100).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) {
+            return Some((y, m, d));
+        }
+    }
+    None
+}
+
+/// Parses optional inline date prefix (`"25/11 14:00 Rapat"`, `"2026-11-25 Rapat"`, `"besok 09:00 Kuliah"`)
+/// falling back to `default_date` (the date currently selected in the calendar date picker).
+pub fn parse_schedule_input_for(default_date: Date, raw: &str) -> Option<(Date, Option<(u8, u8)>, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((first, rest)) = trimmed.split_once(char::is_whitespace) {
+        let rest_clean = rest.trim();
+        if !rest_clean.is_empty() {
+            if let Some(parsed_d) = parse_inline_date_token(first, default_date) {
+                let (tm, title) = parse_schedule_input(rest_clean)?;
+                return Some((parsed_d, tm, title));
+            }
+        }
+    }
+    let (tm, title) = parse_schedule_input(trimmed)?;
+    Some((default_date, tm, title))
+}
+
 fn build_event_payload(d: Date, time_hm: Option<(u8, u8)>, title: &str, offset_min: i32) -> String {
     let mut out = String::from("{\"summary\":");
     push_json_str(&mut out, title);
@@ -148,8 +204,8 @@ fn build_event_payload(d: Date, time_hm: Option<(u8, u8)>, title: &str, offset_m
     out
 }
 
-fn create_google_event(d: Date, input: &str) -> Result<(), String> {
-    let Some((time_hm, title)) = parse_schedule_input(input) else {
+fn create_google_event(default_date: Date, input: &str) -> Result<Date, String> {
+    let Some((d, time_hm, title)) = parse_schedule_input_for(default_date, input) else {
         return Err("Judul jadwal kosong.".into());
     };
     let Some(token) = crate::gtasks::access_token() else {
@@ -179,7 +235,7 @@ fn create_google_event(d: Date, input: &str) -> Result<(), String> {
         "kalender",
         &format!("acara dibuat {:04}-{:02}-{:02} {:?} {}", d.0, d.1, d.2, time_hm, title),
     );
-    Ok(())
+    Ok(d)
 }
 
 fn local_midnight(d: Date) -> Option<DateTime> {
@@ -545,9 +601,12 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {
                             Cmd::Fetch(nd) => d = nd,
                             Cmd::Create { date, input } => {
                                 if !fake_mode {
-                                    if let Err(e) = create_google_event(date, &input) {
-                                        let _ = ans_tx.send(AgendaMsg::CreateFailed(e));
-                                        notify();
+                                    match create_google_event(date, &input) {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            let _ = ans_tx.send(AgendaMsg::CreateFailed(e));
+                                            notify();
+                                        }
                                     }
                                 }
                                 d = date;
@@ -613,6 +672,18 @@ mod tests {
         assert_eq!(
             parse_schedule_input("Bayar Listrik"),
             Some((None, "Bayar Listrik".into()))
+        );
+        assert_eq!(
+            parse_schedule_input_for((2026, 11, 21), "25/11 14:00 Rapat"),
+            Some(((2026, 11, 25), Some((14, 0)), "Rapat".into()))
+        );
+        assert_eq!(
+            parse_schedule_input_for((2026, 11, 21), "besok 09:30 Dokter"),
+            Some(((2026, 11, 22), Some((9, 30)), "Dokter".into()))
+        );
+        assert_eq!(
+            parse_schedule_input_for((2026, 11, 21), "2026-12-01 Liburan"),
+            Some(((2026, 12, 1), None, "Liburan".into()))
         );
         let timed = build_event_payload((2026, 11, 21), Some((14, 0)), "Rapat Tim", 420);
         let jt = json::parse(&timed).expect("valid timed event json");

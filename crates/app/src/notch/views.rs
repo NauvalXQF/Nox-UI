@@ -29,6 +29,8 @@ pub enum Action {
     TimerReset,
     TimerStage(PomodoroStage),
     OpenTimerPill,
+    CalDay(i32),
+    CalToday,
     CalRefresh,
     CalAddOpen,
     SendDone,
@@ -173,6 +175,8 @@ pub struct SendView<'a> {
 pub type Date = (i32, u32, u32);
 
 pub struct CalView<'a> {
+    pub today: Date,
+    pub sel: Date,
     pub events: Events<'a>,
 }
 
@@ -1600,8 +1604,83 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
         hover_bg: None,
     });
 
-    let sub = if d.todo_cal_mode { tr("Jadwal hari ini") } else { tr("Selesai hari ini") };
-    p.text(c, &p.fit(sub, 10.5, 500, lw), x0 + p.px(2.0), top + p.px(55.0), 10.5, 500, WHITE, 0.50, Anchor::Left, lw);
+    if !d.todo_cal_mode {
+        p.text(c, &p.fit(tr("Selesai hari ini"), 10.5, 500, lw), x0 + p.px(2.0), top + p.px(55.0), 10.5, 500, WHITE, 0.50, Anchor::Left, lw);
+    } else {
+        // Interactive Date Picker stepper: [ <  Today / 23 Nov  > ] for viewing & creating events on any date.
+        use nacre_core::island::calendar::{add_days, month_short};
+        let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
+        let (ty, tm, td) = d.cal.today;
+        let (_, sm, sd) = d.cal.sel;
+        let date_label = if d.cal.sel == d.cal.today {
+            tr("Hari ini").to_string()
+        } else if d.cal.sel == add_days(ty, tm, td, 1) {
+            tr("Besok").to_string()
+        } else if d.cal.sel == add_days(ty, tm, td, -1) {
+            tr("Kemarin").to_string()
+        } else if en {
+            format!("{} {sd}", month_short(sm, true))
+        } else {
+            format!("{sd} {}", month_short(sm, false))
+        };
+        let dp_y = top + p.px(54.0);
+        let dp_h = p.px(21.0);
+        let nav_w = p.px(22.0);
+        p.rect(c, x0, dp_y, lw, dp_h, dp_h / 2.0, white(16));
+        let dcy = dp_y + dp_h / 2.0;
+
+        let n_prev = kids(c);
+        p.sym(c, Sym::ChevronLeft, x0 + nav_w / 2.0, dcy, 9.5, WHITE, 0.78);
+        regions.push(Region {
+            x: x0,
+            y: dp_y - p.px(2.0),
+            w: nav_w,
+            h: dp_h + p.px(4.0),
+            action: Action::CalDay(-1),
+            vis: group_since(c, n_prev),
+            hover_bg: None,
+        });
+
+        let n_next = kids(c);
+        p.sym(c, Sym::ChevronRight, x0 + lw - nav_w / 2.0, dcy, 9.5, WHITE, 0.78);
+        regions.push(Region {
+            x: x0 + lw - nav_w,
+            y: dp_y - p.px(2.0),
+            w: nav_w,
+            h: dp_h + p.px(4.0),
+            action: Action::CalDay(1),
+            vis: group_since(c, n_next),
+            hover_bg: None,
+        });
+
+        let mid_w = (lw - 2.0 * nav_w).max(p.px(40.0));
+        let dth = p.px(10.5) * 1.3;
+        let is_today = d.cal.sel == d.cal.today;
+        let n_mid = kids(c);
+        p.text(
+            c,
+            &p.fit(&date_label, 10.5, 600, mid_w),
+            x0 + lw / 2.0,
+            dcy - dth / 2.0,
+            10.5,
+            600,
+            if is_today { WHITE } else { BLUE },
+            0.96,
+            Anchor::Center,
+            mid_w + p.px(2.0),
+        );
+        if !is_today {
+            regions.push(Region {
+                x: x0 + nav_w,
+                y: dp_y,
+                w: mid_w,
+                h: dp_h,
+                action: Action::CalToday,
+                vis: group_since(c, n_mid),
+                hover_bg: None,
+            });
+        }
+    }
 
     // Vertically stacked pill buttons (uniform 116 x 26 dp, 6 dp gap).
     let btn_h = p.px(26.0);
@@ -1708,7 +1787,12 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
             Events::List([]) if !d.todo_cal_adding => {
                 let cx = rx + rw / 2.0;
                 let cy = card_y + card_h / 2.0;
-                p.text(c, tr("Tidak ada acara hari ini"), cx, cy - p.px(7.0), 11.5, 500, WHITE, 0.45, Anchor::Center, rw - p.px(14.0));
+                let empty_msg = if d.cal.sel == d.cal.today {
+                    tr("Tidak ada acara hari ini")
+                } else {
+                    tr("Tidak ada acara")
+                };
+                p.text(c, empty_msg, cx, cy - p.px(7.0), 11.5, 500, WHITE, 0.45, Anchor::Center, rw - p.px(14.0));
                 regions.push(Region { x: rx, y: card_y, w: rw, h: card_h, action: Action::CalAddOpen, vis: None, hover_bg: None });
             }
             Events::List(list) => {

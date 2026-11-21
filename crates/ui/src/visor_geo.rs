@@ -127,18 +127,20 @@ unsafe fn append_visor_figure(
     let w = w.max(2.0);
     let h = h.max(2.0);
     if ear > 0.5 {
-        // Overlap 1px above y = 0 for filled silhouette so DPI rounding never creates a top seam.
-        let top_y = if open_top_rim { y0 } else { y0 - 1.0 };
-        let ew = ear.min(h * 0.52);
-        let eh = (ew * 1.06).min(h * 0.52);
+        // Overlap 1px above y = 0 for both filled silhouette and open-top rim so DPI rounding never
+        // leaves a seam or bright corner lip at the top screen bezel.
+        let top_y = y0 - 1.0;
+        let ew = ear.min(h * 0.56);
+        let eh = (ew * 1.08).min(h * 0.56);
         let r = radius.clamp(0.0, (w * 0.5).min((h - eh).max(0.0)));
 
         let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
         sink.BeginFigure(pt(x0 - ew, top_y), begin);
-        // Sweeping Nusa-style cubic Bézier left shoulder: tangent-horizontal at top_y, tangent-vertical at x0.
+        // Constant-curvature liquid shoulder (`κ ≈ 0.56` handles): tangent-horizontal at screen bezel,
+        // tangent-vertical at notch wall, zero pinched elbow.
         sink.AddBezier(&bezier(
-            pt(x0 - ew * 0.28, top_y),
-            pt(x0, y0 + eh * 0.22),
+            pt(x0 - ew * 0.44, top_y),
+            pt(x0, y0 + eh * 0.44),
             pt(x0, y0 + eh),
         ));
         if h - r > eh + 0.01 {
@@ -154,10 +156,9 @@ unsafe fn append_visor_figure(
         if h - r > eh + 0.01 {
             sink.AddLine(pt(x0 + w, y0 + eh));
         }
-        // Sweeping cubic Bézier right shoulder: tangent-vertical at x0 + w, tangent-horizontal at top_y.
         sink.AddBezier(&bezier(
-            pt(x0 + w, y0 + eh * 0.22),
-            pt(x0 + w + ew * 0.28, top_y),
+            pt(x0 + w, y0 + eh * 0.44),
+            pt(x0 + w + ew * 0.44, top_y),
             pt(x0 + w + ew, top_y),
         ));
         sink.EndFigure(if open_top_rim { D2D1_FIGURE_END_OPEN } else { D2D1_FIGURE_END_CLOSED });

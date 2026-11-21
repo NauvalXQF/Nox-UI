@@ -116,7 +116,7 @@ const WIN_W: f32 = 720.0;
 const WIN_H: f32 = 250.0;
 const SHADOW_PAD_X: f32 = 36.0;
 const SHADOW_PAD_B: f32 = 44.0;
-const EAR_DP: f32 = 17.0;
+const EAR_DP: f32 = 21.0;
 const DETACHED_TIMER_W_DP: f32 = 86.0;
 const DETACHED_TIMER_GAP_DP: f32 = 9.0;
 
@@ -1367,7 +1367,7 @@ impl Notch {
                 self.cal_in_flight = true;
                 self.cal_fetched_at = None;
                 let _ = a.commands.send(nacre_platform::agenda::Cmd::Create {
-                    date: Self::today(),
+                    date: self.cal_date(),
                     input,
                 });
             }
@@ -2010,7 +2010,7 @@ impl Notch {
             _ => views::Events::Loading,
         };
         let send_c = self.send_compact();
-        let cal = views::CalView { events };
+        let cal = views::CalView { today: Self::today(), sel: cal_date, events };
         let send = match &self.send {
             Some(ss) => {
                 let n = ss.names.len();
@@ -3005,6 +3005,24 @@ impl Notch {
                 self.dispatch(Event::SelectTab(Tab::Timer));
             }
             Action::SendDone => self.stop_send(),
+            Action::CalDay(n) => {
+                self.cal_sel = (self.cal_sel + n).clamp(-3650, 3650);
+                self.todo_cal_scroll = 0;
+                self.todo_cal_err.clear();
+                self.cal_fetched_at = None;
+                self.cal_in_flight = false;
+                self.ensure_events();
+                self.render();
+            }
+            Action::CalToday => {
+                self.cal_sel = 0;
+                self.todo_cal_scroll = 0;
+                self.todo_cal_err.clear();
+                self.cal_fetched_at = None;
+                self.cal_in_flight = false;
+                self.ensure_events();
+                self.render();
+            }
             Action::CalRefresh => {
                 self.todo_cal_err.clear();
                 self.cal_fetched_at = None;
