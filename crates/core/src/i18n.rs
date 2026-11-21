@@ -425,6 +425,8 @@ const EN: &[(&str, &str)] = &[
     ("Taruh berkas di sini", "Drop files here"),
     ("Seret keluar kapan saja · klik untuk buka", "Drag out anytime · click to open"),
     ("Selesai hari ini", "Task Done Today"),
+    ("Tambah Tugas", "Add Task"),
+    ("Edit Tugas", "Edit Task"),
 ];
 
 pub fn is_known(src: &str) -> bool {

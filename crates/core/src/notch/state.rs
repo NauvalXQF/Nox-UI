@@ -166,6 +166,7 @@ pub struct Size {
 pub const PEEK_GROW: (f32, f32) = (16.0, 4.0);
 pub const COMPACT_MIN_W_DP: f32 = 190.0;
 pub const COMPACT_MAX_W_DP: f32 = 540.0;
+pub const NAV_EXPAND_H_DP: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavState {
@@ -184,15 +185,68 @@ pub fn nav_state(tab: Tab, lyrics_open: bool, nav_hovered: bool) -> NavState {
     }
 }
 
+/// Accumulator + gesture lock for Windows precision touchpad horizontal swipes (`WM_MOUSEHWHEEL`).
+/// Absorbs momentum/inertia tails so a single two-finger swipe always steps by exactly 1 tab.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SwipeLatch {
+    accum: i32,
+    last_ev_ms: i64,
+    locked_until_ms: i64,
+    locked_dir: i32,
+}
+
+impl SwipeLatch {
+    pub const THRESHOLD: i32 = 60;
+    pub const IDLE_RESET_MS: i64 = 120;
+    pub const COOLDOWN_MS: i64 = 420;
+
+    pub fn feed(&mut self, delta: i16, now_ms: i64) -> i32 {
+        if delta == 0 {
+            return 0;
+        }
+        let gap = now_ms.saturating_sub(self.last_ev_ms);
+        self.last_ev_ms = now_ms;
+        if gap > Self::IDLE_RESET_MS {
+            self.accum = 0;
+        }
+        let dir = if delta > 0 { 1 } else { -1 };
+        if now_ms < self.locked_until_ms {
+            if dir == self.locked_dir {
+                // Continuous inertia stream in the same direction keeps the lock alive briefly.
+                if gap < 95 {
+                    self.locked_until_ms = self.locked_until_ms.max(now_ms + 150);
+                }
+                return 0;
+            } else if gap < 60 {
+                return 0;
+            }
+            // Deliberate opposite-direction swipe after a short pause breaks the lock.
+            self.locked_until_ms = 0;
+            self.accum = 0;
+        }
+        self.accum += delta as i32;
+        if self.accum.abs() >= Self::THRESHOLD {
+            let step = if self.accum > 0 { 1 } else { -1 };
+            self.accum = 0;
+            self.locked_dir = step;
+            self.locked_until_ms = now_ms + Self::COOLDOWN_MS;
+            step
+        } else {
+            0
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeContext {
     pub lyrics_open: bool,
     pub shelf_empty: bool,
+    pub nav_expanded: bool,
 }
 
 impl Default for SizeContext {
     fn default() -> Self {
-        Self { lyrics_open: true, shelf_empty: true }
+        Self { lyrics_open: true, shelf_empty: true, nav_expanded: false }
     }
 }
 
@@ -214,16 +268,21 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
         View::Compact(_) => (292.0, 30.0, 15.0),
-        View::Open(Tab::Play) if ctx.lyrics_open => (600.0, 162.0, 28.0),
-        View::Open(Tab::Play) => (440.0, 160.0, 28.0),
-        View::Open(Tab::Shelf) if ctx.shelf_empty => (460.0, 156.0, 28.0),
-        View::Open(Tab::Shelf) => (520.0, 172.0, 28.0),
-        View::Open(Tab::Alerts) => (520.0, 220.0, 28.0),
-        View::Open(Tab::Todo) => (540.0, 214.0, 28.0),
-        View::Open(Tab::Gemini) => (560.0, 240.0, 28.0),
-        View::Open(Tab::Timer) => (520.0, 176.0, 28.0),
-        View::Drop => (520.0, 120.0, 28.0),
+        View::Open(Tab::Play) if ctx.lyrics_open => (560.0, 162.0, 28.0),
+        View::Open(Tab::Play) => (390.0, 156.0, 28.0),
+        View::Open(Tab::Shelf) if ctx.shelf_empty => (380.0, 148.0, 28.0),
+        View::Open(Tab::Shelf) => (430.0, 162.0, 28.0),
+        View::Open(Tab::Alerts) => (420.0, 190.0, 28.0),
+        View::Open(Tab::Todo) => (410.0, 168.0, 28.0),
+        View::Open(Tab::Gemini) => (460.0, 210.0, 28.0),
+        View::Open(Tab::Timer) => (400.0, 156.0, 28.0),
+        View::Drop => (500.0, 118.0, 28.0),
     };
+    if let View::Open(tab) = l.view {
+        if ctx.nav_expanded && nav_state(tab, ctx.lyrics_open, true) == NavState::Pill {
+            h += NAV_EXPAND_H_DP;
+        }
+    }
     if l.peek && matches!(l.view, View::Rest | View::Compact(_)) {
         w += PEEK_GROW.0;
         h += PEEK_GROW.1;
@@ -341,18 +400,24 @@ mod tests {
         let lyr = size(look(Mode::Rest, Some(Activity::Lyrics)), 1.0);
         assert!(music.w > rest.w && music.h == rest.h);
         assert!(lyr.w > music.w && lyr.h >= music.h && lyr.h < 40.0, "lirik ringkas: satu baris yang lebih lebar");
-        let open_lyr = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: true, shelf_empty: true });
-        assert_eq!((open_lyr.w, open_lyr.h, open_lyr.radius), (600.0, 162.0, 28.0));
-        let open_compact = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true });
-        assert_eq!((open_compact.w, open_compact.h), (440.0, 160.0));
-        let shelf_empty = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: true });
-        let shelf_filled = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: false });
-        assert_eq!((shelf_empty.w, shelf_empty.h), (460.0, 156.0));
+        let open_lyr = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: true, shelf_empty: true, nav_expanded: false });
+        assert_eq!((open_lyr.w, open_lyr.h, open_lyr.radius), (560.0, 162.0, 28.0));
+        let open_lyr_nav = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: true, shelf_empty: true, nav_expanded: true });
+        assert_eq!(open_lyr_nav.h, open_lyr.h, "mode lirik menyembunyikan nav sehingga tinggi tidak berubah");
+        let open_compact = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: false });
+        let open_compact_exp = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: true });
+        assert_eq!((open_compact.w, open_compact.h), (390.0, 156.0));
+        assert_eq!(open_compact_exp.h - open_compact.h, NAV_EXPAND_H_DP);
+        let shelf_empty = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: true, nav_expanded: false });
+        let shelf_filled = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: false, nav_expanded: false });
+        assert_eq!((shelf_empty.w, shelf_empty.h), (380.0, 148.0));
         assert!(shelf_filled.w > shelf_empty.w && shelf_filled.h > shelf_empty.h);
+        let todo = size(look(Mode::Open(Tab::Todo), None), 1.0);
+        assert_eq!((todo.w, todo.h), (410.0, 168.0));
         let gemini = size(look(Mode::Open(Tab::Gemini), None), 1.0);
-        assert_eq!((gemini.w, gemini.h), (560.0, 240.0));
+        assert_eq!((gemini.w, gemini.h), (460.0, 210.0));
         let b = size(look(Mode::Open(Tab::Play), None), 1.5);
-        assert_eq!((b.w, b.radius), (900.0, 42.0));
+        assert_eq!((b.w, b.radius), (840.0, 42.0));
         assert_eq!(adaptive_compact_w(40.0, 100.0, 190.0, 500.0), 190.0);
         assert_eq!(adaptive_compact_w(210.4, 100.0, 190.0, 500.0), 311.0);
         assert_eq!(adaptive_compact_w(600.0, 100.0, 190.0, 480.0), 480.0);
@@ -362,6 +427,21 @@ mod tests {
         assert_eq!(nav_state(Tab::Play, false, true), NavState::Pill);
         assert_eq!(nav_state(Tab::Shelf, true, false), NavState::Dots);
         assert_eq!(nav_state(Tab::Shelf, true, true), NavState::Pill);
+    }
+
+    #[test]
+    fn swipe_latch_absorbs_touchpad_inertia_and_steps_once() {
+        let mut s = SwipeLatch::default();
+        // Realistic touchpad burst + inertia tail over 400ms -> strictly 1 step!
+        assert_eq!(s.feed(40, 100), 0);
+        assert_eq!(s.feed(40, 116), 1);
+        for t in [132, 160, 200, 250, 310, 380, 450] {
+            assert_eq!(s.feed(60, t), 0, "inertia pada t={t} harus diserap");
+        }
+        // Distinct new swipe after fingers lifted & cooldown settled -> steps once again.
+        assert_eq!(s.feed(120, 900), 1);
+        // Reversing direction cleanly after short pause steps backward.
+        assert_eq!(s.feed(-120, 980), -1);
     }
 
     #[test]

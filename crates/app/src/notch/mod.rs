@@ -376,8 +376,10 @@ pub struct Notch {
     dragging_out: bool,
     pinned: bool,
     lyrics_open: bool,
-    last_hwheel: Instant,
+    swipe: state::SwipeLatch,
     last_pub_half: i32,
+    todo_adding: bool,
+    todo_editing: bool,
     focus: FocusController,
 
     album: String,
@@ -560,8 +562,10 @@ impl Notch {
                 dragging_out: false,
                 pinned: false,
                 lyrics_open: true,
-                last_hwheel: Instant::now() - std::time::Duration::from_secs(1),
+                swipe: state::SwipeLatch::default(),
                 last_pub_half: -1,
+                todo_adding: false,
+                todo_editing: false,
                 focus: FocusController::new(),
                 album: String::new(),
                 lyr_worker: nacre_platform::lyrics::spawn(crate::paths::config_dir().join("lyrics"), move || post(hw, WM_LYRICS)),
@@ -760,11 +764,13 @@ impl Notch {
         }
 
         let nav_moving = self.sp_nav.step(dt);
-        if nav_moving {
-            if let Some(nav) = &self.live_vis.nav {
-                nav.set_progress(self.sp_nav.pos);
+        if nav_moving || springs_moving {
+            if let Some(nav) = self.live_vis.nav.as_mut() {
+                nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
             }
-            springs_moving = true;
+            if nav_moving {
+                springs_moving = true;
+            }
         }
 
         // Smooth audio visualizer bar interpolation at monitor refresh rate.
@@ -1066,6 +1072,7 @@ impl Notch {
     }
 
     fn blur_inputs(&mut self, restore_prev: bool) {
+        let was_todo = self.active_input == Some(ActiveInput::Todo);
         self.active_input = None;
         kill(self.hwnd, T_CARET);
         if let Some(ti) = self.todo_input.as_mut() {
@@ -1077,6 +1084,12 @@ impl Notch {
             gi.set_focused(false, &mut self.paint);
         }
         self.focus.release(self.hwnd, restore_prev);
+        if was_todo && self.todo_draft.trim().is_empty() && self.todo_adding {
+            self.todo_adding = false;
+            if self.mode == Mode::Open(Tab::Todo) {
+                self.render();
+            }
+        }
         self.update_visibility();
     }
 
@@ -1453,6 +1466,7 @@ impl Notch {
         let ctx = state::SizeContext {
             lyrics_open: self.lyrics_open,
             shelf_empty: self.shelf.is_empty() && self.send.is_none() && !self.send_err,
+            nav_expanded: self.nav_expanded,
         };
         let mut z = state::size_with(look, self.dpi, ctx);
         let peek_extra = if look.peek && matches!(look.view, View::Rest | View::Compact(_)) {
@@ -1564,6 +1578,11 @@ impl Notch {
         }
         if !matches!(new.view, View::Open(_)) {
             self.cal_sel = 0;
+            self.todo_adding = false;
+            self.todo_editing = false;
+        } else if new.view != View::Open(Tab::Todo) {
+            self.todo_adding = false;
+            self.todo_editing = false;
         }
         let sp = (!first).then(|| Self::spring_for(old, new));
         if view_changed && !first {
@@ -1704,6 +1723,7 @@ impl Notch {
             lyrics_open: self.lyrics_open,
             muted: self.muted,
             hovered: self.tracking,
+            nav_expanded: self.nav_expanded,
             nav_progress: self.sp_nav.pos,
             shelf,
             drop_zone: self.drop_zone,
@@ -1724,6 +1744,8 @@ impl Notch {
             todo_done,
             todo_total,
             todo_scroll: self.todo_scroll,
+            todo_adding: self.todo_adding,
+            todo_editing: self.todo_editing,
             todo_status: self.todo_status,
             gemini_text: &self.gemini_resp,
             gemini_streaming: self.gemini_streaming,
@@ -1734,6 +1756,9 @@ impl Notch {
             gemini_copied: self.gemini_copied,
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
+        if let Some(nav) = self.live_vis.nav.as_mut() {
+            nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
+        }
         if let Some((ix, iy, iw, ih)) = self.live_vis.todo_input_box {
             if let Ok(mut ti) = TextInput::new(&self.paint.comp, &c, ix, iy, iw, ih, self.dpi, crate::prefs::tr("Tambah tugas…"), 180) {
                 ti.buf.set(&self.todo_draft);
@@ -2226,7 +2251,7 @@ impl Notch {
 
     fn sync_hover_chrome(&self) {
         if let Some(pin) = &self.live_vis.pin_vis {
-            let to = if self.pinned { 1.0 } else if self.tracking { 0.52 } else { 0.0 };
+            let to = if self.pinned { 1.0 } else if self.tracking { 0.54 } else { 0.0 };
             let from = pin.Opacity().unwrap_or(to);
             if (from - to).abs() > 0.01 {
                 if let Ok(o) = pin.cast::<CompositionObject>() {
@@ -2235,7 +2260,7 @@ impl Notch {
             }
         }
         if let Some(ch) = &self.live_vis.chevrons_vis {
-            let to = if self.tracking { 0.42 } else { 0.0 };
+            let to = if self.tracking { 0.48 } else { 0.0 };
             let from = ch.Opacity().unwrap_or(to);
             if (from - to).abs() > 0.01 {
                 if let Ok(o) = ch.cast::<CompositionObject>() {
@@ -2245,15 +2270,24 @@ impl Notch {
         }
     }
 
+    fn set_nav_expanded(&mut self, on: bool) {
+        if on == self.nav_expanded {
+            return;
+        }
+        self.nav_expanded = on;
+        let sp = if on { SpringParams::swap() } else { SpringParams::close() };
+        self.sp_nav.set_target(if on { 1.0 } else { 0.0 }, sp);
+        self.apply_size(Some(sp));
+        self.start_frame();
+    }
+
     fn update_nav_hover(&mut self, x: f32, y: f32) {
         let Some(nav) = &self.live_vis.nav else { return };
         if !self.nav_expanded {
             if nav.hit_dots(x, y) {
                 kill(self.hwnd, T_NAV_COLLAPSE);
                 self.nav_collapse_armed = false;
-                self.nav_expanded = true;
-                self.sp_nav.set_target(1.0, SpringParams::swap());
-                self.start_frame();
+                self.set_nav_expanded(true);
             }
         } else if nav.hit_pill(x, y) {
             if self.nav_collapse_armed {
@@ -2294,7 +2328,7 @@ impl Notch {
 
     fn find_hover_region(&self, act: Action) -> Option<&Region> {
         if self.nav_expanded {
-            if let Some(r) = self.live_vis.nav.as_ref().and_then(|n| n.pill_regions.iter().find(|r| r.action == act)) {
+            if let Some(r) = self.live_vis.nav.as_ref().and_then(|n| n.find_region(act)) {
                 return Some(r);
             }
         }
@@ -2304,10 +2338,7 @@ impl Notch {
     fn on_hover(&mut self, x: f32, y: f32) {
         self.update_nav_hover(x, y);
         let nav_hit = if self.nav_expanded {
-            self.live_vis
-                .nav
-                .as_ref()
-                .and_then(|n| n.pill_regions.iter().find(|r| r.vis.is_some() && r.hit(x, y)).map(|r| r.action))
+            self.live_vis.nav.as_ref().and_then(|n| n.hit_region(x, y))
         } else {
             None
         };
@@ -2315,14 +2346,42 @@ impl Notch {
         if hit == self.hover_act {
             return;
         }
-        for (a, on) in [(self.hover_act, false), (hit, true)] {
+        let prev = self.hover_act;
+        self.hover_act = hit;
+        for (a, on) in [(prev, false), (hit, true)] {
             let Some(r) = a.and_then(|a| self.find_hover_region(a)) else { continue };
             let Some(v) = &r.vis else { continue };
             let to = if on { hover_scale(r.action) } else { 1.0 };
             let Ok(comp) = v.Compositor() else { continue };
             let _ = crate::motion::hover_pop(&comp, v, Vector3 { X: r.x + r.w / 2.0, Y: r.y + r.h / 2.0, Z: 0.0 }, to);
+            if let Some(bg) = &r.hover_bg {
+                if let Ok(o) = bg.cast::<CompositionObject>() {
+                    let from = bg.Opacity().unwrap_or(if on { 0.0 } else { 1.0 });
+                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, if on { 1.0 } else { 0.0 }, 120, 0);
+                }
+            }
         }
-        self.hover_act = hit;
+        // Boost chevrons / pin wrapper opacity to crisp 1.0 while directly hovered.
+        if let Some(ch) = &self.live_vis.chevrons_vis {
+            let on_ch = matches!(hit, Some(Action::PrevTab | Action::NextTab));
+            let to = if on_ch { 1.0 } else if self.tracking { 0.48 } else { 0.0 };
+            let from = ch.Opacity().unwrap_or(to);
+            if (from - to).abs() > 0.01 {
+                if let Ok(o) = ch.cast::<CompositionObject>() {
+                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, to, 120, 0);
+                }
+            }
+        }
+        if let Some(pin) = &self.live_vis.pin_vis {
+            let on_pin = hit == Some(Action::Pin);
+            let to = if self.pinned || on_pin { 1.0 } else if self.tracking { 0.54 } else { 0.0 };
+            let from = pin.Opacity().unwrap_or(to);
+            if (from - to).abs() > 0.01 {
+                if let Ok(o) = pin.cast::<CompositionObject>() {
+                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, to, 120, 0);
+                }
+            }
+        }
     }
 
     fn on_leave(&mut self) {
@@ -2333,9 +2392,7 @@ impl Notch {
         if self.nav_expanded || self.nav_collapse_armed {
             kill(self.hwnd, T_NAV_COLLAPSE);
             self.nav_collapse_armed = false;
-            self.nav_expanded = false;
-            self.sp_nav.set_target(0.0, SpringParams::close());
-            self.start_frame();
+            self.set_nav_expanded(false);
         }
         if self.seek_drag.is_some() || self.menu.as_ref().is_some_and(|m| m.is_open()) {
             return;
@@ -2377,13 +2434,11 @@ impl Notch {
         let mut hit_act = None;
         if let Some(nav) = &self.live_vis.nav {
             if self.nav_expanded || self.sp_nav.pos > 0.35 {
-                hit_act = nav.pill_regions.iter().find(|r| r.hit(x, y)).map(|r| r.action);
+                hit_act = nav.hit_region(x, y);
             } else if nav.hit_dots(x, y) {
                 kill(self.hwnd, T_NAV_COLLAPSE);
                 self.nav_collapse_armed = false;
-                self.nav_expanded = true;
-                self.sp_nav.set_target(1.0, SpringParams::swap());
-                self.start_frame();
+                self.set_nav_expanded(true);
                 return;
             }
         }
@@ -2512,6 +2567,15 @@ impl Notch {
                 kill(self.hwnd, T_NOTIF_TOAST);
                 self.refresh();
                 self.update_visibility();
+            }
+            Action::TodoAddOpen => {
+                self.todo_adding = true;
+                self.render();
+                self.focus_input(ActiveInput::Todo);
+            }
+            Action::TodoEditToggle => {
+                self.todo_editing = !self.todo_editing;
+                self.render();
             }
             Action::TodoFocus => self.focus_input(ActiveInput::Todo),
             Action::TodoToggle(idx) => {
@@ -2653,12 +2717,10 @@ impl Notch {
         if !matches!(self.mode, Mode::Open(_)) || delta == 0 {
             return;
         }
-        let now = Instant::now();
-        if now.duration_since(self.last_hwheel).as_millis() < 180 {
-            return;
+        let step = self.swipe.feed(delta, self.now_ms());
+        if step != 0 {
+            self.step_tab(step);
         }
-        self.last_hwheel = now;
-        self.step_tab(if delta > 0 { 1 } else { -1 });
     }
 
     fn sync_tick(&self) {
@@ -2940,11 +3002,7 @@ impl Notch {
             }
             T_NAV_COLLAPSE => {
                 self.nav_collapse_armed = false;
-                if self.nav_expanded {
-                    self.nav_expanded = false;
-                    self.sp_nav.set_target(0.0, SpringParams::close());
-                    self.start_frame();
-                }
+                self.set_nav_expanded(false);
             }
             T_DWELL => {
                 if self.tracking && !self.cursor_on_media_button() {
@@ -3418,7 +3476,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 }
 
 fn hover_scale(a: Action) -> f32 {
-    if matches!(a, Action::ShelfItem(_)) {
+    if matches!(a, Action::PrevTab | Action::NextTab | Action::Pin) {
+        1.15
+    } else if matches!(a, Action::ShelfItem(_)) {
         crate::motion::HOVER_ROW
     } else {
         crate::motion::HOVER_BUTTON
