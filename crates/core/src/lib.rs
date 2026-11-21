@@ -17,7 +17,6 @@ pub mod marker;
 pub mod search;
 pub mod settings;
 pub mod spotlight;
-pub mod stage;
 pub mod symbols;
 pub mod trash;
 pub mod visibility;

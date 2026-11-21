@@ -76,6 +76,52 @@ pub fn active() -> Vec<InUse> {
     out
 }
 
+pub struct Monitor {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub snapshots: std::sync::mpsc::Receiver<(bool, bool)>,
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn spawn(notify: impl Fn() + Send + 'static) -> Monitor {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc::channel, Arc};
+    let (tx, rx) = channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = stop.clone();
+    let _ = std::thread::Builder::new().name("abra-privacy".into()).spawn(move || {
+        let mut last = (false, false);
+        for _ in 0..3 {
+            if s.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        while !s.load(Ordering::Relaxed) {
+            let list = active();
+            let v = (list.iter().any(|u| !u.camera), list.iter().any(|u| u.camera));
+            if v != last {
+                last = v;
+                if tx.send(v).is_err() {
+                    return;
+                }
+                notify();
+            }
+            for _ in 0..6 {
+                if s.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    });
+    Monitor { stop, snapshots: rx }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

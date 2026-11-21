@@ -79,7 +79,6 @@ fn run(a: HotAction) {
         HotAction::Mission => crate::mission::toggle(),
         HotAction::Launchpad => crate::launchpad::toggle(),
         HotAction::Desktop => keys::chord(&[keys::WIN, 0x44]),
-        HotAction::Stage => prefs::update(|s| s.stage = !s.stage),
         HotAction::Notifications => keys::chord(&[keys::WIN, 0x4E]),
         HotAction::Lock => launch::run("rundll32.exe", "user32.dll,LockWorkStation"),
     }

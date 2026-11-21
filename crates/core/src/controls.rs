@@ -8,7 +8,6 @@ pub enum Kind {
     Share,
     Airplane,
     NowPlaying,
-    Stage,
     Mirror,
     Focus,
     DarkMode,
@@ -23,14 +22,13 @@ pub enum Kind {
     Timer,
 }
 
-pub const ALL: [Kind; 19] = [
+pub const ALL: [Kind; 18] = [
     Kind::Wifi,
     Kind::Bluetooth,
     Kind::Hotspot,
     Kind::Share,
     Kind::Airplane,
     Kind::NowPlaying,
-    Kind::Stage,
     Kind::Mirror,
     Kind::Focus,
     Kind::DarkMode,
@@ -79,7 +77,6 @@ impl Kind {
             Kind::Share => "share",
             Kind::Airplane => "airplane",
             Kind::NowPlaying => "nowplaying",
-            Kind::Stage => "stage",
             Kind::Mirror => "mirror",
             Kind::Focus => "focus",
             Kind::DarkMode => "dark",
@@ -127,7 +124,6 @@ impl Kind {
             Kind::Share => "Berbagi Terdekat",
             Kind::Airplane => "Mode Pesawat",
             Kind::NowPlaying => "Playing",
-            Kind::Stage => "Scene",
             Kind::Mirror => "Pencerminan Layar",
             Kind::Focus => "Fokus",
             Kind::DarkMode => "Mode Gelap",
@@ -205,7 +201,7 @@ pub fn cells_for(span: f32, cell: f32, gap: f32) -> usize {
 }
 
 pub fn default_layout() -> Vec<Kind> {
-    vec![Kind::Wifi, Kind::NowPlaying, Kind::Bluetooth, Kind::Share, Kind::Stage, Kind::Mission, Kind::DarkMode, Kind::Screenshot, Kind::Focus, Kind::Display, Kind::Sound]
+    vec![Kind::Wifi, Kind::NowPlaying, Kind::Bluetooth, Kind::Share, Kind::Mission, Kind::DarkMode, Kind::Screenshot, Kind::Focus, Kind::Display, Kind::Sound]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,8 +298,8 @@ mod tests {
         assert_eq!((at(Kind::NowPlaying).col, at(Kind::NowPlaying).row), (2, 0));
         assert_eq!((at(Kind::Bluetooth).col, at(Kind::Bluetooth).row), (0, 1));
         assert_eq!((at(Kind::Share).col, at(Kind::Share).row), (0, 2));
-        assert_eq!((at(Kind::Stage).col, at(Kind::Stage).row), (2, 2));
-        assert_eq!((at(Kind::Mission).col, at(Kind::Mission).row), (3, 2));
+        assert_eq!((at(Kind::Mission).col, at(Kind::Mission).row), (2, 2));
+        assert_eq!((at(Kind::DarkMode).col, at(Kind::DarkMode).row), (3, 2));
         assert_eq!(at(Kind::Display).w, 4);
         assert_eq!(at(Kind::Sound).row, at(Kind::Display).row + 1);
         assert!(rows >= 6);
@@ -313,7 +309,7 @@ mod tests {
     fn sizes_change_dims_and_round_trip() {
         use std::collections::HashMap;
         assert_eq!(Kind::Focus.dims(Size::L), (2, 2));
-        assert_eq!(Kind::Stage.dims(Size::M), (2, 1));
+        assert_eq!(Kind::Mission.dims(Size::M), (2, 1));
         assert_eq!(Kind::Sound.dims(Size::S), (1, 1));
         assert_eq!(Kind::Sound.dims(Size { w: 9, h: 9 }), (4, 2));
         assert_eq!(Kind::NowPlaying.dims(Size { w: 4, h: 4 }), (4, 4));
@@ -323,11 +319,11 @@ mod tests {
         assert_eq!(cells_for(10.0, 82.0, 14.0), 1);
         let mut sizes = HashMap::new();
         sizes.insert(Kind::Focus, Size::L);
-        sizes.insert(Kind::Stage, Size::M);
+        sizes.insert(Kind::Mission, Size::M);
         sizes.insert(Kind::Sound, Size { w: 1, h: 2 });
-        let kinds = vec![Kind::Wifi, Kind::Focus, Kind::Stage, Kind::Sound];
+        let kinds = vec![Kind::Wifi, Kind::Focus, Kind::Mission, Kind::Sound];
         let text = to_text_sized(&kinds, &sizes);
-        assert_eq!(text, "wifi,focus:2x2,stage:2x1,sound:1x2");
+        assert_eq!(text, "wifi,focus:2x2,mission:2x1,sound:1x2");
         let (k2, s2) = from_text_sized(&text);
         assert_eq!(k2, kinds);
         assert_eq!(s2.get(&Kind::Focus), Some(&Size::L));

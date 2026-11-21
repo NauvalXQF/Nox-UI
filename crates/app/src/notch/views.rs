@@ -5,8 +5,11 @@ use nacre_core::notch::glance::Item;
 use nacre_core::notch::state::{Activity, Look, Tab, View};
 use nacre_core::symbols::Sym;
 use windows::UI::Color;
-use windows::UI::Composition::{CompositionDrawingSurface, ContainerVisual, SpriteVisual};
-use windows_numerics::Vector3;
+use windows::UI::Composition::{
+    CompositionColorBrush, CompositionDrawingSurface, CompositionRoundedRectangleGeometry,
+    CompositionStretch, ContainerVisual, SpriteVisual,
+};
+use windows_numerics::{Vector2, Vector3};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -18,6 +21,7 @@ pub enum Action {
     ShelfItem(usize),
     ShelfClear,
     Zone(usize),
+    Pin,
     Settings,
     TimerToggle,
     TimerReset,
@@ -90,6 +94,7 @@ pub struct Data<'a> {
     pub cal: CalView<'a>,
     pub send: Option<SendView<'a>>,
     pub send_zone: bool,
+    pub pinned: bool,
 }
 
 pub struct SendView<'a> {
@@ -151,11 +156,111 @@ pub struct MediaView<'a> {
     pub drag: Option<f32>,
 }
 
+pub struct MarqueeLive {
+    pub vis: SpriteVisual,
+    pub travel: f32,
+    pub base_y: f32,
+}
+
+pub struct ScrubLive {
+    pub sx: f32,
+    pub sw: f32,
+    pub sy: f32,
+    pub th: f32,
+    pub ty: f32,
+    pub dur_ms: i64,
+    pub fill: SpriteVisual,
+    pub fill_geo: CompositionRoundedRectangleGeometry,
+    pub knob: SpriteVisual,
+    pub knob_geo: CompositionRoundedRectangleGeometry,
+    pub knob_brush: CompositionColorBrush,
+    pub pos_vis: SpriteVisual,
+    pub rem_vis: SpriteVisual,
+    last_pos_sec: i64,
+}
+
+impl ScrubLive {
+    pub fn update(&mut self, p: &mut Painter, frac: f32, dragging: bool, pos_ms: i64) {
+        let fr = frac.clamp(0.0, 1.0);
+        let fw = (self.sw * fr).max(self.th);
+        let _ = self.fill.SetSize(Vector2 { X: fw, Y: self.th });
+        let _ = self.fill_geo.SetSize(Vector2 { X: fw, Y: self.th });
+
+        let kx = self.sx + self.sw * fr;
+        let (kw, kh, alpha) = if dragging {
+            (p.px(24.0), p.px(15.0), 185u8)
+        } else {
+            (p.px(16.0), p.px(11.0), 250u8)
+        };
+        let _ = self.knob.SetSize(Vector2 { X: kw, Y: kh });
+        let _ = self.knob.SetOffset(Vector3 { X: kx - kw / 2.0, Y: self.sy - kh / 2.0, Z: 0.0 });
+        let _ = self.knob_geo.SetSize(Vector2 { X: kw, Y: kh });
+        let _ = self.knob_geo.SetCornerRadius(Vector2 { X: kh / 2.0, Y: kh / 2.0 });
+        let _ = self.knob_brush.SetColor(white(alpha));
+
+        let sec = (pos_ms.max(0) + 500) / 1000;
+        if sec != self.last_pos_sec {
+            self.last_pos_sec = sec;
+            if let Some((surf, tw, th)) = p.render_text_surface(&mmss(pos_ms), 10.5, 500, WHITE, self.sw / 2.0) {
+                if let Ok(br) = p.comp.CreateSurfaceBrushWithSurface(&surf) {
+                    let _ = br.SetStretch(CompositionStretch::None);
+                    let _ = self.pos_vis.SetBrush(&br);
+                }
+                let _ = self.pos_vis.SetSize(Vector2 { X: tw as f32, Y: th as f32 });
+                let _ = self.pos_vis.SetOffset(Vector3 { X: self.sx.round(), Y: self.ty.round(), Z: 0.0 });
+            }
+            let rem_s = format!("-{}", mmss((self.dur_ms - pos_ms).max(0)));
+            if let Some((surf, tw, th)) = p.render_text_surface(&rem_s, 10.5, 500, WHITE, self.sw / 2.0) {
+                if let Ok(br) = p.comp.CreateSurfaceBrushWithSurface(&surf) {
+                    let _ = br.SetStretch(CompositionStretch::None);
+                    let _ = self.rem_vis.SetBrush(&br);
+                }
+                let _ = self.rem_vis.SetSize(Vector2 { X: tw as f32, Y: th as f32 });
+                let _ = self.rem_vis.SetOffset(Vector3 { X: (self.sx + self.sw - tw as f32).round(), Y: self.ty.round(), Z: 0.0 });
+            }
+        }
+    }
+}
+
+pub struct DropZoneLive {
+    pub id: usize,
+    pub brush: CompositionColorBrush,
+    pub fg: ContainerVisual,
+}
+
+impl DropZoneLive {
+    pub fn set_active(&self, on: bool, accent: [u8; 3]) {
+        let fill = if on {
+            Color { A: 230, R: accent[0], G: accent[1], B: accent[2] }
+        } else {
+            white(22)
+        };
+        let _ = self.brush.SetColor(fill);
+        let _ = self.fg.SetOpacity(if on { 1.0 } else { 0.85 });
+    }
+}
+
+pub struct LyricsHostLive {
+    pub host: ContainerVisual,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub size: f32,
+    pub pad: f32,
+    pub anchor: f32,
+    pub card: bool,
+}
+
 #[derive(Default)]
 pub struct Live {
     pub bars: Vec<SpriteVisual>,
+    pub marquee: Option<MarqueeLive>,
+    pub scrub: Option<ScrubLive>,
+    pub drop_zones: Vec<DropZoneLive>,
+    pub lyrics_host: Option<LyricsHostLive>,
     pub lyric: Option<SpriteVisual>,
-    pub lyric_scroll: Option<windows::UI::Composition::ContainerVisual>,
+    pub lyric_scroll: Option<ContainerVisual>,
     pub lyric_shift: f32,
 }
 
@@ -176,7 +281,7 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
         }
         View::Compact(Activity::Charging) => compact_charging(p, c, f, d),
         View::Compact(Activity::Glance) => compact_glance(p, c, f, d),
-        View::Compact(Activity::Music) => compact_music(p, c, f, d, live, f.h),
+        View::Compact(Activity::Music) => compact_music(p, c, f, d, live, f.h, true),
         View::Compact(Activity::Lyrics) => compact_lyrics(p, c, f, d, live),
         View::Compact(Activity::Shelf) => compact_shelf(p, c, f, d),
         View::Compact(Activity::Download) => compact_download(p, c, f, d),
@@ -191,7 +296,7 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
                 Tab::Timer => timer(p, c, f, d, regions),
             }
         }
-        View::Drop => drop_zones(p, c, f, d, regions),
+        View::Drop => drop_zones(p, c, f, d, regions, live),
     }
     if matches!(look.view, View::Rest | View::Compact(_)) {
         privacy_dots(p, c, f, d.privacy);
@@ -224,7 +329,7 @@ fn compact_shelf(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
     p.text(c, &count_text(d.shelf.len()), f.x0 + f.w - p.px(16.0), cy - th / 2.0, 12.5, 600, WHITE, 0.95, Anchor::Right, f.w / 2.0);
 }
 
-fn drop_zones(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
+fn drop_zones(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
     let (pad, gap) = (p.px(14.0), p.px(10.0));
     let all = [(0usize, Sym::Tray, "Simpan ke Rak"), (1, Sym::ArrowUp, "Kirim"), (2, Sym::Folder, "Salin ke\u{2026}"), (3, Sym::Grid, "Buka dengan\u{2026}")];
     let zones: Vec<_> = all.into_iter().filter(|z| z.0 != 1 || d.send_zone).collect();
@@ -237,10 +342,25 @@ fn drop_zones(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
         let x = f.x0 + pad + k as f32 * (zw + gap);
         let on = d.drop_zone == Some(i);
         let fill = if on { Color { A: 230, R: accent[0], G: accent[1], B: accent[2] } } else { white(22) };
-        p.rect(c, x, top, zw, zh, p.px(18.0), fill);
-        p.sym(c, *s, x + zw / 2.0, top + zh / 2.0 - p.px(12.0), 22.0, WHITE, if on { 1.0 } else { 0.85 });
-        let th = p.px(12.5) * 1.3;
-        p.text(c, tr(label), x + zw / 2.0, top + zh / 2.0 + p.px(10.0) - th / 2.0 + p.px(6.0), 12.5, 600, WHITE, if on { 1.0 } else { 0.85 }, Anchor::Center, zw - p.px(12.0));
+        if let (Ok(bg), Ok(brush), Ok(fg)) = (
+            p.comp.CreateSpriteVisual(),
+            p.comp.CreateColorBrushWithColor(fill),
+            p.comp.CreateContainerVisual(),
+        ) {
+            let _ = bg.SetSize(Vector2 { X: zw, Y: zh });
+            let _ = bg.SetOffset(Vector3 { X: x, Y: top, Z: 0.0 });
+            let _ = bg.SetBrush(&brush);
+            if let Ok(cl) = super::draw::clip(&p.comp, zw, zh, p.px(18.0)) {
+                let _ = bg.SetClip(&cl);
+            }
+            let _ = c.Children().and_then(|k| k.InsertAtTop(&bg));
+            let _ = fg.SetOpacity(if on { 1.0 } else { 0.85 });
+            let _ = c.Children().and_then(|k| k.InsertAtTop(&fg));
+            p.sym(&fg, *s, x + zw / 2.0, top + zh / 2.0 - p.px(12.0), 22.0, WHITE, 1.0);
+            let th = p.px(12.5) * 1.3;
+            p.text(&fg, tr(label), x + zw / 2.0, top + zh / 2.0 + p.px(10.0) - th / 2.0 + p.px(6.0), 12.5, 600, WHITE, 1.0, Anchor::Center, zw - p.px(12.0));
+            live.drop_zones.push(DropZoneLive { id: i, brush, fg });
+        }
         regions.push(Region { x, y: top, w: zw, h: zh, action: Action::Zone(i), vis: None });
     }
     if d.drop_count > 0 {
@@ -353,7 +473,7 @@ fn current_line(d: &Data) -> String {
 }
 
 fn compact_lyrics(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live) {
-    compact_music(p, c, f, d, live, f.h);
+    compact_music(p, c, f, d, live, f.h, false);
     let left = f.x0 + p.px(12.0 + 20.0 + 10.0);
     let right = f.x0 + f.w - p.px(14.0 + 27.0 + 10.0);
     let max = (right - left).max(p.px(20.0));
@@ -389,7 +509,7 @@ fn compact_player(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regi
     let lw = f.x0 + f.w - p.px(22.0) - lx;
     let synced = d.lyrics.lines.is_some_and(|l| l.synced);
     if synced {
-        lyrics_flow(p, c, lx, p.px(6.0), lw, f.h - p.px(12.0), d, live, Flow { size: 16.0, pad: 0.0, anchor: 0.36, card: false });
+        lyrics_slot(p, c, lx, p.px(6.0), lw, f.h - p.px(12.0), d, live, Flow { size: 16.0, pad: 0.0, anchor: 0.36, card: false });
     } else {
         let th = p.px(16.0) * 1.3;
         let cy = f.h / 2.0;
@@ -398,7 +518,7 @@ fn compact_player(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regi
     }
 }
 
-fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live, row_h: f32) {
+fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live, row_h: f32, show_marquee: bool) {
     let Some(m) = &d.media else { return };
     let cy = row_h / 2.0;
     let a = p.px(20.0);
@@ -415,10 +535,36 @@ fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live:
     let (bw, gap, bh) = (p.px(3.0), p.px(3.0), p.px(14.0));
     let right = f.x0 + f.w - p.px(14.0);
     let x0 = right - 5.0 * bw - 4.0 * gap;
+    if show_marquee {
+        let left = f.x0 + p.px(12.0 + 20.0 + 8.0);
+        let vw = (x0 - p.px(8.0) - left).max(p.px(20.0));
+        let label = if m.artist.is_empty() {
+            m.title.to_string()
+        } else {
+            format!("{} \u{00B7} {}", m.title, m.artist)
+        };
+        if let (Ok(vp), Ok(cl)) = (p.comp.CreateContainerVisual(), p.comp.CreateInsetClip()) {
+            let _ = vp.SetOffset(Vector3 { X: left.round(), Y: 0.0, Z: 0.0 });
+            let _ = vp.SetSize(Vector2 { X: vw, Y: row_h });
+            let _ = vp.SetClip(&cl);
+            let _ = c.Children().and_then(|k| k.InsertAtTop(&vp));
+            let full_w = p.measure(&label, 12.0, 600);
+            if let Some((surf, tw, th)) = p.render_text_surface(&label, 12.0, 600, WHITE, full_w.max(vw) + p.px(4.0)) {
+                let ty = (cy - th as f32 / 2.0).round();
+                let travel = (tw as f32 - vw).max(0.0);
+                let x_init = if travel <= 0.5 { ((vw - tw as f32) / 2.0).round() } else { 0.0 };
+                if let Some(v) = p.place(&vp, &surf, x_init, ty, tw as f32, th as f32, 0.94) {
+                    if travel > 2.0 {
+                        live.marquee = Some(MarqueeLive { vis: v, travel, base_y: ty });
+                    }
+                }
+            }
+        }
+    }
     for i in 0..5 {
         if let Some(v) = p.rect(c, x0 + i as f32 * (bw + gap), cy - bh / 2.0, bw, bh, bw / 2.0, Color { A: 240, R: rgb[0], G: rgb[1], B: rgb[2] }) {
             let _ = v.SetCenterPoint(Vector3 { X: bw / 2.0, Y: bh / 2.0, Z: 0.0 });
-            let _ = v.SetScale(Vector3 { X: 1.0, Y: 0.3, Z: 1.0 });
+            let _ = v.SetScale(Vector3 { X: 1.0, Y: 0.28, Z: 1.0 });
             live.bars.push(v);
         }
     }
@@ -430,18 +576,14 @@ fn mmss(ms: i64) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn music_card(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, m: &MediaView, regions: &mut Vec<Region>) {
-    let tint = m.tint;
-    let bg = match tint {
-        Some(t) => Color { A: 48, R: t[0], G: t[1], B: t[2] },
-        None => white(18),
-    };
-    p.rect(c, x, y, w, h, p.px(18.0), bg);
+fn music_card(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, m: &MediaView, regions: &mut Vec<Region>, live: &mut Live) {
+    let glow = accent_or(m.tint);
+    card(p, c, x, y, w, h);
+    p.ambient_glow(c, x, y, w, h, p.px(18.0), glow);
     let pad = p.px(14.0);
     let art = p.px(64.0);
     let (ax, ay) = (x + pad, y + pad);
-    let glow = accent_or(tint);
-    p.rect(c, ax - p.px(4.0), ay - p.px(2.0), art + p.px(8.0), art + p.px(8.0), p.px(18.0), Color { A: 60, R: glow[0], G: glow[1], B: glow[2] });
+    p.rect(c, ax - p.px(4.0), ay - p.px(2.0), art + p.px(8.0), art + p.px(8.0), p.px(18.0), Color { A: 55, R: glow[0], G: glow[1], B: glow[2] });
     match m.art {
         Some(s) => {
             p.image(c, s, ax, ay, art, art, p.px(14.0));
@@ -463,23 +605,47 @@ fn music_card(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f
     let th = p.px(5.0);
     let frac = m.drag.unwrap_or(if m.dur_ms > 0 { m.pos_ms as f32 / m.dur_ms as f32 } else { 0.0 }).clamp(0.0, 1.0);
     p.rect(c, sx, sy - th / 2.0, sw, th, th / 2.0, white(52));
-    p.rect(c, sx, sy - th / 2.0, (sw * frac).max(th), th, th / 2.0, white(236));
-    let kx = sx + sw * frac;
-    if m.drag.is_some() {
-        let (kw, kh) = (p.px(28.0), p.px(18.0));
-        p.rect(c, kx - kw / 2.0, sy - kh / 2.0, kw, kh, kh / 2.0, white(125));
-        p.rect(c, kx - kw / 2.0 + p.px(1.5), sy - kh / 2.0 + p.px(1.5), kw - p.px(3.0), kh - p.px(3.0), (kh - p.px(3.0)) / 2.0, white(40));
-    } else {
-        let (kw, kh) = (p.px(18.0), p.px(12.0));
-        p.rect(c, kx - kw / 2.0, sy - kh / 2.0, kw, kh, kh / 2.0, white(250));
+
+    // Retained scrub fill, knob, and timestamps updated in-place during drag/1s tick.
+    let ty = sy + p.px(8.0);
+    let pos = if let Some(fr) = m.drag { (m.dur_ms as f32 * fr) as i64 } else { m.pos_ms };
+    let build_scrub = || -> windows_core::Result<ScrubLive> {
+        let fill_geo = p.comp.CreateRoundedRectangleGeometry()?;
+        fill_geo.SetCornerRadius(Vector2 { X: th / 2.0, Y: th / 2.0 })?;
+        let fill_clip = p.comp.CreateGeometricClip()?;
+        fill_clip.SetGeometry(&fill_geo)?;
+        let fill = p.comp.CreateSpriteVisual()?;
+        fill.SetOffset(Vector3 { X: sx, Y: sy - th / 2.0, Z: 0.0 })?;
+        fill.SetBrush(&p.comp.CreateColorBrushWithColor(white(236))?)?;
+        fill.SetClip(&fill_clip)?;
+        c.Children()?.InsertAtTop(&fill)?;
+
+        let knob_geo = p.comp.CreateRoundedRectangleGeometry()?;
+        let knob_clip = p.comp.CreateGeometricClip()?;
+        knob_clip.SetGeometry(&knob_geo)?;
+        let knob_brush = p.comp.CreateColorBrushWithColor(white(250))?;
+        let knob = p.comp.CreateSpriteVisual()?;
+        knob.SetBrush(&knob_brush)?;
+        knob.SetClip(&knob_clip)?;
+        c.Children()?.InsertAtTop(&knob)?;
+
+        let pos_vis = p.comp.CreateSpriteVisual()?;
+        pos_vis.SetOpacity(0.55)?;
+        c.Children()?.InsertAtTop(&pos_vis)?;
+        let rem_vis = p.comp.CreateSpriteVisual()?;
+        rem_vis.SetOpacity(0.55)?;
+        c.Children()?.InsertAtTop(&rem_vis)?;
+
+        Ok(ScrubLive { sx, sw, sy, th, ty, dur_ms: m.dur_ms, fill, fill_geo, knob, knob_geo, knob_brush, pos_vis, rem_vis, last_pos_sec: -1 })
+    };
+    if let Ok(mut sl) = build_scrub() {
+        sl.update(p, frac, m.drag.is_some(), pos);
+        live.scrub = Some(sl);
     }
+
     if m.can_seek && m.dur_ms > 0 {
         regions.push(Region { x: sx - p.px(6.0), y: sy - p.px(12.0), w: sw + p.px(12.0), h: p.px(24.0), action: Action::Seek(sx, sw), vis: None });
     }
-    let pos = if let Some(fr) = m.drag { (m.dur_ms as f32 * fr) as i64 } else { m.pos_ms };
-    let ty = sy + p.px(8.0);
-    p.text(c, &mmss(pos), sx, ty, 10.5, 500, WHITE, 0.55, Anchor::Left, sw / 2.0);
-    p.text(c, &format!("-{}", mmss(m.dur_ms - pos)), sx + sw, ty, 10.5, 500, WHITE, 0.55, Anchor::Right, sw / 2.0);
 
     let cy = y + h - p.px(20.0);
     let cx = x + w / 2.0;
@@ -607,9 +773,14 @@ fn header(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, re
     let n0 = kids(c);
     p.sym(c, Sym::Gear, gx, cy, 16.0, WHITE, 0.7);
     regions.push(Region { x: gx - p.px(16.0), y: cy - p.px(15.0), w: p.px(32.0), h: p.px(30.0), action: Action::Settings, vis: group_since(c, n0) });
+    let px_btn = gx - p.px(28.0);
+    let n0 = kids(c);
+    let pin_rgb = if d.pinned { crate::prefs::accent() } else { WHITE };
+    p.sym(c, Sym::Pin, px_btn, cy, 15.0, pin_rgb, if d.pinned { 1.0 } else { 0.62 });
+    regions.push(Region { x: px_btn - p.px(14.0), y: cy - p.px(15.0), w: p.px(28.0), h: p.px(30.0), action: Action::Pin, vis: group_since(c, n0) });
     if let Some((pct, charging)) = d.battery {
         let label = if charging { format!("\u{26A1}{pct}%") } else { format!("{pct}%") };
-        p.text(c, &label, gx - p.px(18.0), cy - th / 2.0, 12.5, 600, if charging { GREEN } else { WHITE }, 0.82, Anchor::Right, p.px(80.0));
+        p.text(c, &label, px_btn - p.px(18.0), cy - th / 2.0, 12.5, 600, if charging { GREEN } else { WHITE }, 0.82, Anchor::Right, p.px(80.0));
     }
 }
 
@@ -621,14 +792,14 @@ fn play(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut 
     let lw = f.w - 2.0 * pad - mw - gap;
     let (mx, lx) = (f.x0 + pad, f.x0 + pad + mw + gap);
     match &d.media {
-        Some(m) => music_card(p, c, mx, top, mw, h, m, regions),
+        Some(m) => music_card(p, c, mx, top, mw, h, m, regions, live),
         None => {
             card(p, c, mx, top, mw, h);
             p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.35);
             p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.6, Anchor::Center, mw - p.px(20.0));
         }
     }
-    lyrics_flow(p, c, lx, top, lw, h, d, live, Flow { size: 17.0, pad: 16.0, anchor: 0.30, card: true });
+    lyrics_slot(p, c, lx, top, lw, h, d, live, Flow { size: 17.0, pad: 16.0, anchor: 0.30, card: true });
 }
 
 #[derive(Clone, Copy)]
@@ -640,11 +811,31 @@ struct Flow {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lyrics_flow(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, d: &Data, live: &mut Live, fl: Flow) {
+fn lyrics_slot(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, d: &Data, live: &mut Live, fl: Flow) {
+    if let Ok(host) = p.comp.CreateContainerVisual() {
+        let _ = c.Children().and_then(|k| k.InsertAtTop(&host));
+        lyrics_flow(p, &host, x, y, w, h, d.media.is_some(), &d.lyrics, live, fl);
+        live.lyrics_host = Some(LyricsHostLive { host, x, y, w, h, size: fl.size, pad: fl.pad, anchor: fl.anchor, card: fl.card });
+    }
+}
+
+pub fn refresh_lyrics_in_place(p: &mut Painter, live: &mut Live, has_media: bool, ly: &LyricsView) {
+    let Some(h) = live.lyrics_host.as_ref() else { return };
+    let host = h.host.clone();
+    let (x, y, w, h_px, fl) = (h.x, h.y, h.w, h.h, Flow { size: h.size, pad: h.pad, anchor: h.anchor, card: h.card });
+    if let Ok(k) = host.Children() {
+        let _ = k.RemoveAll();
+    }
+    live.lyric_scroll = None;
+    live.lyric_shift = 0.0;
+    lyrics_flow(p, &host, x, y, w, h_px, has_media, ly, live, fl);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lyrics_flow(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, has_media: bool, ly: &LyricsView, live: &mut Live, fl: Flow) {
     if fl.card {
         card(p, c, x, y, w, h);
     }
-    let ly = &d.lyrics;
     let note = match ly.lines {
         Some(l) if !l.synced => tr("Lirik tanpa waktu"),
         Some(_) if ly.lrclib => "LRCLIB",
@@ -654,7 +845,7 @@ fn lyrics_flow(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: 
         p.text(c, s, x + w / 2.0, y + h / 2.0 - p.px(8.0), 13.0, 600, WHITE, 0.45, Anchor::Center, w - p.px(20.0));
     };
     let Some(l) = ly.lines else {
-        match (ly.state, d.media.is_some()) {
+        match (ly.state, has_media) {
             (LyrState::Loading, _) => center_msg(p, tr("Mencari lirik\u{2026}")),
             (_, true) => center_msg(p, tr("Lirik tidak tersedia")),
             _ => center_msg(p, tr("Lirik tampil di sini saat lagu diputar.")),

@@ -58,7 +58,6 @@ fn glyph_of(k: Kind) -> &'static str {
         Kind::Share => "\u{E72D}",
         Kind::Airplane => "\u{E709}",
         Kind::NowPlaying => "\u{E8D6}",
-        Kind::Stage => "\u{E8A0}",
         Kind::Mirror => "\u{EC15}",
         Kind::Focus => "\u{E708}",
         Kind::DarkMode => "\u{E790}",
@@ -518,7 +517,6 @@ impl Cc {
         match k {
             Kind::Wifi => self.wifi == Some(true),
             Kind::Bluetooth => self.bt == Some(true),
-            Kind::Stage => prefs::get().stage,
             Kind::DarkMode => prefs::look(prefs::Role::Dark).dark && prefs::get().theme == nacre_core::settings::Theme::Dark,
             _ => false,
         }
@@ -1303,10 +1301,6 @@ impl Cc {
                         _ => Command::Next,
                     });
                 }
-            }
-            Kind::Stage => {
-                prefs::update(|s| s.stage = !s.stage);
-                self.build();
             }
             Kind::DarkMode => {
                 prefs::update(|s| {

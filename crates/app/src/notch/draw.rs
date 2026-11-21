@@ -81,6 +81,91 @@ impl Painter {
         go().ok()
     }
 
+    pub fn render_text_surface(
+        &mut self,
+        s: &str,
+        size: f32,
+        weight: i32,
+        rgb: [u8; 3],
+        max_w: f32,
+    ) -> Option<(CompositionDrawingSurface, i32, i32)> {
+        if s.is_empty() {
+            return None;
+        }
+        let px = (size * self.dpi).round() as i32;
+        let st = Style { px, weight };
+        let (tw, th) = text::measure(s, &st);
+        let w = (tw + 2).min(max_w.max(1.0) as i32).max(1);
+        let key = format!("t|{px}|{weight}|{rgb:?}|{w}|{s}");
+        if let Some(v) = self.cache.get(&key) {
+            return Some(v.clone());
+        }
+        let bmp = text::render(s, &st, w, th)?;
+        let sf = self.gfx.surface_from_bgra(bmp.w, bmp.h, &recolor(&bmp.bgra, rgb)).ok()?;
+        self.trim();
+        let v = (sf, bmp.w as i32, bmp.h as i32);
+        self.cache.insert(key, v.clone());
+        Some(v)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn ambient_glow(
+        &mut self,
+        parent: &ContainerVisual,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        rgb: [u8; 3],
+    ) -> Option<SpriteVisual> {
+        let key = format!("glow|{rgb:?}");
+        let surf = match self.cache.get(&key) {
+            Some((s, _, _)) => s.clone(),
+            None => {
+                const GW: u32 = 64;
+                const GH: u32 = 48;
+                let mut bgra = vec![0u8; (GW * GH * 4) as usize];
+                for yy in 0..GH {
+                    for xx in 0..GW {
+                        let nx = (xx as f32 + 0.5) / GW as f32;
+                        let ny = (yy as f32 + 0.5) / GH as f32;
+                        // Warm radial halo centered behind the album art (top-left quadrant) + subtle card wash.
+                        let dx = (nx - 0.24) * 1.15;
+                        let dy = (ny - 0.34) * 1.25;
+                        let d = (dx * dx + dy * dy).sqrt();
+                        let radial = (1.0 - (d / 0.85).clamp(0.0, 1.0)).powi(2);
+                        let wash = 0.14 + 0.34 * radial;
+                        let a = (wash.clamp(0.0, 0.52) * 255.0).round() as u32;
+                        let i = ((yy * GW + xx) * 4) as usize;
+                        bgra[i] = (rgb[2] as u32 * a / 255) as u8;
+                        bgra[i + 1] = (rgb[1] as u32 * a / 255) as u8;
+                        bgra[i + 2] = (rgb[0] as u32 * a / 255) as u8;
+                        bgra[i + 3] = a as u8;
+                    }
+                }
+                let sf = self.gfx.surface_from_bgra(GW, GH, &bgra).ok()?;
+                self.trim();
+                self.cache.insert(key, (sf.clone(), GW as i32, GH as i32));
+                sf
+            }
+        };
+        let go = || -> windows_core::Result<SpriteVisual> {
+            let b = self.comp.CreateSurfaceBrushWithSurface(&surf)?;
+            b.SetStretch(CompositionStretch::Fill)?;
+            let v = self.comp.CreateSpriteVisual()?;
+            v.SetBrush(&b)?;
+            v.SetSize(Vector2 { X: w, Y: h })?;
+            v.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
+            if radius > 0.0 {
+                v.SetClip(&clip(&self.comp, w, h, radius)?)?;
+            }
+            parent.Children()?.InsertAtTop(&v)?;
+            Ok(v)
+        };
+        go().ok()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn text(&mut self, parent: &ContainerVisual, s: &str, x: f32, y: f32, size: f32, weight: i32, rgb: [u8; 3], opacity: f32, anchor: Anchor, max_w: f32) -> f32 {
         self.text_v(parent, s, x, y, size, weight, rgb, opacity, anchor, max_w).0

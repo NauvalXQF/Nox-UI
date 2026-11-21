@@ -3,7 +3,6 @@ pub enum Sym {
     Wifi,
     Search,
     Control,
-    Stage,
     Info,
     Gear,
     Bag,
@@ -45,6 +44,7 @@ pub enum Sym {
     ArrowDown,
     Check,
     ArrowUp,
+    Pin,
 }
 
 pub fn for_command(id: usize) -> Option<Sym> {
@@ -94,7 +94,6 @@ pub fn for_glyph(g: &str) -> Option<Sym> {
         "\u{E701}" => Some(Sym::Wifi),
         "\u{E721}" => Some(Sym::Search),
         "\u{E9E9}" => Some(Sym::Control),
-        "\u{E8A0}" => Some(Sym::Stage),
         _ => None,
     }
 }
@@ -333,10 +332,12 @@ fn shape(sym: Sym, p: P) -> bool {
                     line(p, (c.0 + r0 * a.cos(), c.1 + r0 * a.sin()), (c.0 + r1 * a.cos(), c.1 + r1 * a.sin()), w) <= 0.0
                 })
         }
-        Sym::Stage => {
-            let panel = rrect(p, (0.64, 0.5), (0.30, 0.31), 0.09).abs() - 0.036 <= 0.0;
-            let card_a = rrect(p, (0.11, 0.5), (0.055, 0.19), 0.04) <= 0.0;
-            panel || card_a
+        Sym::Pin => {
+            let head = line(p, (0.34, 0.16), (0.66, 0.16), 0.09) <= 0.0;
+            let body = poly(p, &[(0.38, 0.18), (0.62, 0.18), (0.68, 0.54), (0.32, 0.54)]) <= 0.0;
+            let bar = line(p, (0.24, 0.54), (0.76, 0.54), 0.085) <= 0.0;
+            let needle = line(p, (0.50, 0.54), (0.50, 0.88), 0.075) <= 0.0;
+            head || body || bar || needle
         }
     }
 }
@@ -384,7 +385,7 @@ mod tests {
     fn menu_symbols_draw_and_command_map() {
         assert_eq!(for_command(111), Some(Sym::Restart));
         assert_eq!(for_command(999), None);
-        for s in [Sym::Info, Sym::Gear, Sym::Bag, Sym::Grid, Sym::Windows, Sym::XCircle, Sym::Moon, Sym::Restart, Sym::Power, Sym::Lock, Sym::EyeSlash, Sym::Speaker, Sym::SpeakerWave, Sym::SpeakerLow, Sym::SpeakerMid, Sym::SpeakerMute, Sym::Sun, Sym::SunSmall, Sym::Bluetooth, Sym::Play, Sym::Pause, Sym::Backward, Sym::Forward, Sym::Plus, Sym::Minus, Sym::Calendar, Sym::Note, Sym::Stopwatch, Sym::Clock, Sym::Tray, Sym::Folder, Sym::Wifi1, Sym::Wifi2, Sym::ChevronRight, Sym::ChevronDown, Sym::Headphones, Sym::Keyboard, Sym::Mouse, Sym::ArrowDown, Sym::Check, Sym::ArrowUp] {
+        for s in [Sym::Info, Sym::Gear, Sym::Bag, Sym::Grid, Sym::Windows, Sym::XCircle, Sym::Moon, Sym::Restart, Sym::Power, Sym::Lock, Sym::EyeSlash, Sym::Speaker, Sym::SpeakerWave, Sym::SpeakerLow, Sym::SpeakerMid, Sym::SpeakerMute, Sym::Sun, Sym::SunSmall, Sym::Bluetooth, Sym::Play, Sym::Pause, Sym::Backward, Sym::Forward, Sym::Plus, Sym::Minus, Sym::Calendar, Sym::Note, Sym::Stopwatch, Sym::Clock, Sym::Tray, Sym::Folder, Sym::Wifi1, Sym::Wifi2, Sym::ChevronRight, Sym::ChevronDown, Sym::Headphones, Sym::Keyboard, Sym::Mouse, Sym::ArrowDown, Sym::Check, Sym::ArrowUp, Sym::Pin] {
             let b = render(s, 40, [255, 255, 255]);
             let filled = b.chunks_exact(4).filter(|p| p[3] > 128).count();
             assert!(filled > 40 && filled < 40 * 40 * 3 / 4, "{s:?} terisi {filled}");
@@ -448,13 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn control_and_stage_draw_and_premultiply() {
-        for s in [Sym::Control, Sym::Stage] {
-            let b = render(s, 48, [200, 100, 50]);
-            assert!(b.chunks_exact(4).any(|p| p[3] > 200));
-            for p in b.chunks_exact(4) {
-                assert!(p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]);
-            }
+    fn control_draws_and_premultiplies() {
+        let b = render(Sym::Control, 48, [200, 100, 50]);
+        assert!(b.chunks_exact(4).any(|p| p[3] > 200));
+        for p in b.chunks_exact(4) {
+            assert!(p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]);
         }
     }
 }

@@ -20,9 +20,11 @@ use nacre_ui::glass::{GlassPanel, GlassParams, Tier};
 use nacre_ui::host::{Host, Surface};
 use menu::{Menu, MENU_CLOSE, MENU_PICK};
 use preview::{Preview, PREVIEW_CLICK, PREVIEW_ENTER, PREVIEW_LEAVE};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use crate::strip::Strip;
 use tooltip::Tooltip;
@@ -36,7 +38,9 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_core::{Interface, HSTRING};
 use windows_numerics::Vector3;
@@ -45,9 +49,14 @@ pub const WM_ICONS: u32 = WM_APP + 3;
 pub const WM_APPBAR_SYNC: u32 = WM_APP + 4;
 const STRIP_ENTER: u32 = WM_APP + 5;
 const STRIP_LEAVE: u32 = WM_APP + 6;
+const WM_TRASH: u32 = WM_APP + 161;
+const WM_RECONF: u32 = WM_APP + 162;
+const WM_MODAL: u32 = WM_APP + 163;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_SETTINGCHANGE: u32 = 0x001A;
 const WM_POWERBROADCAST: u32 = 0x0218;
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 
 const TIMER_WINDOWS: usize = 100;
 const TIMER_APPBAR: usize = 101;
@@ -60,15 +69,36 @@ const TIMER_HIDEWIN: usize = 107;
 const TIMER_START: usize = 108;
 const TIMER_REGION: usize = 109;
 const TIMER_RECONF: usize = 110;
-const TIMER_TRASH: usize = 111;
 const TIMER_REVEAL: usize = 112;
 const TIMER_POLL: usize = 113;
-const TRASH_POLL_MS: u32 = 4000;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_DPICHANGED: u32 = 0x02E0;
 
 static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deferred {
+    MouseLeave,
+    CaptureChanged,
+    MenuClose,
+    Icons,
+    DisplayOrDpi,
+    ReconfForce,
+    GfxReset,
+}
+
+enum ModalAction {
+    TrashEmpty,
+    AddApp,
+    IconSpecial(&'static str),
+    IconApp(String),
+}
+
+thread_local! {
+    static DEFERRED: RefCell<Vec<Deferred>> = const { RefCell::new(Vec::new()) };
+    static MODAL: RefCell<Option<ModalAction>> = const { RefCell::new(None) };
+}
 
 const CMD_OPEN: usize = 1;
 const CMD_PIN: usize = 2;
@@ -173,6 +203,9 @@ pub struct Dock {
     surfaces: HashMap<String, CompositionDrawingSurface>,
     requested: HashSet<String>,
     trash_full: bool,
+    trash_stop: Arc<AtomicBool>,
+    trash_poke: mpsc::Sender<()>,
+    force_reconf: bool,
     worker: icons::Worker,
     plates: bool,
 
@@ -206,13 +239,60 @@ fn f32_ref(v: f32) -> windows_core::Result<windows::Foundation::IReference<f32>>
     windows::Foundation::PropertyValue::CreateSingle(v)?.cast()
 }
 
+struct BusyGuard;
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::Release);
+    }
+}
+
+fn enqueue_deferred(d: Deferred) {
+    DEFERRED.with(|q| {
+        let mut q = q.borrow_mut();
+        if !q.contains(&d) {
+            q.push(d);
+        }
+    });
+}
+
 fn with_dock<R>(hwnd: HWND, f: impl FnOnce(&mut Dock) -> R) -> Option<R> {
+    with_dock_defer(hwnd, None, f)
+}
+
+fn with_dock_defer<R>(hwnd: HWND, defer: Option<Deferred>, f: impl FnOnce(&mut Dock) -> R) -> Option<R> {
     let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Dock;
-    if p.is_null() || BUSY.swap(true, Ordering::Acquire) {
+    if p.is_null() {
         return None;
     }
-    let r = f(unsafe { &mut *p });
-    BUSY.store(false, Ordering::Release);
+    if BUSY.swap(true, Ordering::Acquire) {
+        if let Some(d) = defer {
+            enqueue_deferred(d);
+        }
+        return None;
+    }
+    let _guard = BusyGuard;
+    let dock = unsafe { &mut *p };
+    let r = f(dock);
+    loop {
+        let pending = DEFERRED.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        if pending.is_empty() {
+            break;
+        }
+        for ev in pending {
+            match ev {
+                Deferred::MouseLeave => dock.on_leave(),
+                Deferred::CaptureChanged => dock.cancel_press(),
+                Deferred::MenuClose => dock.on_menu_close(),
+                Deferred::Icons => dock.on_icons(),
+                Deferred::DisplayOrDpi => timer(dock.hwnd, TIMER_RECONF, 500),
+                Deferred::ReconfForce => {
+                    dock.force_reconf = true;
+                    timer(dock.hwnd, TIMER_RECONF, 500);
+                }
+                Deferred::GfxReset => dock.on_gfx_reset(),
+            }
+        }
+    }
     Some(r)
 }
 
@@ -233,6 +313,15 @@ pub fn request_appbar_resync() {
     if h != 0 {
         unsafe {
             let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APPBAR_SYNC, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+pub fn request_reconfigure() {
+    let h = DOCK_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), WM_RECONF, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -326,6 +415,23 @@ impl Dock {
             let worker = icons::spawn_worker(px, move || {
                 let _ = PostMessageW(Some(HWND(hw as *mut _)), WM_ICONS, WPARAM(0), LPARAM(0));
             });
+            let trash_stop = Arc::new(AtomicBool::new(false));
+            let (trash_poke, trash_rx) = mpsc::channel::<()>();
+            {
+                let stop = trash_stop.clone();
+                let _ = std::thread::Builder::new().name("abra-trash".into()).spawn(move || {
+                    let mut last: Option<bool> = None;
+                    while !stop.load(Ordering::Relaxed) {
+                        let full = nacre_platform::recycle::is_full();
+                        if last != Some(full) {
+                            last = Some(full);
+                            let _ = PostMessageW(Some(HWND(hw as *mut _)), WM_TRASH, WPARAM(full as usize), LPARAM(0));
+                        }
+                        let _ = trash_rx.recv_timeout(Duration::from_millis(4000));
+                        while trash_rx.try_recv().is_ok() {}
+                    }
+                });
+            }
 
             custom_icons::install();
             nacre_platform::iconpack::configure(&paths::config_dir().join("iconpack"), crate::prefs::get().icon_pack);
@@ -387,7 +493,10 @@ impl Dock {
                 layout: Layout { cells: vec![], total: 0.0 },
                 surfaces: HashMap::new(),
                 requested: HashSet::new(),
-                trash_full: nacre_platform::recycle::is_full(),
+                trash_full: false,
+                trash_stop,
+                trash_poke,
+                force_reconf: false,
                 worker,
                 plates: crate::prefs::get().dock_plates,
                 tracking: false,
@@ -422,6 +531,7 @@ impl Dock {
             DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
             crate::prefs::listen(hwnd);
+            crate::services::listen_gfx(hwnd);
             tracker::install(on_windows_changed);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             with_dock(hwnd, |d| {
@@ -432,7 +542,6 @@ impl Dock {
                 }
             });
             timer(hwnd, TIMER_START, 1600);
-            timer(hwnd, TIMER_TRASH, TRASH_POLL_MS);
             timer(hwnd, TIMER_POLL, 1200);
             log::line("dock", &format!("dibuat tier={tier:?} mode={mode:?}"));
             Ok(hwnd)
@@ -484,28 +593,56 @@ impl Dock {
         );
     }
 
-    fn on_reconfigure(&mut self) {
+    fn on_reconfigure(&mut self, force: bool) {
         let screen = sys::screen_size();
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0 * crate::prefs::ui_scale();
-        if screen == self.screen && (dpi - self.dpi).abs() < 0.01 {
+        let changed = screen != self.screen || (dpi - self.dpi).abs() >= 0.01;
+        if !force && !changed {
             return;
         }
-        log::line("dock", &format!("reconfigurasi {}x{}@{} → {}x{}@{}", self.screen.0, self.screen.1, self.dpi, screen.0, screen.1, dpi));
-        self.hide_popups();
-        self.tooltip = None;
-        self.preview = None;
-        self.screen = screen;
-        self.dpi = dpi;
-        self.m = metrics_from_prefs(dpi);
-        self.pad_side = 10.0 * dpi;
-        self.compute_geometry();
-        let _ = self.panel.set_radius(22.0 * dpi * crate::prefs::round(crate::prefs::Role::Dock));
-        self.last_card = (0.0, 0.0, 0.0, 0.0);
-        self.signature.clear();
-        self.refresh_windows();
+        self.refresh_tier();
+        if changed {
+            log::line("dock", &format!("reconfigurasi {}x{}@{} → {}x{}@{}", self.screen.0, self.screen.1, self.dpi, screen.0, screen.1, dpi));
+            self.hide_popups();
+            self.tooltip = None;
+            self.preview = None;
+            self.menu = None;
+            self.menu_open = false;
+            self.screen = screen;
+            self.dpi = dpi;
+            self.m = metrics_from_prefs(dpi);
+            self.pad_side = 10.0 * dpi;
+            let px = ((self.m.icon * self.m.max_scale * 1.15) as i32).clamp(64, 256);
+            if px != self.icon_px {
+                self.icon_px = px;
+                let hw = self.hwnd.0 as isize;
+                self.worker = icons::spawn_worker(px, move || unsafe {
+                    let _ = PostMessageW(Some(HWND(hw as *mut _)), WM_ICONS, WPARAM(0), LPARAM(0));
+                });
+                self.surfaces.clear();
+                self.requested.clear();
+            }
+            self.compute_geometry();
+            let _ = self.panel.set_radius(22.0 * dpi * crate::prefs::round(crate::prefs::Role::Dock));
+            self.last_card = (0.0, 0.0, 0.0, 0.0);
+            self.signature.clear();
+            self.refresh_windows();
+        }
         if self.opts.appbar {
             self.reserve_strip();
         }
+    }
+
+    fn on_gfx_reset(&mut self) {
+        self.hide_popups();
+        self.tooltip = None;
+        self.preview = None;
+        self.menu = None;
+        self.menu_open = false;
+        self.surfaces.clear();
+        self.requested.clear();
+        self.signature.clear();
+        self.refresh_windows();
     }
 
     fn apply_metrics(&mut self) {
@@ -1076,10 +1213,22 @@ impl Dock {
         Some((i, *self.entries.get(i)?))
     }
 
+    fn cancel_press(&mut self) {
+        self.press = None;
+        if self.dragging.take().is_some() {
+            self.apply(None, false);
+            self.bind_expressions();
+        }
+    }
+
     fn on_move(&mut self, x: f32, y: f32) {
         if self.press.is_some() {
-            self.drag_update(x, y);
-            return;
+            if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+                self.cancel_press();
+            } else {
+                self.drag_update(x, y);
+                return;
+            }
         }
         if !self.region_full {
             kill(self.hwnd, TIMER_REGION);
@@ -1625,33 +1774,23 @@ impl Dock {
             }
             CMD_SETTINGS => crate::settings_win::open(&self.comp),
             CMD_TRASH_OPEN => launch::open("shell:RecycleBinFolder"),
-            CMD_TRASH_EMPTY => unsafe {
-                let _ = windows::Win32::UI::Shell::SHEmptyRecycleBinW(Some(self.hwnd), windows::core::PCWSTR::null(), 0);
-                timer(self.hwnd, TIMER_TRASH, 300);
-            },
+            CMD_TRASH_EMPTY => {
+                MODAL.with(|m| *m.borrow_mut() = Some(ModalAction::TrashEmpty));
+                unsafe {
+                    let _ = PostMessageW(Some(self.hwnd), WM_MODAL, WPARAM(0), LPARAM(0));
+                }
+            }
             CMD_ADD => {
-                let picked = nacre_platform::pick::open_file(
-                    crate::prefs::tr("Pilih aplikasi"),
-                    &[(crate::prefs::tr("Aplikasi"), "*.exe;*.lnk"), ("*.*", "*.*")],
-                );
-                if let Some(p) = picked {
-                    self.add_app(&p);
+                MODAL.with(|m| *m.borrow_mut() = Some(ModalAction::AddApp));
+                unsafe {
+                    let _ = PostMessageW(Some(self.hwnd), WM_MODAL, WPARAM(0), LPARAM(0));
                 }
             }
             CMD_ICON if info.special.is_some() => {
                 let key = info.special.unwrap_or(START_KEY);
-                let picked = nacre_platform::pick::open_file(
-                    crate::prefs::tr("Pilih gambar ikon"),
-                    &[(crate::prefs::tr("Gambar"), "*.png;*.jpg;*.jpeg;*.ico;*.bmp;*.gif")],
-                );
-                if let Some(img) = picked {
-                    if custom_icons::set(key, &img) {
-                        self.reload_icon(key);
-                        self.signature.clear();
-                        self.refresh_windows();
-                    } else {
-                        log::line("dock", "gambar ikon tidak valid");
-                    }
+                MODAL.with(|m| *m.borrow_mut() = Some(ModalAction::IconSpecial(key)));
+                unsafe {
+                    let _ = PostMessageW(Some(self.hwnd), WM_MODAL, WPARAM(0), LPARAM(0));
                 }
             }
             CMD_ICON_RESET if info.special.is_some() => {
@@ -1663,16 +1802,9 @@ impl Dock {
             }
             CMD_ICON => {
                 if let Some(it) = &info.item {
-                    let picked = nacre_platform::pick::open_file(
-                        crate::prefs::tr("Pilih gambar ikon"),
-                        &[(crate::prefs::tr("Gambar"), "*.png;*.jpg;*.jpeg;*.ico;*.bmp;*.gif")],
-                    );
-                    if let Some(img) = picked {
-                        if custom_icons::set(&it.path, &img) {
-                            self.reload_icon(&it.path);
-                        } else {
-                            log::line("dock", "gambar ikon tidak valid");
-                        }
+                    MODAL.with(|m| *m.borrow_mut() = Some(ModalAction::IconApp(it.path.clone())));
+                    unsafe {
+                        let _ = PostMessageW(Some(self.hwnd), WM_MODAL, WPARAM(0), LPARAM(0));
                     }
                 }
             }
@@ -1694,6 +1826,18 @@ impl Dock {
         match id {
             TIMER_WINDOWS => self.refresh_windows(),
             TIMER_POLL => {
+                if self.tracking && self.dragging.is_none() && !self.menu_open && !self.preview_hover {
+                    let mut pt = POINT::default();
+                    if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+                        let inside = pt.x >= self.win_pos.0
+                            && pt.x < self.win_pos.0 + self.win.0
+                            && pt.y >= self.win_pos.1
+                            && pt.y < self.win_pos.1 + self.win.1;
+                        if !inside {
+                            self.on_leave();
+                        }
+                    }
+                }
                 let prev = self.overlap;
                 self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.screen);
                 if self.overlap.fullscreen && crate::prefs::get().above_fullscreen {
@@ -1748,14 +1892,9 @@ impl Dock {
                     self.set_region(false);
                 }
             }
-            TIMER_RECONF => self.on_reconfigure(),
-            TIMER_TRASH => {
-                let full = nacre_platform::recycle::is_full();
-                if full != self.trash_full {
-                    self.trash_full = full;
-                    self.update_trash_icon();
-                }
-                timer(self.hwnd, TIMER_TRASH, TRASH_POLL_MS);
+            TIMER_RECONF => {
+                let force = std::mem::take(&mut self.force_reconf);
+                self.on_reconfigure(force);
             }
             _ => {}
         }
@@ -1822,7 +1961,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            with_dock(hwnd, |d| d.on_leave());
+            with_dock_defer(hwnd, Some(Deferred::MouseLeave), |d| d.on_leave());
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -1836,13 +1975,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
-            with_dock(hwnd, |d| {
-                if d.dragging.take().is_some() {
-                    d.press = None;
-                    d.apply(None, false);
-                    d.bind_expressions();
-                }
-            });
+            with_dock_defer(hwnd, Some(Deferred::CaptureChanged), |d| d.cancel_press());
             LRESULT(0)
         }
         WM_MBUTTONUP => {
@@ -1860,7 +1993,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         MENU_CLOSE => {
-            with_dock(hwnd, |d| d.on_menu_close());
+            with_dock_defer(hwnd, Some(Deferred::MenuClose), |d| d.on_menu_close());
             LRESULT(0)
         }
         WM_TIMER => {
@@ -1868,11 +2001,86 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         WM_ICONS => {
-            with_dock(hwnd, |d| d.on_icons());
+            with_dock_defer(hwnd, Some(Deferred::Icons), |d| d.on_icons());
+            LRESULT(0)
+        }
+        WM_TRASH => {
+            let full = wp.0 != 0;
+            with_dock(hwnd, |d| {
+                if full != d.trash_full {
+                    d.trash_full = full;
+                    d.update_trash_icon();
+                }
+            });
+            LRESULT(0)
+        }
+        WM_MODAL => {
+            if let Some(action) = MODAL.with(|m| m.borrow_mut().take()) {
+                match action {
+                    ModalAction::TrashEmpty => {
+                        let _ = windows::Win32::UI::Shell::SHEmptyRecycleBinW(Some(hwnd), windows::core::PCWSTR::null(), 0);
+                        with_dock(hwnd, |d| {
+                            let _ = d.trash_poke.send(());
+                        });
+                    }
+                    ModalAction::AddApp => {
+                        let picked = nacre_platform::pick::open_file(
+                            crate::prefs::tr("Pilih aplikasi"),
+                            &[(crate::prefs::tr("Aplikasi"), "*.exe;*.lnk"), ("*.*", "*.*")],
+                        );
+                        if let Some(p) = picked {
+                            with_dock(hwnd, |d| d.add_app(&p));
+                        }
+                    }
+                    ModalAction::IconSpecial(key) => {
+                        let picked = nacre_platform::pick::open_file(
+                            crate::prefs::tr("Pilih gambar ikon"),
+                            &[(crate::prefs::tr("Gambar"), "*.png;*.jpg;*.jpeg;*.ico;*.bmp;*.gif")],
+                        );
+                        if let Some(img) = picked {
+                            with_dock(hwnd, |d| {
+                                if custom_icons::set(key, &img) {
+                                    d.reload_icon(key);
+                                    d.signature.clear();
+                                    d.refresh_windows();
+                                } else {
+                                    log::line("dock", "gambar ikon tidak valid");
+                                }
+                            });
+                        }
+                    }
+                    ModalAction::IconApp(path) => {
+                        let picked = nacre_platform::pick::open_file(
+                            crate::prefs::tr("Pilih gambar ikon"),
+                            &[(crate::prefs::tr("Gambar"), "*.png;*.jpg;*.jpeg;*.ico;*.bmp;*.gif")],
+                        );
+                        if let Some(img) = picked {
+                            with_dock(hwnd, |d| {
+                                if custom_icons::set(&path, &img) {
+                                    d.reload_icon(&path);
+                                } else {
+                                    log::line("dock", "gambar ikon tidak valid");
+                                }
+                            });
+                        }
+                    }
+                }
+            }
             LRESULT(0)
         }
         WM_APPBAR_SYNC => {
             timer(hwnd, TIMER_APPBAR, 400);
+            LRESULT(0)
+        }
+        WM_RECONF => {
+            with_dock_defer(hwnd, Some(Deferred::ReconfForce), |d| {
+                d.force_reconf = true;
+                timer(hwnd, TIMER_RECONF, 500);
+            });
+            LRESULT(0)
+        }
+        crate::services::WM_GFX_RESET => {
+            with_dock_defer(hwnd, Some(Deferred::GfxReset), |d| d.on_gfx_reset());
             LRESULT(0)
         }
         WM_DROPFILES => {
@@ -1883,7 +2091,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         crate::prefs::WM_PREFS => {
             with_dock(hwnd, |d| {
                 d.apply_prefs();
-                d.on_reconfigure();
+                d.on_reconfigure(false);
             });
             LRESULT(0)
         }
@@ -1915,14 +2123,35 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
-            timer(hwnd, TIMER_RECONF, 500);
+            if BUSY.load(Ordering::Acquire) {
+                enqueue_deferred(Deferred::DisplayOrDpi);
+            } else {
+                timer(hwnd, TIMER_RECONF, 500);
+            }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
-        WM_SETTINGCHANGE | WM_POWERBROADCAST => {
+        WM_SETTINGCHANGE => {
             with_dock(hwnd, |d| d.refresh_tier());
             DefWindowProcW(hwnd, msg, wp, lp)
         }
+        WM_POWERBROADCAST => {
+            if wp.0 == PBT_APMRESUMEAUTOMATIC || wp.0 == PBT_APMRESUMESUSPEND {
+                with_dock_defer(hwnd, Some(Deferred::ReconfForce), |d| {
+                    d.refresh_tier();
+                    d.force_reconf = true;
+                    timer(hwnd, TIMER_RECONF, 600);
+                });
+            } else {
+                with_dock(hwnd, |d| d.refresh_tier());
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_DESTROY => {
+            with_dock(hwnd, |d| {
+                d.trash_stop.store(true, Ordering::Relaxed);
+                let _ = d.trash_poke.send(());
+            });
+            crate::services::unlisten_gfx(hwnd);
             nacre_platform::shell::appbar::release();
             DOCK_HWND.store(0, Ordering::Relaxed);
             LRESULT(0)

@@ -145,6 +145,39 @@ pub fn shutdown() {
     }
 }
 
+pub fn paste_text() -> Option<String> {
+    unsafe {
+        let hwnd = HWND(HWND_LISTENER.load(Ordering::Relaxed) as *mut _);
+        let owner = (!hwnd.0.is_null()).then_some(hwnd);
+        for _ in 0..6 {
+            if OpenClipboard(owner).is_ok() {
+                let r = (|| {
+                    if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
+                        return None;
+                    }
+                    let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+                    let g = windows::Win32::Foundation::HGLOBAL(h.0);
+                    let p = GlobalLock(g) as *const u16;
+                    if p.is_null() {
+                        return None;
+                    }
+                    let mut n = 0usize;
+                    while *p.add(n) != 0 && n < 200_000 {
+                        n += 1;
+                    }
+                    let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+                    let _ = GlobalUnlock(g);
+                    Some(s)
+                })();
+                let _ = CloseClipboard();
+                return r;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
+        None
+    }
+}
+
 pub fn copy_text(text: &str) -> bool {
     unsafe {
         let hwnd = HWND(HWND_LISTENER.load(Ordering::Relaxed) as *mut _);

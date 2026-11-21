@@ -56,7 +56,6 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef { id: "lock", title: "Kunci Layar", app: "Sistem", default_key: "lk" },
     ActionDef { id: "desktop", title: "Tampilkan Desktop", app: "Sistem", default_key: "" },
     ActionDef { id: "dark", title: "Ganti Mode Gelap", app: "ABRA", default_key: "dm" },
-    ActionDef { id: "stage", title: "Nyalakan/Matikan Scene", app: "ABRA", default_key: "sm" },
     ActionDef { id: "mission", title: "Overview", app: "ABRA", default_key: "mc" },
     ActionDef { id: "calc", title: "Buka Kalkulator", app: "Kalkulator", default_key: "ca" },
     ActionDef { id: "taskmgr", title: "Buka Task Manager", app: "Sistem", default_key: "" },

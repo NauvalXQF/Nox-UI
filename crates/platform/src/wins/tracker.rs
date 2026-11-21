@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
     EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
@@ -12,6 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 static FOCUS: Mutex<Option<HashMap<isize, i64>>> = Mutex::new(None);
 static CALLBACKS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
 static FX_CALLBACKS: Mutex<Vec<fn(u32, isize)>> = Mutex::new(Vec::new());
+static HOOKS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static HOOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static EXTERNAL_FG: AtomicIsize = AtomicIsize::new(0);
 
@@ -70,10 +71,7 @@ unsafe extern "system" fn callback(
             f(event, hwnd.0 as isize);
         }
     }
-    if event == EVENT_OBJECT_UNCLOAKED {
-        return;
-    }
-    if event == EVENT_OBJECT_LOCATIONCHANGE && hwnd != GetForegroundWindow() {
+    if event == EVENT_OBJECT_UNCLOAKED || event == EVENT_OBJECT_LOCATIONCHANGE {
         return;
     }
     if event == EVENT_SYSTEM_FOREGROUND {
@@ -99,18 +97,12 @@ pub const EV_LOCATION: u32 = EVENT_OBJECT_LOCATIONCHANGE;
 pub const EV_SHOW: u32 = EVENT_OBJECT_SHOW;
 pub const EV_UNCLOAKED: u32 = EVENT_OBJECT_UNCLOAKED;
 
-pub fn install(on_change: fn()) {
-    CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).push(on_change);
-    unsafe {
-        let fg = GetForegroundWindow();
-        let mut pid = 0u32;
-        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut pid));
-        if !fg.0.is_null() && pid != std::process::id() && EXTERNAL_FG.load(Ordering::Relaxed) == 0 {
-            EXTERNAL_FG.store(fg.0 as isize, Ordering::Relaxed);
+fn install_hooks() {
+    let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    for h in hooks.drain(..) {
+        unsafe {
+            let _ = UnhookWinEvent(HWINEVENTHOOK(h as *mut _));
         }
-    }
-    if HOOKED.swap(true, Ordering::Relaxed) {
-        return;
     }
     for ev in [
         EVENT_OBJECT_CREATE,
@@ -124,8 +116,31 @@ pub fn install(on_change: fn()) {
         EVENT_SYSTEM_MINIMIZEEND,
         EVENT_OBJECT_UNCLOAKED,
     ] {
-        unsafe {
-            let _ = SetWinEventHook(ev, ev, None, Some(callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        let h = unsafe { SetWinEventHook(ev, ev, None, Some(callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS) };
+        if !h.is_invalid() {
+            hooks.push(h.0 as isize);
         }
     }
+}
+
+pub fn reinstall() {
+    if HOOKED.load(Ordering::Relaxed) {
+        install_hooks();
+    }
+}
+
+pub fn install(on_change: fn()) {
+    CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).push(on_change);
+    unsafe {
+        let fg = GetForegroundWindow();
+        let mut pid = 0u32;
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut pid));
+        if !fg.0.is_null() && pid != std::process::id() && EXTERNAL_FG.load(Ordering::Relaxed) == 0 {
+            EXTERNAL_FG.store(fg.0 as isize, Ordering::Relaxed);
+        }
+    }
+    if HOOKED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    install_hooks();
 }

@@ -63,6 +63,22 @@ pub fn screen_size() -> (i32, i32) {
     unsafe { (GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN), GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN)) }
 }
 
+pub fn refresh_hz() -> u32 {
+    use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+    let mut info = DWM_TIMING_INFO {
+        cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe { DwmGetCompositionTimingInfo(windows::Win32::Foundation::HWND::default(), &mut info).is_ok() };
+    if ok && info.rateRefresh.uiDenominator > 0 {
+        let hz = (info.rateRefresh.uiNumerator as f64 / info.rateRefresh.uiDenominator as f64).round() as u32;
+        if (30..=240).contains(&hz) {
+            return hz;
+        }
+    }
+    60
+}
+
 pub fn apps_dark() -> bool {
     let mut v = 1u32;
     let mut size = 4u32;

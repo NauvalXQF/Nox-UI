@@ -567,7 +567,7 @@ impl Fx {
             }
             return;
         }
-        let shot = snapshot::capture(h, 1).filter(|s| !crate::stage::blank(&s.bmp));
+        let shot = snapshot::capture(h, 1).filter(|s| !snapshot::is_blank(&s.bmp));
         match shot {
             Some(shot) => {
                 unsafe {

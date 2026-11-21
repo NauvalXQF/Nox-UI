@@ -104,10 +104,14 @@ impl IDropTarget_Impl for Target_Impl {
 }
 
 pub fn register(hwnd: HWND, msg: u32, paths: Shared) -> Option<IDropTarget> {
+    register_for(hwnd, hwnd, msg, paths)
+}
+
+pub fn register_for(drop_hwnd: HWND, target_hwnd: HWND, msg: u32, paths: Shared) -> Option<IDropTarget> {
     unsafe {
         let _ = OleInitialize(None);
-        let t: IDropTarget = Target { hwnd: hwnd.0 as isize, msg, paths, has_files: RefCell::new(false) }.into();
-        RegisterDragDrop(hwnd, &t).ok()?;
+        let t: IDropTarget = Target { hwnd: target_hwnd.0 as isize, msg, paths, has_files: RefCell::new(false) }.into();
+        RegisterDragDrop(drop_hwnd, &t).ok()?;
         Some(t)
     }
 }

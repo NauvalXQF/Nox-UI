@@ -70,3 +70,8 @@ pub fn release() {
     remove(&BOTTOM);
     remove(&TOP);
 }
+
+pub fn invalidate_all() {
+    BOTTOM.store(0, Ordering::Relaxed);
+    TOP.store(0, Ordering::Relaxed);
+}

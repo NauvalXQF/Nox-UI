@@ -33,7 +33,15 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 }
 
 pub fn begin_dismiss(rect: (i32, i32, i32, i32), target: isize, msg: u32) {
+    let had_hook = HOOK.load(Ordering::Relaxed) != 0;
+    let prev_target = TARGET.load(Ordering::Relaxed);
+    let prev_msg = MSG.load(Ordering::Relaxed);
     end_dismiss();
+    if had_hook && prev_target != 0 && prev_target != target {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(prev_target as *mut _)), prev_msg, WPARAM(0), LPARAM(0));
+        }
+    }
     RECT[0].store(rect.0, Ordering::Relaxed);
     RECT[1].store(rect.1, Ordering::Relaxed);
     RECT[2].store(rect.2, Ordering::Relaxed);
@@ -45,7 +53,14 @@ pub fn begin_dismiss(rect: (i32, i32, i32, i32), target: isize, msg: u32) {
     }
 }
 
+pub fn end_dismiss_for(target: isize) {
+    if TARGET.load(Ordering::Relaxed) == target {
+        end_dismiss();
+    }
+}
+
 pub fn end_dismiss() {
+    TARGET.store(0, Ordering::Relaxed);
     let h = HOOK.swap(0, Ordering::Relaxed);
     if h != 0 {
         unsafe {

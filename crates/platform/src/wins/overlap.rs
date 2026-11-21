@@ -21,8 +21,54 @@ fn class_of(h: HWND) -> String {
 fn is_shell_class(c: &str) -> bool {
     matches!(
         c,
-        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Windows.UI.Core.CoreWindow" | "SimpleWindow"
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "Windows.UI.Core.CoreWindow"
+            | "SimpleWindow"
+            | "XamlExplorerHostIslandWindow"
+            | "NotifyIconOverflowWindow"
+            | "TopLevelWindowForOverflowXamlIsland"
     )
+}
+
+pub fn is_shell_flyout(fg: isize) -> bool {
+    if fg == 0 {
+        return false;
+    }
+    let h = HWND(fg as *mut _);
+    let cls = class_of(h);
+    if matches!(
+        cls.as_str(),
+        "Windows.UI.Core.CoreWindow"
+            | "XamlExplorerHostIslandWindow"
+            | "NotifyIconOverflowWindow"
+            | "TopLevelWindowForOverflowXamlIsland"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "MultitaskingViewFrame"
+            | "ForegroundStaging"
+    ) {
+        return true;
+    }
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(h, Some(&mut pid));
+    }
+    if pid == 0 {
+        return false;
+    }
+    if let Some(path) = super::enumerate::exe_path_of_pid(pid) {
+        let exe = path.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
+        if matches!(
+            exe.as_str(),
+            "startmenuexperiencehost.exe" | "searchhost.exe" | "shellexperiencehost.exe" | "lockapp.exe" | "screencapturehost.exe"
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 fn frame_rect(h: HWND) -> Option<RECT> {

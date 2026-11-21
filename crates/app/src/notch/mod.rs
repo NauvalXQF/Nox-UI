@@ -1,29 +1,34 @@
-mod body;
+mod dragout;
 mod draw;
 mod drop;
-mod ears;
-mod shadow;
+mod icons_worker;
+mod shell;
+mod text_input;
 mod views;
 
 use crate::dock::menu::{Item as MItem, Menu, MENU_CLOSE, MENU_PICK};
 use crate::strip::Strip;
-use body::Body;
 use draw::Painter;
+use icons_worker::{IconKind, IconReq, IconWorker};
 use nacre_core::island::calendar;
 use nacre_core::island::timer::{Phase, Timer};
 use nacre_core::notch::glance;
+use nacre_core::notch::spring::{Spring, SpringParams};
 use nacre_core::notch::state::{self, motion, Event, Live, Look, Mode, OpenOn, Size, Tab, View};
 use nacre_core::visibility::policy::{should_hide, Inputs, Mode as Vis};
 use nacre_platform::loopback::{self, Loopback};
 use nacre_platform::media::{self, ArtUpdate, Command, Media};
 use nacre_platform::wins::{overlap, tracker};
-use nacre_platform::{log, sys};
+use nacre_platform::{log, privacy, sys};
 use nacre_ui::gfx::Gfx;
 use nacre_ui::glass::Tier;
 use nacre_ui::host::{Host, Surface};
-use shadow::Shadow;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use shell::Shell;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::Instant;
+use text_input::FocusController;
 use views::{Action, Data, Frame, LyrState, LyricsView, MediaView, Region};
 use windows::core::w;
 use windows::UI::Composition::{AnimationDelayBehavior, CompositionDrawingSurface, CompositionObject, Compositor, Visual};
@@ -31,12 +36,13 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_core::{Interface, HSTRING};
 use windows_numerics::{Vector2, Vector3};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_CAPTURECHANGED: u32 = 0x0215;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_POWERBROADCAST: u32 = 0x0218;
@@ -53,11 +59,15 @@ const WM_AFTERDROP: u32 = WM_APP + 20;
 const WM_DOWNLOAD: u32 = WM_APP + 21;
 const WM_AGENDA: u32 = WM_APP + 23;
 const WM_SEND: u32 = WM_APP + 24;
+const WM_PRIVACY: u32 = WM_APP + 25;
+const WM_RECONF: u32 = WM_APP + 26;
+const WM_ICON: u32 = WM_APP + 27;
+const WM_START_DRAGOUT: u32 = WM_APP + 28;
 
 const T_DWELL: usize = 1;
 const T_LEAVE: usize = 2;
 const T_GHOST: usize = 3;
-const T_REGION: usize = 4;
+const T_FRAME: usize = 4;
 const T_TICK: usize = 5;
 const T_CHARGE: usize = 6;
 const T_WINCHG: usize = 7;
@@ -65,12 +75,10 @@ const T_RECONF: usize = 8;
 const T_EDGE: usize = 9;
 const T_GRACE: usize = 10;
 const T_START: usize = 11;
-const T_HIDEWIN: usize = 12;
 const T_GLANCE: usize = 13;
 const T_MINUTE: usize = 14;
 const T_PROGRESS: usize = 15;
 const T_LYRIC: usize = 16;
-const T_PRIVACY: usize = 17;
 const T_DLDONE: usize = 18;
 const T_SEND: usize = 19;
 const T_SENDDONE: usize = 20;
@@ -90,9 +98,43 @@ struct SendSess {
 const WIN_W: f32 = 640.0;
 const WIN_H: f32 = 222.0;
 const SHADOW_PAD: f32 = 36.0;
+const EAR_DP: f32 = 13.0;
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
+static STAGE_Y_BITS: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deferred {
+    MouseLeave,
+    CaptureChanged,
+    MenuClose,
+    Reconfigure,
+    Prefs,
+    GfxReset,
+    Privacy,
+    Icon,
+}
+
+thread_local! {
+    static DEFERRED: RefCell<Vec<Deferred>> = const { RefCell::new(Vec::new()) };
+}
+
+fn defer(ev: Deferred) {
+    DEFERRED.with(|q| {
+        let mut q = q.borrow_mut();
+        if !q.contains(&ev) {
+            q.push(ev);
+        }
+    });
+}
+
+struct BusyGuard;
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::Release);
+    }
+}
 
 pub struct Options {
     pub glass: Option<Tier>,
@@ -100,15 +142,11 @@ pub struct Options {
     pub reserve: bool,
 }
 
-pub(crate) fn spring(comp: &Compositor, obj: &CompositionObject, prop: &str, v: f32, ratio: f32, period_ms: u32) {
-    let go = || -> windows_core::Result<()> {
-        let a = comp.CreateSpringScalarAnimation()?;
-        a.SetDampingRatio(ratio)?;
-        a.SetPeriod(windows::Foundation::TimeSpan { Duration: period_ms as i64 * 10_000 })?;
-        a.SetFinalValue(&windows::Foundation::PropertyValue::CreateSingle(v)?.cast::<windows::Foundation::IReference<f32>>()?)?;
-        obj.StartAnimation(&HSTRING::from(prop), &a)
-    };
-    let _ = go();
+pub fn request_reconfigure() {
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        post(h, WM_RECONF);
+    }
 }
 
 fn ts(ms: u32) -> windows::Foundation::TimeSpan {
@@ -133,9 +171,42 @@ fn with<R>(hwnd: HWND, f: impl FnOnce(&mut Notch) -> R) -> Option<R> {
     if p.is_null() || BUSY.swap(true, Ordering::Acquire) {
         return None;
     }
-    let r = f(unsafe { &mut *p });
-    BUSY.store(false, Ordering::Release);
-    Some(r)
+    let out = {
+        let _g = BusyGuard;
+        f(unsafe { &mut *p })
+    };
+    drain_deferred(hwnd);
+    Some(out)
+}
+
+fn drain_deferred(hwnd: HWND) {
+    loop {
+        let next = DEFERRED.with(|q| {
+            let mut q = q.borrow_mut();
+            if q.is_empty() { None } else { Some(q.remove(0)) }
+        });
+        let Some(ev) = next else { break };
+        let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Notch;
+        if p.is_null() || BUSY.swap(true, Ordering::Acquire) {
+            defer(ev);
+            break;
+        }
+        let _g = BusyGuard;
+        let d = unsafe { &mut *p };
+        match ev {
+            Deferred::MouseLeave => d.on_leave(),
+            Deferred::CaptureChanged => d.on_capture_changed(),
+            Deferred::MenuClose => d.on_menu_close(),
+            Deferred::Reconfigure => d.on_reconfigure(),
+            Deferred::Prefs => {
+                d.apply_prefs();
+                d.on_reconfigure();
+            }
+            Deferred::GfxReset => d.on_gfx_reset(),
+            Deferred::Privacy => d.on_privacy(),
+            Deferred::Icon => d.on_icon(),
+        }
+    }
 }
 
 fn timer(hwnd: HWND, id: usize, ms: u32) {
@@ -180,8 +251,6 @@ fn auto_tier(over: Option<Tier>) -> Tier {
     })
 }
 
-static ISLAND_GAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
 fn island_gap(dpi: f32) -> f32 {
     if crate::prefs::get().notch_island {
         (7.0 * dpi).round()
@@ -190,16 +259,31 @@ fn island_gap(dpi: f32) -> f32 {
     }
 }
 
+fn ear_px(dpi: f32) -> f32 {
+    if crate::prefs::get().notch_island {
+        0.0
+    } else {
+        (EAR_DP * dpi).ceil()
+    }
+}
+
 fn win_size(dpi: f32, screen_w: i32) -> (i32, i32) {
-    (((WIN_W * dpi) as i32).min(screen_w), (WIN_H * dpi + island_gap(dpi)).ceil() as i32)
+    let pad = (SHADOW_PAD * dpi).round() as i32;
+    let w = ((WIN_W * dpi).round() as i32 + 2 * pad).min(screen_w);
+    let h = (WIN_H * dpi + island_gap(dpi)).ceil() as i32 + pad;
+    (w, h)
+}
+
+fn frame_interval_ms() -> u32 {
+    let hz = sys::refresh_hz().max(30);
+    (1000.0 / hz as f32).round().clamp(4.0, 16.0) as u32
 }
 
 pub struct Notch {
     hwnd: HWND,
     paint: Painter,
     _surface: Surface,
-    body: Body,
-    shadow: Option<Shadow>,
+    shell: Shell,
     dpi: f32,
     win: (i32, i32),
     screen_w: i32,
@@ -211,6 +295,17 @@ pub struct Notch {
     tracking: bool,
     hover_act: Option<Action>,
     regions: Vec<Region>,
+
+    sp_w: Spring,
+    sp_h: Spring,
+    sp_r: Spring,
+    sp_ear: Spring,
+    sp_y: Spring,
+    sp_sh_op: Spring,
+    frame_active: bool,
+    frame_last: Instant,
+    frame_ms: u32,
+    rgn_rect: (i32, i32, i32, i32),
 
     timer: Timer,
     t0: Instant,
@@ -231,8 +326,15 @@ pub struct Notch {
     art: Option<CompositionDrawingSurface>,
     tint: Option<[u8; 3]>,
     loopback: Option<Loopback>,
+    bar_cur: [f32; 5],
+    bar_tgt: [f32; 5],
+    marquee_t: f32,
     live_vis: views::Live,
     seek_drag: Option<(f32, f32, f32)>,
+    shelf_press: Option<(usize, f32, f32)>,
+    dragging_out: bool,
+    pinned: bool,
+    focus: FocusController,
 
     album: String,
     lyr_worker: nacre_platform::lyrics::Lyrics,
@@ -245,13 +347,17 @@ pub struct Notch {
 
     shelf: nacre_core::notch::shelf::Shelf,
     shelf_icons: std::collections::HashMap<String, CompositionDrawingSurface>,
+    icons: IconWorker,
+    icons_pending: HashSet<(IconKind, String)>,
     dnd: drop::Shared,
     _drop_target: Option<windows::Win32::System::Ole::IDropTarget>,
+    _strip_drop: Option<windows::Win32::System::Ole::IDropTarget>,
     drop_zone: Option<usize>,
     pending: Vec<String>,
     menu: Option<Menu>,
     menu_item: Option<usize>,
     privacy: (bool, bool),
+    privacy_mon: Option<privacy::Monitor>,
     dl_watch: Option<nacre_platform::dlwatch::Watch>,
     dl: Option<nacre_core::notch::download::Download>,
     dl_done: Option<nacre_core::notch::download::Download>,
@@ -304,32 +410,46 @@ impl Notch {
             let surface = host.attach(hwnd, (win.0 as f32, win.1 as f32))?;
             let tier = auto_tier(opts.glass);
             let gfx = Gfx::shared(&comp)?;
-            let body = Body::new(&comp, &gfx, &surface.root, win, dpi, tier)?;
-            let pad = (SHADOW_PAD * dpi).round();
-            let shadow = match Shadow::new(&comp, (win.0 + 2 * pad as i32, win.1 + pad as i32), pad) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    log::line("notch", &format!("bayangan gagal: {e}"));
-                    None
-                }
-            };
+            let shell = Shell::new(&comp, &surface.root, win, tier)?;
             let rest = state::look(Mode::Rest, None);
+            let init_size = state::size(rest, dpi);
+            let init_ear = ear_px(dpi);
+            let init_gap = island_gap(dpi);
+            let off = !crate::prefs::get().notch_enabled;
+            let start_hidden = off || opts.mode == Vis::OnDemand;
+            let init_y = if start_hidden { -(init_size.h + 12.0 * dpi) } else { init_gap };
+            let init_sh_op = if start_hidden { 0.0 } else { state::shadow(rest).2 };
+            let frame_ms = frame_interval_ms();
+            let hw = hwnd.0 as isize;
+            let privacy_mon = Some(privacy::spawn(move || post(hw, WM_PRIVACY)));
+            let icons = icons_worker::spawn(move || post(hw, WM_ICON));
+            let shelf = load_persisted_shelf();
+
             let mut n = Box::new(Notch {
                 hwnd,
                 paint: Painter::new(comp, gfx, dpi),
                 _surface: surface,
-                body,
-                shadow,
+                shell,
                 dpi,
                 win,
                 screen_w,
                 mode: Mode::Rest,
                 look: rest,
-                size: state::size(rest, dpi),
+                size: init_size,
                 first: true,
                 tracking: false,
                 hover_act: None,
                 regions: Vec::new(),
+                sp_w: Spring::new(init_size.w, SpringParams::swap()),
+                sp_h: Spring::new(init_size.h, SpringParams::swap()),
+                sp_r: Spring::new(init_size.radius, SpringParams::swap()),
+                sp_ear: Spring::new(init_ear, SpringParams::swap()),
+                sp_y: Spring::new(init_y, SpringParams::stage_show()),
+                sp_sh_op: Spring::new(init_sh_op, SpringParams::swap()),
+                frame_active: false,
+                frame_last: Instant::now(),
+                frame_ms,
+                rgn_rect: (-1, -1, -1, -1),
                 timer: Timer::new(std::env::var("NACRE_TIMER_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(25 * 60)),
                 t0: Instant::now(),
                 last_sec: -1,
@@ -337,7 +457,6 @@ impl Notch {
                 charging_fresh: false,
                 glance_idx: 0,
                 media: {
-                    let hw = hwnd.0 as isize;
                     if std::env::var_os("NACRE_NO_MEDIA").is_some() {
                         let (commands, _) = std::sync::mpsc::channel();
                         let (_, snapshots) = std::sync::mpsc::channel();
@@ -359,28 +478,36 @@ impl Notch {
                 art: None,
                 tint: None,
                 loopback: None,
+                bar_cur: [0.15; 5],
+                bar_tgt: [0.15; 5],
+                marquee_t: 0.0,
                 live_vis: views::Live::default(),
                 seek_drag: None,
+                shelf_press: None,
+                dragging_out: false,
+                pinned: false,
+                focus: FocusController::new(),
                 album: String::new(),
-                lyr_worker: {
-                    let hw = hwnd.0 as isize;
-                    nacre_platform::lyrics::spawn(crate::paths::config_dir().join("lyrics"), move || post(hw, WM_LYRICS))
-                },
+                lyr_worker: nacre_platform::lyrics::spawn(crate::paths::config_dir().join("lyrics"), move || post(hw, WM_LYRICS)),
                 lyr: None,
                 lyr_state: LyrState::Idle,
                 lyr_lrclib: false,
                 lyr_key: String::new(),
                 lyr_track: String::new(),
                 lyr_idx: None,
-                shelf: nacre_core::notch::shelf::Shelf::new(24),
+                shelf,
                 shelf_icons: std::collections::HashMap::new(),
+                icons,
+                icons_pending: HashSet::new(),
                 dnd: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 _drop_target: None,
+                _strip_drop: None,
                 drop_zone: None,
                 pending: Vec::new(),
                 menu: None,
                 menu_item: None,
                 privacy: (false, false),
+                privacy_mon,
                 dl_watch: None,
                 dl: None,
                 dl_done: None,
@@ -394,9 +521,9 @@ impl Notch {
                 app_icons: std::collections::HashMap::new(),
                 vis: opts.mode,
                 reserved: false,
-                off: !crate::prefs::get().notch_enabled,
-                shown: true,
-                starting: true,
+                off,
+                shown: !start_hidden,
+                starting: !start_hidden,
                 overlap: overlap::Overlap::default(),
                 grace: false,
                 edge_armed: false,
@@ -408,21 +535,19 @@ impl Notch {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(n) as isize);
             NOTCH_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             crate::services::register_island(hwnd);
+            crate::services::listen_gfx(hwnd);
             tracker::install(on_windows_changed);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            timer(hwnd, T_START, 1600);
+            if !start_hidden {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                timer(hwnd, T_START, 1600);
+            }
             timer(hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
-            timer(hwnd, T_PRIVACY, 1500);
             with(hwnd, |d| {
                 d._drop_target = drop::register(hwnd, WM_DND, d.dnd.clone());
                 if d._drop_target.is_none() {
                     log::line("notch", "seret-taruh tidak tersedia");
                 }
-                d.place_shadow_window();
-                if d.vis != Vis::Always {
-                    d.strip = Strip::new(hwnd, STRIP_ENTER, STRIP_LEAVE).ok();
-                    d.place_strip();
-                }
+                d.ensure_strip();
                 if opts.reserve && !d.off && !crate::prefs::get().menubar {
                     d.set_reserved(true);
                 }
@@ -434,7 +559,7 @@ impl Notch {
             if std::env::var_os("NACRE_TEST_SEND").is_some() {
                 timer(hwnd, T_TESTSEND, 2500);
             }
-            log::line("notch", &format!("dibuat tier={tier:?} dpi={dpi} jendela={win:?} layar_w={screen_w}"));
+            log::line("notch", &format!("dibuat tier={tier:?} dpi={dpi} jendela={win:?} layar_w={screen_w} frame_ms={frame_ms}"));
             Ok(hwnd)
         }
     }
@@ -443,8 +568,137 @@ impl Notch {
         self.t0.elapsed().as_millis() as i64
     }
 
+    fn x0_for(&self, w: f32) -> f32 {
+        ((self.win.0 as f32 - w) / 2.0).floor()
+    }
+
     fn x0(&self) -> f32 {
-        ((self.win.0 as f32 - self.size.w) / 2.0).floor()
+        self.x0_for(self.size.w)
+    }
+
+    fn start_frame(&mut self) {
+        if !self.frame_active {
+            self.frame_active = true;
+            self.frame_last = Instant::now();
+            timer(self.hwnd, T_FRAME, self.frame_ms);
+        }
+    }
+
+    fn stop_frame(&mut self) {
+        if self.frame_active {
+            self.frame_active = false;
+            kill(self.hwnd, T_FRAME);
+        }
+    }
+
+    fn apply_springs_to_shell(&mut self) {
+        let w = self.sp_w.pos.max(8.0);
+        let h = self.sp_h.pos.max(8.0);
+        let r = self.sp_r.pos.max(0.0);
+        let ear = self.sp_ear.pos.max(0.0);
+        let y = self.sp_y.pos;
+        let x0 = self.x0_for(w);
+
+        self.shell.set_geometry(x0, w, h, r, ear);
+        self.shell.set_stage_y(y);
+        STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
+        self.shell.set_shadow(18.0 * self.dpi, 4.0 * self.dpi, self.sp_sh_op.pos);
+
+        if !self.shown && self.sp_y.is_settled() {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            self.rgn_rect = (0, 0, 0, 0);
+            return;
+        }
+
+        let l = (x0 - ear).floor().max(0.0) as i32;
+        let t = y.floor().max(0.0) as i32;
+        let rr = (x0 + w + ear).ceil().min(self.win.0 as f32) as i32;
+        let b = (y + h).ceil().clamp(0.0, self.win.1 as f32) as i32;
+        let next = (l, t, rr.max(l), b.max(t));
+        if next != self.rgn_rect {
+            self.rgn_rect = next;
+            unsafe {
+                let rgn = CreateRectRgn(next.0, next.1, next.2, next.3);
+                SetWindowRgn(self.hwnd, Some(rgn), false);
+            }
+        }
+    }
+
+    fn tick_frame(&mut self) {
+        let now = Instant::now();
+        let dt = (now - self.frame_last).as_secs_f32().clamp(0.001, 0.05);
+        self.frame_last = now;
+
+        let mut springs_moving = false;
+        springs_moving |= self.sp_w.step(dt);
+        springs_moving |= self.sp_h.step(dt);
+        springs_moving |= self.sp_r.step(dt);
+        springs_moving |= self.sp_ear.step(dt);
+        springs_moving |= self.sp_y.step(dt);
+        springs_moving |= self.sp_sh_op.step(dt);
+
+        if springs_moving {
+            self.apply_springs_to_shell();
+        } else if !self.shown && self.rgn_rect != (0, 0, 0, 0) {
+            self.apply_springs_to_shell();
+        }
+
+        // Smooth audio visualizer bar interpolation at monitor refresh rate.
+        let mut vis_active = false;
+        if self.shown && !self.off && !self.live_vis.bars.is_empty() {
+            let t_sec = self.t0.elapsed().as_secs_f32();
+            let raw_energy: f32 = self.bar_tgt.iter().sum();
+            for (i, bar) in self.live_vis.bars.iter().enumerate() {
+                let tgt = if !self.playing {
+                    0.08
+                } else if raw_energy > 0.02 {
+                    self.bar_tgt.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)
+                } else {
+                    // Subtle alive wave if WASAPI loopback is silent while media reports Playing.
+                    0.18 + 0.16 * (t_sec * 4.2 + i as f32 * 0.95).sin().abs()
+                };
+                let cur = self.bar_cur[i];
+                let rate = if tgt > cur { 24.0 } else { 9.5 };
+                let next = cur + (tgt - cur) * (1.0 - (-rate * dt).exp());
+                self.bar_cur[i] = next;
+                let _ = bar.SetScale(Vector3 { X: 1.0, Y: 0.22 + 0.78 * next.clamp(0.0, 1.0), Z: 1.0 });
+                if self.playing || (next - tgt).abs() > 0.01 {
+                    vis_active = true;
+                }
+            }
+        }
+
+        // Smooth compact media marquee scrolling (pause -> scroll -> pause -> return).
+        let mut marquee_active = false;
+        if self.shown && !self.off {
+            if let Some(mq) = &self.live_vis.marquee {
+                self.marquee_t += dt;
+                const PAUSE: f32 = 1.6;
+                let speed = 28.0 * self.dpi;
+                let dur = (mq.travel / speed.max(10.0)).max(1.2);
+                let cycle = PAUSE + dur + PAUSE + dur;
+                let phase = self.marquee_t % cycle;
+                let frac = if phase < PAUSE {
+                    0.0
+                } else if phase < PAUSE + dur {
+                    (phase - PAUSE) / dur
+                } else if phase < PAUSE + dur + PAUSE {
+                    1.0
+                } else {
+                    1.0 - (phase - PAUSE - dur - PAUSE) / dur
+                };
+                // Smoothstep easing on both ends.
+                let s = frac * frac * (3.0 - 2.0 * frac);
+                let _ = mq.vis.SetOffset(Vector3 { X: -(mq.travel * s), Y: mq.base_y, Z: 0.0 });
+                marquee_active = true;
+            }
+        }
+
+        if !springs_moving && !vis_active && !marquee_active {
+            self.stop_frame();
+        }
     }
 
     fn live(&self) -> Live {
@@ -587,17 +841,57 @@ impl Notch {
         }
     }
 
+    fn request_icon(&mut self, kind: IconKind, key: String, px: i32) {
+        if key.is_empty() {
+            return;
+        }
+        let k = (kind, key.clone());
+        if self.icons_pending.insert(k) {
+            let _ = self.icons.requests.send(IconReq { kind, key, px });
+        }
+    }
+
+    fn on_icon(&mut self) {
+        let mut need_render = false;
+        while let Ok(resp) = self.icons.answers.try_recv() {
+            self.icons_pending.remove(&(resp.kind, resp.key.clone()));
+            let surf = resp.bmp.and_then(|b| self.paint.gfx.surface_from_bgra(b.w, b.h, &b.bgra).ok());
+            match resp.kind {
+                IconKind::Shelf => {
+                    if let Some(s) = surf {
+                        self.shelf_icons.insert(resp.key, s);
+                        if self.mode == Mode::Open(Tab::Shelf) {
+                            need_render = true;
+                        }
+                    }
+                }
+                IconKind::MediaApp => {
+                    let cur = resp.key == self.media_app && self.art.is_none();
+                    self.app_icons.insert(resp.key, surf);
+                    if cur {
+                        need_render = true;
+                    }
+                }
+                IconKind::Download => {
+                    self.dl_icons.insert(resp.key, surf);
+                    if self.look.view == View::Compact(state::Activity::Download) {
+                        need_render = true;
+                    }
+                }
+            }
+        }
+        if need_render {
+            self.render();
+        }
+    }
+
     fn ensure_app_icon(&mut self) {
         let id = self.media_app.clone();
         if id.is_empty() || self.app_icons.contains_key(&id) {
             return;
         }
         let px = (48.0 * self.dpi).round() as i32;
-        let bmp = nacre_platform::icons::load(&format!("shell:AppsFolder\\{id}"), px).or_else(|| {
-            id.to_ascii_lowercase().ends_with(".exe").then(|| nacre_platform::wins::enumerate::exe_path_of_running(&id)).flatten().and_then(|p| nacre_platform::icons::load(&p, px))
-        });
-        let s = bmp.and_then(|b| self.paint.gfx.surface_from_bgra(b.w, b.h, &b.bgra).ok());
-        self.app_icons.insert(id, s);
+        self.request_icon(IconKind::MediaApp, id, px);
     }
 
     fn sync_download_watch(&mut self) {
@@ -630,8 +924,7 @@ impl Notch {
             let app = self.dl.as_ref().or(self.dl_done.as_ref()).map(|d| d.app.clone()).unwrap_or_default();
             if !app.is_empty() && !self.dl_icons.contains_key(&app) {
                 let px = (44.0 * self.dpi).round() as i32;
-                let s = nacre_platform::icons::load(&app, px).and_then(|b| self.paint.gfx.surface_from_bgra(b.w, b.h, &b.bgra).ok());
-                self.dl_icons.insert(app, s);
+                self.request_icon(IconKind::Download, app, px);
             }
             self.refresh();
         }
@@ -699,13 +992,13 @@ impl Notch {
         self.glance_idx = glance::next(self.glance_idx, n);
         self.retire_content(120);
         let rise = 6.0 * self.dpi;
-        if let Ok(g) = self.body.ghost.cast::<CompositionObject>() {
+        if let Ok(g) = self.shell.ghost.cast::<CompositionObject>() {
             let _ = keyframes(&self.paint.comp, &g, "Offset.Y", 0.0, -rise, 160, 0);
         }
         self.render();
-        if let Ok(c) = self.body.content.cast::<CompositionObject>() {
+        if let Ok(c) = self.shell.content.cast::<CompositionObject>() {
             let comp = &self.paint.comp;
-            let _ = self.body.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 });
+            let _ = self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 });
             let _ = keyframes(comp, &c, "Opacity", 0.0, 1.0, 180, 60);
             let _ = keyframes(comp, &c, "Offset.Y", rise, 0.0, 220, 40);
         }
@@ -731,16 +1024,16 @@ impl Notch {
         }
     }
 
-    fn springs(old: Look, new: Look) -> (f32, u32) {
+    fn spring_for(old: Look, new: Look) -> SpringParams {
         let big = |v: View| matches!(v, View::Open(_) | View::Drop);
         if big(new.view) && !big(old.view) {
-            (motion::OPEN_RATIO, motion::OPEN_PERIOD_MS)
+            SpringParams::open()
         } else if big(old.view) && !big(new.view) {
-            (motion::CLOSE_RATIO, motion::CLOSE_PERIOD_MS)
+            SpringParams::close()
         } else if old.view == new.view {
-            (motion::PEEK_RATIO, motion::PEEK_PERIOD_MS)
+            SpringParams::peek()
         } else {
-            (motion::SWAP_RATIO, motion::SWAP_PERIOD_MS)
+            SpringParams::swap()
         }
     }
 
@@ -753,12 +1046,13 @@ impl Notch {
         if !matches!(new.view, View::Open(_)) {
             self.cal_sel = 0;
         }
-        let springy = (!first).then(|| Self::springs(old, new));
+        let sp = (!first).then(|| Self::spring_for(old, new));
         if view_changed && !first {
             let closing = matches!(old.view, View::Open(_) | View::Drop) && !matches!(new.view, View::Open(_) | View::Drop);
             self.retire_content(if closing { motion::CLOSE_FADE_MS } else { motion::SWAP_FADE_MS });
         }
-        self.apply_size(springy);
+        self.apply_size(sp);
+        self.publish_notch();
         self.render();
         self.sync_glance();
         if view_changed && !first {
@@ -766,49 +1060,47 @@ impl Notch {
         }
     }
 
-    fn apply_size(&mut self, springy: Option<(f32, u32)>) {
-        let (px0, pw, ph) = (self.x0(), self.size.w, self.size.h);
+    fn apply_size(&mut self, sp: Option<SpringParams>) {
         let mut z = state::size(self.look, self.dpi);
         z.radius *= crate::prefs::round(crate::prefs::Role::Notch);
         z.w = z.w.round();
         z.h = z.h.round();
         let gap = island_gap(self.dpi);
         if gap > 0.0 {
-            z.radius = (z.h / 2.0).min(36.0 * self.dpi);
-        }
-        ISLAND_GAP.store(gap.to_bits(), std::sync::atomic::Ordering::Relaxed);
-        self.body.set_island(gap, self.shown);
-        if let Some(sh) = self.shadow.as_mut() {
-            sh.set_island(gap, self.shown);
+            z.radius = z.radius.min(z.h / 2.0).min(36.0 * self.dpi);
+        } else {
+            z.radius = z.radius.min((z.h - ear_px(self.dpi)).max(2.0)).min(z.w / 2.0);
         }
         self.size = z;
-        let x0 = self.x0();
-        self.body.set_geometry(self.win, x0, z.w, z.h, z.radius, springy);
-        let (blur, dy, op) = state::shadow(self.look);
-        let over = if gap > 0.0 { 0.0 } else { self.body.top_over };
-        if let Some(sh) = self.shadow.as_mut() {
-            sh.follow(&self.paint.gfx, (x0, -over, z.w, z.h + over), z.radius, (blur * self.dpi, dy * self.dpi, op), springy);
-        }
-        let e = self.body.ear;
-        let (l, r) = (px0.min(x0) - e, (px0 + pw).max(x0 + z.w) + e);
-        self.set_region((l.max(0.0), 0.0, r.min(self.win.0 as f32), gap + ph.max(z.h)));
-        timer(self.hwnd, T_REGION, 700);
-    }
+        let target_ear = ear_px(self.dpi);
+        let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
+        let target_sh_op = if self.shown { state::shadow(self.look).2 } else { 0.0 };
 
-    fn set_region(&self, r: (f32, f32, f32, f32)) {
-        unsafe {
-            let rgn = CreateRectRgn(r.0 as i32, r.1 as i32, r.2.ceil() as i32, r.3.ceil() as i32);
-            SetWindowRgn(self.hwnd, Some(rgn), true);
+        match sp {
+            None => {
+                self.sp_w.snap(z.w);
+                self.sp_h.snap(z.h);
+                self.sp_r.snap(z.radius);
+                self.sp_ear.snap(target_ear);
+                self.sp_y.snap(target_y);
+                self.sp_sh_op.snap(target_sh_op);
+                self.stop_frame();
+                self.apply_springs_to_shell();
+            }
+            Some(p) => {
+                self.sp_w.set_target(z.w, p);
+                self.sp_h.set_target(z.h, p);
+                self.sp_r.set_target(z.radius, p);
+                self.sp_ear.set_target(target_ear, p);
+                self.sp_y.set_target(target_y, if self.shown { SpringParams::stage_show() } else { SpringParams::stage_hide() });
+                self.sp_sh_op.set_target(target_sh_op, p);
+                self.start_frame();
+            }
         }
-    }
-
-    fn settle_region(&self) {
-        let (x0, e) = (self.x0(), self.body.ear);
-        self.set_region(((x0 - e).max(0.0), 0.0, (x0 + self.size.w + e).min(self.win.0 as f32), island_gap(self.dpi) + self.size.h));
     }
 
     fn render(&mut self) {
-        let c = self.body.content.clone();
+        let c = self.shell.content.clone();
         if let Ok(k) = c.Children() {
             let _ = k.RemoveAll();
         }
@@ -885,6 +1177,7 @@ impl Notch {
             cal,
             send,
             send_zone: crate::prefs::get().notch_send,
+            pinned: self.pinned,
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
         if let Some(r) = self.hover_act.and_then(|a| self.regions.iter().find(|r| r.action == a)) {
@@ -896,20 +1189,23 @@ impl Notch {
         }
         self.sync_visualizer();
         self.sync_progress();
+        if self.shown && !self.off && (self.live_vis.marquee.is_some() || (!self.live_vis.bars.is_empty() && self.playing)) {
+            self.start_frame();
+        }
     }
 
     fn retire_content(&mut self, ms: u32) {
         let go = || -> windows_core::Result<()> {
-            let kids = self.body.content.Children()?;
+            let kids = self.shell.content.Children()?;
             let old: Vec<Visual> = kids.clone().into_iter().collect();
-            let ghost = self.body.ghost.Children()?;
+            let ghost = self.shell.ghost.Children()?;
             ghost.RemoveAll()?;
-            self.body.ghost.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+            self.shell.ghost.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
             for v in &old {
                 kids.Remove(v)?;
                 ghost.InsertAtTop(v)?;
             }
-            let g: CompositionObject = self.body.ghost.cast()?;
+            let g: CompositionObject = self.shell.ghost.cast()?;
             keyframes(&self.paint.comp, &g, "Opacity", 1.0, 0.0, ms, 0)
         };
         let _ = go();
@@ -918,19 +1214,19 @@ impl Notch {
 
     fn intro(&self, opening: bool) {
         let go = || -> windows_core::Result<()> {
-            let c: CompositionObject = self.body.content.cast()?;
+            let c: CompositionObject = self.shell.content.cast()?;
             let comp = &self.paint.comp;
             if opening {
                 let cx = self.x0() + self.size.w / 2.0;
-                self.body.content.SetCenterPoint(Vector3 { X: cx, Y: 0.0, Z: 0.0 })?;
+                self.shell.content.SetCenterPoint(Vector3 { X: cx, Y: 0.0, Z: 0.0 })?;
                 let (d, ms) = (motion::CONTENT_DELAY_MS, motion::CONTENT_FADE_MS);
                 keyframes(comp, &c, "Opacity", 0.0, 1.0, ms, d)?;
                 keyframes(comp, &c, "Scale.X", motion::CONTENT_SCALE_FROM, 1.0, ms + 60, d)?;
                 keyframes(comp, &c, "Scale.Y", motion::CONTENT_SCALE_FROM, 1.0, ms + 60, d)?;
                 keyframes(comp, &c, "Offset.Y", -motion::CONTENT_RISE_DP * self.dpi, 0.0, ms + 60, d)
             } else {
-                self.body.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
-                self.body.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+                self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+                self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
                 keyframes(comp, &c, "Opacity", 0.0, 1.0, 150, 50)
             }
         };
@@ -977,6 +1273,7 @@ impl Notch {
             let track = if self.has_media { format!("{}\u{1}{}", self.title, self.artist) } else { String::new() };
             if track != self.lyr_track {
                 self.lyr_track = track;
+                self.marquee_t = 0.0;
                 self.request_lyrics();
             }
             self.refresh();
@@ -1047,7 +1344,12 @@ impl Notch {
             if self.look.view == View::Compact(state::Activity::Lyrics) {
                 self.swap_lyric();
             } else if self.mode == Mode::Open(Tab::Play) || self.look.view == View::Compact(state::Activity::Player) {
-                self.render();
+                if self.live_vis.lyrics_host.is_some() {
+                    let ly = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms: pos, lrclib: self.lyr_lrclib };
+                    views::refresh_lyrics_in_place(&mut self.paint, &mut self.live_vis, self.has_media, &ly);
+                } else {
+                    self.render();
+                }
                 if forward {
                     if let Some(sc) = &self.live_vis.lyric_scroll {
                         if let Ok(o) = sc.cast::<CompositionObject>() {
@@ -1065,12 +1367,12 @@ impl Notch {
         let ms = state::motion::LYRIC_SWAP_MS;
         if let Some(old) = self.live_vis.lyric.take() {
             let go = || -> windows_core::Result<()> {
-                let ghost = self.body.ghost.Children()?;
+                let ghost = self.shell.ghost.Children()?;
                 ghost.RemoveAll()?;
-                self.body.ghost.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
-                self.body.content.Children()?.Remove(&old)?;
+                self.shell.ghost.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+                self.shell.content.Children()?.Remove(&old)?;
                 ghost.InsertAtTop(&old)?;
-                let g: CompositionObject = self.body.ghost.cast()?;
+                let g: CompositionObject = self.shell.ghost.cast()?;
                 keyframes(&self.paint.comp, &g, "Opacity", 1.0, 0.0, ms, 0)?;
                 keyframes(&self.paint.comp, &g, "Offset.Y", 0.0, -rise, ms, 0)
             };
@@ -1099,9 +1401,11 @@ impl Notch {
 
     fn on_bands(&mut self) {
         let b = loopback::latest();
-        for (i, bar) in self.live_vis.bars.iter().enumerate() {
-            let v = b.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-            let _ = bar.SetScale(Vector3 { X: 1.0, Y: 0.25 + 0.75 * v, Z: 1.0 });
+        for i in 0..5 {
+            self.bar_tgt[i] = b.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        }
+        if self.shown && !self.off && !self.live_vis.bars.is_empty() {
+            self.start_frame();
         }
     }
 
@@ -1113,26 +1417,75 @@ impl Notch {
         }
     }
 
+    fn update_scrub_in_place(&mut self) {
+        if self.live_vis.scrub.is_none() {
+            self.render();
+            return;
+        }
+        let (frac, dragging, pos_ms) = match self.seek_drag {
+            Some((_, _, fr)) => (fr, true, (self.dur_ms as f32 * fr) as i64),
+            None => {
+                let pos = self.position_ms();
+                let fr = if self.dur_ms > 0 { pos as f32 / self.dur_ms as f32 } else { 0.0 };
+                (fr, false, pos)
+            }
+        };
+        if let Some(scrub) = self.live_vis.scrub.as_mut() {
+            scrub.update(&mut self.paint, frac, dragging, pos_ms);
+        }
+    }
+
     fn on_down(&mut self, x: f32, y: f32) -> bool {
         if !matches!(self.mode, Mode::Open(_)) {
             return false;
         }
-        if let Some(Action::Seek(sx, sw)) = self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action) {
-            self.seek_drag = Some((sx, sw, ((x - sx) / sw).clamp(0.0, 1.0)));
-            self.render();
-            return true;
+        match self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action) {
+            Some(Action::Seek(sx, sw)) => {
+                self.seek_drag = Some((sx, sw, ((x - sx) / sw).clamp(0.0, 1.0)));
+                self.update_scrub_in_place();
+                true
+            }
+            Some(Action::ShelfItem(i)) => {
+                self.shelf_press = Some((i, x, y));
+                false
+            }
+            _ => false,
         }
-        false
     }
 
-    fn on_drag(&mut self, x: f32) {
+    fn on_drag(&mut self, x: f32, y: f32) {
+        if self.seek_drag.is_some() || self.shelf_press.is_some() {
+            let down = unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 };
+            if !down {
+                self.on_capture_changed();
+                return;
+            }
+        }
         if let Some((sx, sw, _)) = self.seek_drag {
             self.seek_drag = Some((sx, sw, ((x - sx) / sw).clamp(0.0, 1.0)));
-            self.render();
+            self.update_scrub_in_place();
+            return;
+        }
+        if let Some((i, x0, y0)) = self.shelf_press {
+            let dist = ((x - x0).powi(2) + (y - y0).powi(2)).sqrt();
+            if dist > 6.0 * self.dpi {
+                self.shelf_press = None;
+                self.dragging_out = true;
+                post_w(self.hwnd.0 as isize, WM_START_DRAGOUT, i);
+            }
+        }
+    }
+
+    fn on_capture_changed(&mut self) {
+        self.shelf_press = None;
+        if self.seek_drag.take().is_some() {
+            self.update_scrub_in_place();
+            self.sync_progress();
         }
     }
 
     fn on_up(&mut self) -> bool {
+        self.shelf_press = None;
         let Some((_, _, fr)) = self.seek_drag.take() else { return false };
         if self.dur_ms > 0 {
             let ms = (self.dur_ms as f32 * fr) as i64;
@@ -1140,24 +1493,29 @@ impl Notch {
             self.pos_ms = ms;
             self.pos_at = Instant::now();
         }
-        self.render();
+        self.update_scrub_in_place();
+        self.sync_progress();
         self.schedule_lyric();
         true
     }
 
     fn load_shelf_icons(&mut self) {
         let px = (40.0 * self.dpi).round() as i32;
-        for it in self.shelf.items().iter().take(8) {
-            if self.shelf_icons.contains_key(&it.path) {
-                continue;
-            }
-            let bmp = nacre_platform::icons::thumbnail(&it.path, px).or_else(|| nacre_platform::icons::load(&it.path, px));
-            if let Some(b) = bmp {
-                if let Ok(s) = self.paint.gfx.surface_from_bgra(b.w, b.h, &b.bgra) {
-                    self.shelf_icons.insert(it.path.clone(), s);
-                }
-            }
+        let paths: Vec<String> = self
+            .shelf
+            .items()
+            .iter()
+            .take(8)
+            .filter(|it| !self.shelf_icons.contains_key(&it.path))
+            .map(|it| it.path.clone())
+            .collect();
+        for path in paths {
+            self.request_icon(IconKind::Shelf, path, px);
         }
+    }
+
+    fn save_shelf(&self) {
+        save_persisted_shelf(&self.shelf);
     }
 
     fn zone_at(&self, x: f32, y: f32) -> Option<usize> {
@@ -1169,7 +1527,7 @@ impl Notch {
 
     fn on_dnd(&mut self, kind: usize, lp: LPARAM) {
         let (sx, sy) = ((lp.0 as u32 & 0xFFFF) as u16 as i16 as f32, ((lp.0 as u32 >> 16) & 0xFFFF) as u16 as i16 as f32);
-        let (cx, cy) = (sx - ((self.screen_w - self.win.0) / 2) as f32, sy);
+        let (cx, cy) = (sx - ((self.screen_w - self.win.0) / 2) as f32, sy - self.sp_y.pos);
         match kind {
             drop::ENTER => {
                 self.drop_zone = None;
@@ -1181,7 +1539,14 @@ impl Notch {
                 let z = self.zone_at(cx, cy);
                 if z != self.drop_zone {
                     self.drop_zone = z;
-                    self.render();
+                    if !self.live_vis.drop_zones.is_empty() {
+                        let accent = crate::prefs::accent();
+                        for dz in &self.live_vis.drop_zones {
+                            dz.set_active(z == Some(dz.id), accent);
+                        }
+                    } else {
+                        self.render();
+                    }
                 }
             }
             drop::LEAVE => {
@@ -1197,6 +1562,7 @@ impl Notch {
                     for p in &paths {
                         self.shelf.add(p);
                     }
+                    self.save_shelf();
                     self.dispatch(Event::Dropped);
                 } else if zone == 1 {
                     self.start_send(paths);
@@ -1229,7 +1595,7 @@ impl Notch {
         self.menu_item = Some(i);
         let wx = (self.screen_w - self.win.0) / 2;
         if let Some(m) = self.menu.as_mut() {
-            let _ = m.show(&self.paint.comp, &self.paint.gfx, items, wx + x as i32, y as i32);
+            let _ = m.show(&self.paint.comp, &self.paint.gfx, items, wx + x as i32, (y + self.sp_y.pos) as i32);
         }
     }
 
@@ -1248,10 +1614,20 @@ impl Notch {
             4 => {
                 self.shelf.remove(&path);
                 self.shelf_icons.remove(&path);
+                self.save_shelf();
                 self.refresh();
             }
             5 => self.start_send(vec![path]),
             _ => {}
+        }
+    }
+
+    fn on_menu_close(&mut self) {
+        if let Some(mn) = &self.menu {
+            mn.hide();
+        }
+        if !self.tracking && matches!(self.mode, Mode::Open(_)) {
+            timer(self.hwnd, T_LEAVE, motion::LEAVE_GRACE_MS);
         }
     }
 
@@ -1264,16 +1640,20 @@ impl Notch {
         }
     }
 
-    fn poll_privacy(&mut self) {
-        if self.shown && !self.off {
-            let a = nacre_platform::privacy::active();
-            let v = (a.iter().any(|u| !u.camera), a.iter().any(|u| u.camera));
+    fn on_privacy(&mut self) {
+        let Some(mon) = &self.privacy_mon else { return };
+        let mut latest = None;
+        while let Ok(v) = mon.snapshots.try_recv() {
+            latest = Some(v);
+        }
+        if let Some(v) = latest {
             if v != self.privacy {
                 self.privacy = v;
-                self.render();
+                if self.shown && !self.off {
+                    self.render();
+                }
             }
         }
-        timer(self.hwnd, T_PRIVACY, 3000);
     }
 
     fn on_move(&mut self) {
@@ -1326,7 +1706,7 @@ impl Notch {
             self.dispatch(Event::Leave);
         }
         self.grace = true;
-        timer(self.hwnd, T_GRACE, 800);
+        timer(self.hwnd, T_GRACE, if self.vis == Vis::OnDemand { 380 } else { 800 });
         self.update_visibility();
     }
 
@@ -1342,7 +1722,7 @@ impl Notch {
             }
             let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut pt);
         }
-        self.on_media_button(pt.x as f32, pt.y as f32)
+        self.on_media_button(pt.x as f32, pt.y as f32 - self.sp_y.pos)
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
@@ -1372,9 +1752,15 @@ impl Notch {
             Action::ShelfClear => {
                 self.shelf.clear();
                 self.shelf_icons.clear();
+                self.save_shelf();
                 self.refresh();
             }
             Action::Tab(t) => self.dispatch(Event::SelectTab(t)),
+            Action::Pin => {
+                self.pinned = !self.pinned;
+                self.render();
+                self.update_visibility();
+            }
             Action::Settings => crate::settings_win::open(&self.paint.comp),
             Action::TimerToggle => {
                 if self.timer.phase == Phase::Running {
@@ -1451,29 +1837,46 @@ impl Notch {
 
     fn pill_screen_rect(&self) -> (i32, i32, i32, i32) {
         let base = state::size(state::look(Mode::Rest, None), self.dpi);
-        let l = ((sys::screen_size().0 as f32 - base.w) / 2.0) as i32;
+        let l = ((self.screen_w as f32 - base.w) / 2.0) as i32;
         (l, 0, l + base.w as i32, (base.h + 4.0 * self.dpi) as i32)
+    }
+
+    fn ensure_strip(&mut self) {
+        if self.vis == Vis::Always {
+            self._strip_drop = None;
+            self.strip = None;
+            self.edge_armed = false;
+            return;
+        }
+        if self.strip.is_none() {
+            if let Ok(s) = Strip::new(self.hwnd, STRIP_ENTER, STRIP_LEAVE) {
+                self._strip_drop = drop::register_for(s.hwnd(), self.hwnd, WM_DND, self.dnd.clone());
+                self.strip = Some(s);
+            }
+        }
+        self.place_strip();
     }
 
     fn place_strip(&self) {
         if let Some(s) = &self.strip {
-            let (l, _, r, _) = self.pill_screen_rect();
-            let pad = (60.0 * self.dpi) as i32;
-            s.place(l - pad, 0, r - l + 2 * pad, 2);
+            let w = (200.0 * self.dpi).round() as i32;
+            let h = (3.0 * self.dpi).round().clamp(2.0, 5.0) as i32;
+            let x = ((self.screen_w - w) / 2).max(0);
+            s.place(x, 0, w, h);
             s.set_visible(!self.overlap.fullscreen && !self.off);
         }
     }
 
-    fn place_shadow_window(&self) {
-        if let Some(sh) = &self.shadow {
-            let x = (self.screen_w - self.win.0) / 2 - sh.pad as i32;
-            sh.place_window(self.hwnd, x, 0, self.win.0 + 2 * sh.pad as i32, self.win.1 + sh.pad as i32);
-            sh.set_visible(self.shown && !self.off);
-        }
-    }
-
     fn interacting(&self) -> bool {
-        self.tracking || matches!(self.mode, Mode::Open(_) | Mode::Drop) || self.grace
+        self.tracking
+            || matches!(self.mode, Mode::Open(_) | Mode::Drop)
+            || self.grace
+            || self.seek_drag.is_some()
+            || self.dragging_out
+            || self.pinned
+            || self.focus.is_active()
+            || self.send_pinned()
+            || self.menu.as_ref().is_some_and(|m| m.is_open())
     }
 
     fn update_visibility(&mut self) {
@@ -1491,36 +1894,44 @@ impl Notch {
         }
         if hide && self.shown {
             self.shown = false;
-            let y = -(self.size.h + self.body.top_over + 8.0 * self.dpi);
-            self.body.stage_y(y, 0.95, 90);
-            if let Some(sh) = &self.shadow {
-                sh.stage_y(y, 0.95, 90);
-            }
-            timer(self.hwnd, T_HIDEWIN, 550);
+            let y = -(self.size.h + 12.0 * self.dpi);
+            self.sp_y.set_target(y, SpringParams::stage_hide());
+            self.sp_sh_op.set_target(0.0, SpringParams::stage_hide());
+            self.start_frame();
+            self.publish_notch();
+            self.sync_visualizer();
             log::line("notch", "sembunyi");
         } else if !hide && !self.shown {
             self.shown = true;
-            kill(self.hwnd, T_HIDEWIN);
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             crate::topmost::request_raise();
-            if let Some(sh) = &self.shadow {
-                sh.set_visible(true);
-                sh.stage_y(0.0, 0.8, 90);
-            }
-            self.body.stage_y(0.0, 0.8, 90);
+            self.sp_y.set_target(island_gap(self.dpi), SpringParams::stage_show());
+            self.sp_sh_op.set_target(state::shadow(self.look).2, SpringParams::stage_show());
+            self.start_frame();
+            self.publish_notch();
+            self.sync_visualizer();
             log::line("notch", "tampil");
         }
     }
 
     fn publish_notch(&self) {
         if self.off {
-            crate::services::set_notch(0, 0, 0);
+            crate::services::set_notch_layout(None, None);
             return;
         }
-        let (l, _, r, h) = self.pill_screen_rect();
-        crate::services::set_notch(l, r, h - (4.0 * self.dpi) as i32);
+        let rail_h = (30.0 * self.dpi).round() as i32;
+        if !self.shown {
+            crate::services::set_notch_layout(None, Some(rail_h));
+            return;
+        }
+        let ear = ear_px(self.dpi);
+        let pad = 4.0 * self.dpi;
+        let half = (self.size.w / 2.0 + ear + pad).ceil() as i32;
+        let cx = self.screen_w / 2;
+        let gap = ((cx - half).max(0), (cx + half).min(self.screen_w));
+        crate::services::set_notch_layout(Some(gap), Some(rail_h));
     }
 
     fn set_reserved(&mut self, on: bool) {
@@ -1540,27 +1951,21 @@ impl Notch {
         let (vis, reserve) = (s.notch.mode(), s.notch.reserves() && s.notch_enabled && !s.menubar);
         if vis != self.vis {
             self.vis = vis;
-            if vis == Vis::Always {
-                self.strip = None;
-                self.edge_armed = false;
-            } else if self.strip.is_none() {
-                self.strip = Strip::new(self.hwnd, STRIP_ENTER, STRIP_LEAVE).ok();
-                self.place_strip();
+            if vis == Vis::OnDemand {
+                self.starting = false;
             }
+            self.ensure_strip();
         }
         if reserve != self.reserved {
             self.set_reserved(reserve);
         }
-        self.publish_notch();
-        let _ = self.body.panel.set_params(body::glass_params(self.size.radius));
-        self.body.paint_ears(self.tier);
-        if let Some(sh) = &self.shadow {
-            sh.set_visible(self.shown && !self.off);
-        }
+        self.shell.apply_material(self.tier);
         self.update_visibility();
+        self.publish_notch();
         self.sync_download_watch();
-        self.first = true;
-        self.refresh();
+        let look = self.look;
+        self.apply_size(Some(SpringParams::swap()));
+        self.transition(look);
         log::line("notch", &format!("pengaturan: perilaku={vis:?} cadangan={reserve} mati={}", self.off));
     }
 
@@ -1568,8 +1973,7 @@ impl Notch {
         let t = auto_tier(self.glass_override);
         if t != self.tier {
             self.tier = t;
-            let _ = self.body.panel.set_tier(t);
-            self.body.paint_ears(t);
+            self.shell.apply_material(t);
         }
     }
 
@@ -1577,55 +1981,68 @@ impl Notch {
         let screen_w = sys::screen_size().0;
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0 * crate::prefs::ui_scale();
         let win = win_size(dpi, screen_w);
-        if win == self.win && screen_w == self.screen_w && (dpi - self.dpi).abs() < 0.01 {
-            return;
-        }
-        log::line("notch", &format!("konfigurasi ulang layar_w={screen_w} dpi={dpi}"));
-        let dpi_changed = (dpi - self.dpi).abs() >= 0.01;
-        self.screen_w = screen_w;
-        self.dpi = dpi;
-        self.win = win;
-        unsafe {
-            let _ = SetWindowPos(self.hwnd, None, (screen_w - win.0) / 2, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
-        }
-        let _ = self._surface.root.SetSize(Vector2 { X: win.0 as f32, Y: win.1 as f32 });
-        self.body.resize(win);
-        self.paint.reset(dpi);
-        if dpi_changed {
-            self.body.remake_ears(&self.paint.gfx, dpi, self.tier);
-            if let Some(sh) = self.shadow.as_mut() {
-                sh.pad = (SHADOW_PAD * dpi).round();
+        self.frame_ms = frame_interval_ms();
+        let changed = win != self.win || screen_w != self.screen_w || (dpi - self.dpi).abs() >= 0.01;
+        if changed {
+            log::line("notch", &format!("konfigurasi ulang layar_w={screen_w} dpi={dpi} frame_ms={}", self.frame_ms));
+            self.screen_w = screen_w;
+            self.dpi = dpi;
+            self.win = win;
+            self.rgn_rect = (-1, -1, -1, -1);
+            unsafe {
+                let _ = SetWindowPos(self.hwnd, None, (screen_w - win.0) / 2, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
             }
+            let _ = self._surface.root.SetSize(Vector2 { X: win.0 as f32, Y: win.1 as f32 });
+            self.shell.resize(win);
+            self.paint.reset(dpi);
+            self.menu = None;
         }
-        self.place_shadow_window();
+        if self.reserved {
+            self.set_reserved(true);
+        }
         self.place_strip();
         self.publish_notch();
+        if changed {
+            self.first = true;
+            let look = self.look;
+            self.transition(look);
+        }
+    }
+
+    fn on_gfx_reset(&mut self) {
+        self.paint.reset(self.dpi);
+        self.art = None;
+        self.shelf_icons.clear();
+        self.dl_icons.clear();
+        self.app_icons.clear();
+        self.icons_pending.clear();
+        self.menu = None;
+        self.shell.apply_material(self.tier);
         self.first = true;
-        let look = self.look;
-        self.transition(look);
+        self.refresh();
     }
 
     fn on_timer(&mut self, id: usize) {
-        if id != T_TICK {
+        if id != T_TICK && id != T_FRAME {
             kill(self.hwnd, id);
         }
         match id {
+            T_FRAME => self.tick_frame(),
             T_DWELL => {
                 if self.tracking && !self.cursor_on_media_button() {
                     self.dispatch(Event::Dwell);
                 }
             }
             T_LEAVE => {
-                if !self.tracking && !self.send_pinned() {
+                if !self.tracking && !self.send_pinned() && !self.pinned && !self.dragging_out && !self.focus.is_active() {
                     self.dispatch(Event::Leave);
                 }
             }
             T_GHOST => {
-                if let Ok(k) = self.body.ghost.Children() {
+                if let Ok(k) = self.shell.ghost.Children() {
                     let _ = k.RemoveAll();
                 }
             }
-            T_REGION => self.settle_region(),
             T_TICK => self.on_tick(),
             T_CHARGE => {
                 self.charging_fresh = false;
@@ -1646,6 +2063,9 @@ impl Notch {
             T_EDGE => {
                 self.edge_armed = true;
                 self.update_visibility();
+                if self.vis == Vis::OnDemand && crate::prefs::get().notch_hover_open && self.mode == Mode::Rest {
+                    self.dispatch(Event::Enter);
+                }
             }
             T_GRACE => {
                 self.grace = false;
@@ -1660,7 +2080,6 @@ impl Notch {
                 self.sync_glance();
             }
             T_LYRIC => self.on_lyric_tick(),
-            T_PRIVACY => self.poll_privacy(),
             T_SEND => {
                 let idle = self.send.as_ref().is_some_and(|s| !s.prog.active && s.last.elapsed() > SEND_IDLE);
                 if idle {
@@ -1689,7 +2108,7 @@ impl Notch {
             }
             T_PROGRESS => {
                 if self.mode == Mode::Open(Tab::Play) {
-                    self.render();
+                    self.update_scrub_in_place();
                 }
             }
             T_MINUTE => {
@@ -1700,19 +2119,32 @@ impl Notch {
                 }
                 timer(self.hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
             }
-            T_HIDEWIN => {
-                if !self.shown {
-                    unsafe {
-                        let _ = ShowWindow(self.hwnd, SW_HIDE);
-                    }
-                    if let Some(sh) = &self.shadow {
-                        sh.set_visible(false);
-                    }
-                }
-            }
             _ => {}
         }
     }
+}
+
+fn shelf_file() -> std::path::PathBuf {
+    crate::paths::config_dir().join("shelf.txt")
+}
+
+fn load_persisted_shelf() -> nacre_core::notch::shelf::Shelf {
+    let Ok(src) = std::fs::read_to_string(shelf_file()) else {
+        return nacre_core::notch::shelf::Shelf::new(24);
+    };
+    let parsed = nacre_core::notch::shelf::Shelf::parse(&src, 24);
+    let mut kept = nacre_core::notch::shelf::Shelf::new(24);
+    for it in parsed.items().iter().rev() {
+        if std::path::Path::new(&it.path).exists() {
+            kept.add(&it.path);
+        }
+    }
+    kept
+}
+
+fn save_persisted_shelf(shelf: &nacre_core::notch::shelf::Shelf) {
+    let _ = std::fs::create_dir_all(crate::paths::config_dir());
+    let _ = std::fs::write(shelf_file(), shelf.serialize());
 }
 
 fn after_drop(paths: &[String], zone: usize) {
@@ -1744,13 +2176,27 @@ fn after_drop(paths: &[String], zone: usize) {
 }
 
 fn xy(lp: LPARAM) -> (f32, f32) {
-    let gap = f32::from_bits(ISLAND_GAP.load(std::sync::atomic::Ordering::Relaxed));
-    ((lp.0 as i16) as f32, ((lp.0 >> 16) as i16) as f32 - gap)
+    let stage_y = f32::from_bits(STAGE_Y_BITS.load(Ordering::Relaxed));
+    ((lp.0 as i16) as f32, ((lp.0 >> 16) as i16) as f32 - stage_y)
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEACTIVATE => {
+            let active = with(hwnd, |d| d.focus.is_active()).unwrap_or(false);
+            LRESULT(if active { MA_ACTIVATE } else { MA_NOACTIVATE } as isize)
+        }
+        WM_ACTIVATE => {
+            if (wp.0 & 0xFFFF) == 0 {
+                with(hwnd, |d| {
+                    if d.focus.is_active() {
+                        d.focus.release(hwnd, false);
+                        d.update_visibility();
+                    }
+                });
+            }
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
             let (x, y) = xy(lp);
             if with(hwnd, |d| d.on_down(x, y)).unwrap_or(false) {
@@ -1761,10 +2207,16 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = xy(lp);
             with(hwnd, |d| {
-                d.on_drag(x);
+                d.on_drag(x, y);
                 d.on_move();
                 d.on_hover(x, y);
             });
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            if with(hwnd, |d| d.on_capture_changed()).is_none() {
+                defer(Deferred::CaptureChanged);
+            }
             LRESULT(0)
         }
         WM_MEDIA => {
@@ -1791,6 +2243,39 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             with(hwnd, |d| d.on_send());
             LRESULT(0)
         }
+        WM_PRIVACY => {
+            if with(hwnd, |d| d.on_privacy()).is_none() {
+                defer(Deferred::Privacy);
+            }
+            LRESULT(0)
+        }
+        WM_RECONF => {
+            if with(hwnd, |d| d.on_reconfigure()).is_none() {
+                defer(Deferred::Reconfigure);
+            }
+            LRESULT(0)
+        }
+        WM_ICON => {
+            if with(hwnd, |d| d.on_icon()).is_none() {
+                defer(Deferred::Icon);
+            }
+            LRESULT(0)
+        }
+        WM_START_DRAGOUT => {
+            let path = with(hwnd, |d| d.shelf.items().get(wp.0).map(|it| it.path.clone())).flatten();
+            if let Some(p) = path {
+                let dropped = dragout::start(vec![p]);
+                log::line("notch", &format!("seret-keluar selesai dropped={dropped}"));
+            }
+            with(hwnd, |d| {
+                d.dragging_out = false;
+                if !d.tracking && !d.pinned && !d.send_pinned() && matches!(d.mode, Mode::Open(_)) {
+                    timer(hwnd, T_LEAVE, motion::LEAVE_GRACE_MS);
+                }
+                d.update_visibility();
+            });
+            LRESULT(0)
+        }
         WM_DND => {
             with(hwnd, |d| d.on_dnd(wp.0, lp));
             LRESULT(0)
@@ -1811,18 +2296,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         m if m == MENU_CLOSE => {
-            with(hwnd, |d| {
-                if let Some(mn) = &d.menu {
-                    mn.hide();
-                }
-                if !d.tracking && matches!(d.mode, Mode::Open(_)) {
-                    timer(hwnd, T_LEAVE, motion::LEAVE_GRACE_MS);
-                }
-            });
+            if with(hwnd, |d| d.on_menu_close()).is_none() {
+                defer(Deferred::MenuClose);
+            }
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            with(hwnd, |d| d.on_leave());
+            if with(hwnd, |d| d.on_leave()).is_none() {
+                defer(Deferred::MouseLeave);
+            }
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -1842,7 +2324,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         STRIP_ENTER => {
             with(hwnd, |d| {
                 if d.vis != Vis::Always {
-                    timer(hwnd, T_EDGE, 200);
+                    let delay = crate::prefs::get().notch_autohide_delay.clamp(50, 300) as u32;
+                    timer(hwnd, T_EDGE, delay);
                 }
             });
             LRESULT(0)
@@ -1853,7 +2336,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if d.edge_armed {
                     d.edge_armed = false;
                     d.grace = true;
-                    timer(hwnd, T_GRACE, 800);
+                    timer(hwnd, T_GRACE, if d.vis == Vis::OnDemand { 380 } else { 800 });
                     d.update_visibility();
                 }
             });
@@ -1864,15 +2347,23 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         crate::prefs::WM_PREFS => {
-            with(hwnd, |d| {
+            if with(hwnd, |d| {
                 d.apply_prefs();
                 d.on_reconfigure();
-            });
+            })
+            .is_none()
+            {
+                defer(Deferred::Prefs);
+            }
             LRESULT(0)
         }
         WM_TOPMOST => {
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            with(hwnd, |d| d.place_shadow_window());
+            with(hwnd, |d| {
+                if let Some(s) = &d.strip {
+                    s.to_top();
+                }
+            });
             LRESULT(0)
         }
         WM_OPEN => {
@@ -1884,7 +2375,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
-            timer(hwnd, T_RECONF, 500);
+            timer(hwnd, T_RECONF, 400);
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_POWERBROADCAST => {
@@ -1898,7 +2389,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             with(hwnd, |d| d.refresh_tier());
             DefWindowProcW(hwnd, msg, wp, lp)
         }
+        crate::services::WM_GFX_RESET => {
+            if with(hwnd, |d| d.on_gfx_reset()).is_none() {
+                defer(Deferred::GfxReset);
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            crate::services::unlisten_gfx(hwnd);
             NOTCH_HWND.store(0, Ordering::Relaxed);
             LRESULT(0)
         }

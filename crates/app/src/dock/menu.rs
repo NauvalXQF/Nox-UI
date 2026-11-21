@@ -3,7 +3,7 @@ use nacre_platform::text::{measure, render, Style};
 use nacre_ui::gfx::Gfx;
 use nacre_ui::glass::{GlassParams, Tier};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::collections::HashMap;
 use windows::core::w;
 use windows::UI::Color;
 use windows::UI::Composition::{CompositionStretch, Compositor, SpriteVisual};
@@ -16,8 +16,6 @@ use windows_numerics::{Vector2, Vector3};
 
 pub const MENU_PICK: u32 = WM_APP + 12;
 pub const MENU_CLOSE: u32 = WM_APP + 13;
-
-static TARGET: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone)]
 pub struct Item {
@@ -80,6 +78,7 @@ pub struct Card {
 const T_HIDE: usize = 77;
 
 struct Live {
+    target: HWND,
     rows: Vec<(f32, f32, Item)>,
     size: (f32, f32),
     hover: Option<usize>,
@@ -91,7 +90,7 @@ struct Live {
 }
 
 thread_local! {
-    static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+    static LIVE: RefCell<HashMap<isize, Live>> = RefCell::new(HashMap::new());
 }
 
 fn tint(src: &[u8], rgb: [u8; 3]) -> Vec<u8> {
@@ -174,7 +173,7 @@ fn xy(lp: LPARAM) -> (f32, f32) {
 }
 
 unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    let target = HWND(TARGET.load(Ordering::Relaxed) as *mut _);
+    let key = h.0 as isize;
     match m {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_MOUSEMOVE => {
@@ -182,7 +181,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
             let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
             let _ = TrackMouseEvent(&mut t);
             LIVE.with(|c| {
-                if let Some(live) = c.borrow_mut().as_mut() {
+                if let Some(live) = c.borrow_mut().get_mut(&key) {
                     let hit = row_at(live, x, y).filter(|i| live.rows[*i].2.toggle.is_none());
                     if hit != live.hover {
                         set_hover(live, hit);
@@ -193,7 +192,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
         }
         WM_MOUSELEAVE => {
             LIVE.with(|c| {
-                if let Some(live) = c.borrow_mut().as_mut() {
+                if let Some(live) = c.borrow_mut().get_mut(&key) {
                     if live.hover.is_some() {
                         set_hover(live, None);
                     }
@@ -203,10 +202,14 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
         }
         WM_LBUTTONUP | WM_RBUTTONUP => {
             let (x, y) = xy(l);
-            let picked = LIVE.with(|c| c.borrow().as_ref().and_then(|live| row_at(live, x, y).map(|i| (live.rows[i].2.id, live.rows[i].2.keep_open || live.owner_hides))));
-            if let Some((id, keep)) = picked {
+            let picked = LIVE.with(|c| {
+                c.borrow()
+                    .get(&key)
+                    .and_then(|live| row_at(live, x, y).map(|i| (live.target, live.rows[i].2.id, live.rows[i].2.keep_open || live.owner_hides)))
+            });
+            if let Some((target, id, keep)) = picked {
                 if !keep {
-                    nacre_platform::input::end_dismiss();
+                    nacre_platform::input::end_dismiss_for(target.0 as isize);
                     let _ = ShowWindow(h, SW_HIDE);
                 }
                 let _ = PostMessageW(Some(target), MENU_PICK, WPARAM(id), LPARAM(0));
@@ -217,6 +220,12 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
             let _ = KillTimer(Some(h), T_HIDE);
             let _ = ShowWindow(h, SW_HIDE);
             LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            LIVE.with(|c| {
+                c.borrow_mut().remove(&key);
+            });
+            DefWindowProcW(h, m, w, l)
         }
         _ => DefWindowProcW(h, m, w, l),
     }
@@ -262,8 +271,11 @@ impl Menu {
         if !self.popup.is_visible() || self.closing {
             return;
         }
-        nacre_platform::input::end_dismiss();
-        LIVE.with(|c| *c.borrow_mut() = None);
+        nacre_platform::input::end_dismiss_for(self.target.0 as isize);
+        let key = self.popup.hwnd.0 as isize;
+        LIVE.with(|c| {
+            c.borrow_mut().remove(&key);
+        });
         if crate::motion::pop_out(comp, self.popup.root(), self.pop_at, 0.55, crate::motion::CC_CLOSE_MS).is_ok() {
             self.closing = true;
             unsafe {
@@ -292,7 +304,6 @@ impl Menu {
 
     #[allow(clippy::too_many_arguments)]
     fn show_impl(&mut self, comp: &Compositor, gfx: &Gfx, items: Vec<Item>, x: i32, y: i32, above: bool, right_aligned: bool) -> Result<()> {
-        TARGET.store(self.target.0 as isize, Ordering::Relaxed);
         let d = self.dpi;
         if self.closing {
             self.closing = false;
@@ -456,8 +467,22 @@ impl Menu {
         self.popup.panel.set_radius(radius)?;
         self.highlight.SetOpacity(0.0)?;
         self.highlight.SetBrush(&comp.CreateColorBrushWithColor(crate::prefs::accent_c(235))?)?;
+        let key = self.popup.hwnd.0 as isize;
         LIVE.with(|c| {
-            *c.borrow_mut() = Some(Live { rows, size: (w, h), hover: None, highlight: self.highlight.clone(), boxes: boxes.iter().map(|b| b.0.clone()).collect(), pad, hl_max: card.map(|_| (radius - pad).max(6.0 * d)), owner_hides: card.is_some() });
+            c.borrow_mut().insert(
+                key,
+                Live {
+                    target: self.target,
+                    rows,
+                    size: (w, h),
+                    hover: None,
+                    highlight: self.highlight.clone(),
+                    boxes: boxes.iter().map(|b| b.0.clone()).collect(),
+                    pad,
+                    hl_max: card.map(|_| (radius - pad).max(6.0 * d)),
+                    owner_hides: card.is_some(),
+                },
+            );
         });
         if refresh {
             let mut pt = windows::Win32::Foundation::POINT::default();
@@ -466,7 +491,7 @@ impl Menu {
             }
             let (cx, cy) = ((pt.x - px) as f32, (pt.y - py) as f32);
             LIVE.with(|c| {
-                if let Some(live) = c.borrow_mut().as_mut() {
+                if let Some(live) = c.borrow_mut().get_mut(&key) {
                     let hit = row_at(live, cx, cy).filter(|i| live.rows[*i].2.toggle.is_none());
                     set_hover(live, hit);
                 }
@@ -494,7 +519,7 @@ impl Menu {
     }
 
     pub fn hide(&self) {
-        nacre_platform::input::end_dismiss();
+        nacre_platform::input::end_dismiss_for(self.target.0 as isize);
         unsafe {
             let _ = KillTimer(Some(self.popup.hwnd), T_HIDE);
         }
@@ -503,5 +528,18 @@ impl Menu {
 
     pub fn is_open(&self) -> bool {
         self.popup.is_visible() && !self.closing
+    }
+}
+
+impl Drop for Menu {
+    fn drop(&mut self) {
+        self.hide();
+        let key = self.popup.hwnd.0 as isize;
+        LIVE.with(|c| {
+            c.borrow_mut().remove(&key);
+        });
+        unsafe {
+            let _ = DestroyWindow(self.popup.hwnd);
+        }
     }
 }

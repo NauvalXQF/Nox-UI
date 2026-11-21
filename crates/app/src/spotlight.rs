@@ -257,7 +257,6 @@ fn action_glyph(id: &str) -> (&'static str, [u8; 3]) {
         "lock" => ("\u{E72E}", [99, 99, 108]),
         "desktop" => ("\u{E7F4}", [90, 200, 250]),
         "dark" => ("\u{E790}", [88, 86, 214]),
-        "stage" => ("\u{E8A0}", [48, 209, 88]),
         "mission" => ("\u{E7C4}", [10, 132, 255]),
         "calc" => ("\u{E8EF}", [255, 149, 0]),
         "taskmgr" => ("\u{E9D9}", [99, 99, 108]),
@@ -1501,7 +1500,6 @@ fn run_action(id: &str) {
         "dark" => prefs::update(|s| {
             s.theme = if s.theme == nacre_core::settings::Theme::Dark { nacre_core::settings::Theme::Light } else { nacre_core::settings::Theme::Dark }
         }),
-        "stage" => prefs::update(|s| s.stage = !s.stage),
         "mission" => crate::mission::toggle(),
         "calc" => launch::run("calc.exe", ""),
         "taskmgr" => launch::run("taskmgr.exe", ""),

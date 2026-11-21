@@ -1,5 +1,5 @@
 use crate::services;
-use nacre_platform::{audio, brightness, log};
+use nacre_platform::{audio, log};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -10,11 +10,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const VK_VOLUME_MUTE: u16 = 0xAD;
 const VK_VOLUME_DOWN: u16 = 0xAE;
 const VK_VOLUME_UP: u16 = 0xAF;
-const VK_BRIGHTNESS_DOWN: u16 = 0x70;
-const VK_BRIGHTNESS_UP: u16 = 0x6F;
 
 const VOLUME_STEP: f32 = 0.02;
-const BRIGHTNESS_STEP: f32 = 0.05;
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 
@@ -27,11 +24,19 @@ pub fn install() {
         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), hi, 0) {
             Ok(h) => {
                 HOOK.store(h.0 as isize, Ordering::Relaxed);
-                log::line("mediakeys", "hook volume/kecerahan aktif");
+                log::line("mediakeys", "hook volume aktif");
             }
             Err(e) => log::line("mediakeys", &format!("gagal pasang hook: {e}")),
         }
     }
+}
+
+pub fn reinstall() {
+    if HOOK.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    shutdown();
+    install();
 }
 
 pub fn shutdown() {
@@ -54,8 +59,6 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 VK_VOLUME_UP => down.then(|| step_volume(1.0)).unwrap_or(true),
                 VK_VOLUME_DOWN => down.then(|| step_volume(-1.0)).unwrap_or(true),
                 VK_VOLUME_MUTE => down.then(mute).unwrap_or(true),
-                VK_BRIGHTNESS_UP => down.then(|| step_brightness(1.0)).unwrap_or(true),
-                VK_BRIGHTNESS_DOWN => down.then(|| step_brightness(-1.0)).unwrap_or(true),
                 _ => false,
             };
             if handled {
@@ -80,13 +83,5 @@ fn mute() -> bool {
         return false;
     }
     services::toggle_mute();
-    true
-}
-
-fn step_brightness(dir: f32) -> bool {
-    let Some(level) = brightness::latest() else {
-        return false;
-    };
-    services::set_brightness((level as f32 / 100.0 + dir * BRIGHTNESS_STEP).clamp(0.0, 1.0));
     true
 }

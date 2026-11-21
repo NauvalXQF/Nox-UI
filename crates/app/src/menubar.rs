@@ -10,6 +10,8 @@ use nacre_ui::glass::Tier;
 use nacre_ui::gfx::Gfx;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::Arc;
 use windows::core::w;
 use windows::UI::Color;
 use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual, SpriteVisual};
@@ -21,17 +23,21 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Vector2, Vector3};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_DISPLAYCHANGE: u32 = 0x007E;
+const WM_DPICHANGED: u32 = 0x02E0;
+const WM_POWERBROADCAST: u32 = 0x0218;
+const WM_SETTINGCHANGE: u32 = 0x001A;
 const WM_APPCHG: u32 = WM_APP + 70;
-const WM_CLICKWIN: u32 = WM_APP + 74;
-static MOUSE_HOOK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
-static BAR_CTL: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 const WM_NOTCH: u32 = WM_APP + 71;
 const WM_TEST_NET: u32 = WM_APP + 75;
+const WM_WIFI_SIG: u32 = WM_APP + 164;
+const WM_BAR_RESYNC: u32 = WM_APP + 165;
+static BAR_CTL: AtomicIsize = AtomicIsize::new(0);
 const T_CLOCK: usize = 1;
 const T_STATUS: usize = 2;
 const T_APP: usize = 3;
 const T_FS: usize = 4;
-const T_SIG: usize = 5;
+const T_RECONF: usize = 6;
 const BAR_W: i32 = 600;
 const APP_W: i32 = 800;
 
@@ -47,7 +53,6 @@ const CTRL: u32 = 11;
 const SEARCH: u32 = 12;
 const WIFI: u32 = 13;
 const BATT: u32 = 14;
-const STAGEI: u32 = 15;
 const NATIVE0: u32 = 50;
 const NATIVE_CMD: usize = 100_000;
 
@@ -75,11 +80,20 @@ struct Bar {
     wifi_bars: Option<u8>,
     bt: Option<bool>,
     radios: Option<radio::Radios>,
+    sig_stop: Arc<AtomicBool>,
+    tier: Tier,
     dark_text: bool,
     shadow: bool,
     native: Vec<nacre_platform::menus::Top>,
     native_hwnd: isize,
     fullscreen: bool,
+}
+
+impl Drop for Bar {
+    fn drop(&mut self) {
+        self.sig_stop.store(true, Ordering::Relaxed);
+        services::unlisten_gfx(self.popup.hwnd);
+    }
 }
 
 struct Ctl {
@@ -130,24 +144,13 @@ fn noop_fg() {
     });
 }
 
-unsafe extern "system" fn ll_mouse(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let m = wp.0 as u32;
-        if m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN {
-            let ctl = BAR_CTL.load(std::sync::atomic::Ordering::Relaxed);
-            if ctl != 0 {
-                let pt = (*(lp.0 as *const MSLLHOOKSTRUCT)).pt;
-                let h = WindowFromPoint(pt);
-                if !h.0.is_null() {
-                    let root = GetAncestor(h, GA_ROOT);
-                    if !root.0.is_null() {
-                        let _ = PostMessageW(Some(HWND(ctl as *mut _)), WM_CLICKWIN, WPARAM(root.0 as usize), LPARAM(0));
-                    }
-                }
-            }
+pub fn request_resync() {
+    let h = BAR_CTL.load(Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), WM_BAR_RESYNC, WPARAM(0), LPARAM(0));
         }
     }
-    CallNextHookEx(None, code, wp, lp)
 }
 
 fn loc_hook(ev: u32, hwnd: isize) {
@@ -162,24 +165,6 @@ fn loc_hook(ev: u32, hwnd: isize) {
     }
 }
 
-fn is_fullscreen(hwnd: isize) -> bool {
-    unsafe {
-        let h = HWND(hwnd as *mut _);
-        let mut cls = [0u16; 64];
-        let n = GetClassNameW(h, &mut cls);
-        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-        if cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" {
-            return false;
-        }
-        let mut r = windows::Win32::Foundation::RECT::default();
-        if GetWindowRect(h, &mut r).is_err() {
-            return false;
-        }
-        let (sw, sh) = sys::screen_size();
-        r.left <= 0 && r.top <= 0 && r.right >= sw && r.bottom >= sh
-    }
-}
-
 pub fn init(comp: &Compositor) -> windows_core::Result<()> {
     unsafe {
         let hi: HINSTANCE = GetModuleHandleW(None)?.into();
@@ -190,10 +175,7 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
         prefs::listen(hwnd);
         tracker::install(noop_fg);
         tracker::install_fx(loc_hook);
-        BAR_CTL.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(h) = SetWindowsHookExW(WH_MOUSE_LL, Some(ll_mouse), None, 0) {
-            MOUSE_HOOK.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
-        }
+        BAR_CTL.store(hwnd.0 as isize, Ordering::Relaxed);
         apply_prefs();
     }
     Ok(())
@@ -271,8 +253,7 @@ fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
     let glass = prefs::apply(nacre_ui::glass::GlassParams::dark((10.0, 10.0), 0.0), &prefs::bar_look());
     let mut popup = Popup::new(comp, w!("AbraMenuBar"), Some(bar_proc), WINDOW_EX_STYLE(0), glass)?;
     let dpi = unsafe { GetDpiForWindow(popup.hwnd) }.max(96) as f32 / 96.0 * prefs::ui_scale();
-    let notch_h = services::notch().map(|(_, _, h)| h as f32 / dpi);
-    let h = (notch_h.unwrap_or(26.0) * dpi).round() as i32;
+    let h = services::notch_layout().rail_h.unwrap_or((26.0 * dpi).round() as i32);
     let tier = {
         let c = sys::conditions();
         if !c.transparency || c.battery_saver || c.remote_session { Tier::Solid } else { Tier::Full }
@@ -294,13 +275,36 @@ fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
     let gfx = Gfx::shared(comp)?;
     let menu = Menu::new(comp, popup.hwnd, dpi, screen, tier)?;
     popup.show();
+    services::listen_gfx(popup.hwnd);
     shell::appbar::reserve_top(popup.hwnd, screen.0, h);
     unsafe {
         SetTimer(Some(popup.hwnd), T_CLOCK, time::ms_to_next_minute().max(200), None);
         SetTimer(Some(popup.hwnd), T_STATUS, 60_000, None);
-        SetTimer(Some(popup.hwnd), T_SIG, 4_000, None);
     }
     let hw = popup.hwnd.0 as isize;
+    let sig_stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = sig_stop.clone();
+        let _ = std::thread::Builder::new().name("abra-wifi-sig".into()).spawn(move || {
+            let mut last: Option<Option<u8>> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let v = nacre_platform::wifi::link().map(|l| l.1);
+                if last != Some(v) {
+                    last = Some(v);
+                    let packed = v.map(|b| b as usize + 1).unwrap_or(0);
+                    unsafe {
+                        let _ = PostMessageW(Some(HWND(hw as *mut _)), WM_WIFI_SIG, WPARAM(packed), LPARAM(0));
+                    }
+                }
+                for _ in 0..8 {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        });
+    }
     let radios = radio::spawn(move || unsafe {
         let _ = PostMessageW(Some(HWND(hw as *mut _)), WM_APP + 22, WPARAM(0), LPARAM(0));
     });
@@ -347,9 +351,11 @@ fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
         hover: None,
         tracking: false,
         wifi: None,
-        wifi_bars: nacre_platform::wifi::link().map(|l| l.1),
+        wifi_bars: None,
         bt: None,
         radios: Some(radios),
+        sig_stop,
+        tier,
         dark_text: false,
         shadow: false,
         native: vec![],
@@ -370,22 +376,10 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             SetTimer(Some(hwnd), T_APP, 90, None);
             LRESULT(0)
         }
-        WM_CLICKWIN => {
-            let root = wp.0 as isize;
-            let mut cls = [0u16; 64];
-            let n = GetClassNameW(HWND(root as *mut _), &mut cls);
-            let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(HWND(root as *mut _), Some(&mut pid));
-            let shell = matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "NotifyIconOverflowWindow" | "TopLevelWindowForOverflowXamlIsland");
-            if pid != std::process::id() && !shell {
-                with_bar(|b| {
-                    if b.refresh_app_for(root) {
-                        b.relayout();
-                        b.render();
-                    }
-                });
-            }
+        WM_BAR_RESYNC => {
+            with_bar(|b| {
+                SetTimer(Some(b.popup.hwnd), T_RECONF, 400, None);
+            });
             LRESULT(0)
         }
         WM_TIMER if wp.0 == T_FS => {
@@ -512,12 +506,60 @@ impl Bar {
         self.cache.clear();
     }
 
+    fn refresh_tier(&mut self) {
+        let c = sys::conditions();
+        let t = if !c.transparency || c.battery_saver || c.remote_session { Tier::Solid } else { Tier::Full };
+        if t != self.tier {
+            self.tier = t;
+            let _ = self.popup.panel.set_tier(t);
+            self.menu.set_tier(t);
+        }
+    }
+
+    fn on_reconfigure(&mut self) {
+        let screen = sys::screen_size();
+        let dpi = unsafe { GetDpiForWindow(self.popup.hwnd) }.max(96) as f32 / 96.0 * prefs::ui_scale();
+        let changed = screen != self.screen || (dpi - self.dpi).abs() > 0.01;
+        if changed {
+            log::line("menubar", &format!("rekonfigurasi {}x{}@{} -> {}x{}@{}", self.screen.0, self.screen.1, self.dpi, screen.0, screen.1, dpi));
+            self.close_menu();
+            self.screen = screen;
+            self.dpi = dpi;
+            self.h = services::notch_layout().rail_h.unwrap_or((26.0 * dpi).round() as i32);
+            let _ = self.popup.set_rect(0, 0, self.screen.0, self.h);
+            let _ = self.popup.panel.set_radius(0.0);
+            if let Ok(m) = Menu::new(&self.comp, self.popup.hwnd, dpi, screen, self.tier) {
+                self.menu = m;
+            }
+            self.cache.clear();
+            self.apply_bg();
+        }
+        self.refresh_tier();
+        shell::appbar::reserve_top(self.popup.hwnd, self.screen.0, self.h);
+        unsafe {
+            SetTimer(Some(self.popup.hwnd), T_CLOCK, time::ms_to_next_minute().max(200), None);
+        }
+        self.check_fullscreen();
+        self.relayout();
+        self.render();
+    }
+
+    fn on_gfx_reset(&mut self) {
+        self.close_menu();
+        self.cache.clear();
+        if let Ok(m) = Menu::new(&self.comp, self.popup.hwnd, self.dpi, self.screen, self.tier) {
+            self.menu = m;
+        }
+        self.render();
+    }
+
     fn check_fullscreen(&mut self) {
         let fg = focus::foreground();
         if fg == 0 || fg == self.popup.hwnd.0 as isize {
             return;
         }
-        let full = is_fullscreen(fg) && !prefs::get().above_fullscreen;
+        let ov = nacre_platform::wins::overlap::evaluate(fg, std::process::id(), (0, 0, self.screen.0, self.h), self.screen);
+        let full = ov.fullscreen && !prefs::get().above_fullscreen;
         if full != self.fullscreen {
             self.fullscreen = full;
             if full {
@@ -597,9 +639,6 @@ impl Bar {
             LItem { id: CTRL, width: icon_w },
             LItem { id: SEARCH, width: icon_w },
         ];
-        if prefs::get().stage {
-            right.push(LItem { id: STAGEI, width: icon_w });
-        }
         if self.wifi.is_some() {
             right.push(LItem { id: WIFI, width: icon_w });
         }
@@ -607,11 +646,12 @@ impl Bar {
             let extra = if prefs::get().battery_pct == 2 { self.small_w(&format!("{pct}%"), 12.0, BAR_W) + 5.0 * d } else { 0.0 };
             right.push(LItem { id: BATT, width: 40.0 * d + extra });
         }
-        let gap = services::notch().map(|(l, r, _)| Gap { left: l as f32, right: r as f32 });
+        let nl = services::notch_layout();
+        let gap = nl.gap.map(|(l, r)| Gap { left: l as f32, right: r as f32 });
         let (l, r) = lay::layout(self.screen.0 as f32, 6.0 * d, &left, &right, gap);
         self.left = l;
         self.right = r;
-        let want_h = services::notch().map(|(_, _, h)| h).unwrap_or((26.0 * d).round() as i32);
+        let want_h = nl.rail_h.unwrap_or((26.0 * d).round() as i32);
         if want_h != self.h {
             self.h = want_h;
             let _ = self.popup.set_rect(0, 0, self.screen.0, self.h);
@@ -910,7 +950,6 @@ impl Bar {
                 CLOCK => self.draw_text(&clock, BAR_W, p.x, p.w, 1.0),
                 CTRL => self.draw_glyph("\u{E9E9}", cx, 13.0, 0.95),
                 SEARCH => self.draw_glyph("\u{E721}", cx, 13.0, 0.95),
-                STAGEI => self.draw_glyph("\u{E8A0}", cx, 13.0, 0.95),
                 WIFI => self.draw_wifi(cx),
                 BATT => {
                     if !self.shadow {
@@ -1002,8 +1041,8 @@ impl Bar {
                     let _ = go();
                 } else if moved {
                     let from_x = old_off.X + old_w / 2.0 - nw / 2.0;
-                    let _ = crate::motion::vec3(&self.comp, &self.capsule, "Offset", Vector3 { X: from_x, Y: cy, Z: 0.0 }, to, crate::motion::SWITCHER_MOVE_MS + 50);
-                    let _ = crate::motion::vec3(&self.comp, &self.capsule, "Scale", Vector3 { X: (old_w / nw).clamp(0.5, 2.0), Y: 1.0, Z: 1.0 }, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }, crate::motion::SWITCHER_MOVE_MS + 50);
+                    let _ = crate::motion::vec3(&self.comp, &self.capsule, "Offset", Vector3 { X: from_x, Y: cy, Z: 0.0 }, to, crate::motion::BAR_CAPSULE_MS);
+                    let _ = crate::motion::vec3(&self.comp, &self.capsule, "Scale", Vector3 { X: (old_w / nw).clamp(0.5, 2.0), Y: 1.0, Z: 1.0 }, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }, crate::motion::BAR_CAPSULE_MS);
                 }
                 let _ = self.capsule.SetOpacity(1.0);
             }
@@ -1120,7 +1159,6 @@ impl Bar {
                     Item::action(805, &prefs::tr("Lebih Terang"), nacre_platform::brightness::latest().is_some()),
                     Item::action(806, &prefs::tr("Lebih Redup"), nacre_platform::brightness::latest().is_some()),
                     Item::separator(),
-                    a(807, &format!("{}{}", if prefs::get().stage { "\u{2713} " } else { "" }, prefs::tr("Scene"))),
                     a(808, &prefs::tr("Overview")).with_accel("Ctrl+↑"),
                     a(809, &prefs::tr("Apps")).with_accel("Ctrl+Shift+Space"),
                     Item::separator(),
@@ -1208,7 +1246,6 @@ impl Bar {
                 self.close_menu();
                 crate::controlcenter::toggle(self.h);
             }
-            STAGEI => prefs::update(|st| st.stage = !st.stage),
             SEARCH => crate::spotlight::toggle(),
             WIFI => {
                 if let Some((x, _)) = self.rect_of(WIFI) {
@@ -1256,7 +1293,6 @@ impl Bar {
                     services::set_brightness((v as f32 / 100.0 + if cmd == 805 { 0.1 } else { -0.1 }).clamp(0.0, 1.0));
                 }
             }
-            807 => prefs::update(|st| st.stage = !st.stage),
             808 => crate::mission::toggle(),
             809 => crate::launchpad::toggle(),
             810 => crate::settings_win::open(&self.comp),
@@ -1423,14 +1459,31 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             });
             LRESULT(0)
         }
-        WM_TIMER if wp.0 == T_SIG => {
+        WM_WIFI_SIG => {
+            let v = (wp.0 > 0).then(|| (wp.0 - 1) as u8);
             with_bar(|b| {
-                let v = nacre_platform::wifi::link().map(|l| l.1);
                 if v != b.wifi_bars {
                     b.wifi_bars = v;
                     b.render();
                 }
             });
+            LRESULT(0)
+        }
+        services::WM_GFX_RESET => {
+            with_bar(|b| b.on_gfx_reset());
+            LRESULT(0)
+        }
+        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            SetTimer(Some(hwnd), T_RECONF, 500, None);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_POWERBROADCAST | WM_SETTINGCHANGE => {
+            SetTimer(Some(hwnd), T_RECONF, 600, None);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_TIMER if wp.0 == T_RECONF => {
+            let _ = KillTimer(Some(hwnd), T_RECONF);
+            with_bar(|b| b.on_reconfigure());
             LRESULT(0)
         }
         WM_TIMER => {

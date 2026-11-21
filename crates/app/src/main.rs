@@ -18,8 +18,6 @@ mod netmenu;
 mod mission;
 mod motion;
 mod spotlight;
-mod stage;
-mod switcher;
 mod mainwin;
 mod paths;
 mod popup;
@@ -92,6 +90,7 @@ fn release_all(why: &str) {
     log::line("exit", "appbar ok");
     fx::restore_all();
     log::line("exit", "fx ok");
+    nacre_platform::desktopicons::set_visible(true);
     taskbar::restore();
     log::line("exit", "taskbar ok");
 }
@@ -125,6 +124,10 @@ fn main() {
     log::line("start", &format!("hide={} demo={}", args.hide_taskbar, args.demo_surface));
 
     taskbar::recover_leftover(&paths::marker());
+    let parked_n = nacre_platform::wins::park::restore_file(&paths::config_dir().join("parked.txt"));
+    if parked_n > 0 {
+        log::line("park", &format!("{parked_n} jendela terparkir dari sesi lalu dikembalikan"));
+    }
 
     std::panic::set_hook(Box::new(|info| {
         log::line("panic", &info.to_string());
@@ -199,14 +202,8 @@ fn main() {
     if let Err(e) = spotlight::init(&host.compositor) {
         log::line("spotlight", &format!("gagal: {e}"));
     }
-    if let Err(e) = stage::init(&host.compositor) {
-        log::line("stage", &format!("gagal: {e}"));
-    }
     if let Err(e) = controlcenter::init(&host.compositor) {
         log::line("controlcenter", &format!("gagal: {e}"));
-    }
-    if let Err(e) = switcher::init(&host.compositor) {
-        log::line("switcher", &format!("gagal: {e}"));
     }
     if let Err(e) = menubar::init(&host.compositor) {
         log::line("menubar", &format!("gagal: {e}"));
@@ -240,6 +237,7 @@ fn main() {
     if pref.autostart {
         mainwin::apply_autostart();
     }
+    mainwin::apply_desktop_icons();
     if args.hide_taskbar || (pref.takeover && pref.dock_enabled && !args.no_dock && !args.keep_taskbar) {
         mainwin::set_taskbar_hidden(true);
     }
@@ -252,8 +250,6 @@ fn main() {
         }
     }
     mediakeys::shutdown();
-    switcher::shutdown();
-    stage::shutdown();
     nacre_platform::clipboard::shutdown();
     macshortcuts::shutdown();
     release_all("exit");

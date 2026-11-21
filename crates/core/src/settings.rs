@@ -6,6 +6,7 @@ pub enum Behavior {
     Fixed,
     Overlay,
     Smart,
+    AutoHide,
 }
 
 impl Behavior {
@@ -13,7 +14,8 @@ impl Behavior {
         match s.trim().to_ascii_lowercase().as_str() {
             "fixed" | "tetap" | "permanent" => Some(Behavior::Fixed),
             "overlay" | "menimpa" => Some(Behavior::Overlay),
-            "smart" | "autohide" | "auto-hide" | "auto" | "peek" | "hidden" => Some(Behavior::Smart),
+            "smart" | "auto" => Some(Behavior::Smart),
+            "autohide" | "auto-hide" | "peek" | "hidden" | "ondemand" => Some(Behavior::AutoHide),
             _ => None,
         }
     }
@@ -23,6 +25,7 @@ impl Behavior {
             Behavior::Fixed => "fixed",
             Behavior::Overlay => "overlay",
             Behavior::Smart => "smart",
+            Behavior::AutoHide => "autohide",
         }
     }
 
@@ -30,6 +33,7 @@ impl Behavior {
         match self {
             Behavior::Fixed | Behavior::Overlay => Mode::Always,
             Behavior::Smart => Mode::AutoHide,
+            Behavior::AutoHide => Mode::OnDemand,
         }
     }
 
@@ -37,7 +41,7 @@ impl Behavior {
         self == Behavior::Fixed
     }
 
-    pub const ALL: [Behavior; 3] = [Behavior::Fixed, Behavior::Overlay, Behavior::Smart];
+    pub const ALL: [Behavior; 4] = [Behavior::Fixed, Behavior::Overlay, Behavior::Smart, Behavior::AutoHide];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,14 +187,13 @@ pub enum HotAction {
     Mission,
     Launchpad,
     Desktop,
-    Stage,
     Notifications,
     Lock,
 }
 
 impl HotAction {
-    pub const ALL: [HotAction; 7] =
-        [HotAction::None, HotAction::Mission, HotAction::Launchpad, HotAction::Desktop, HotAction::Stage, HotAction::Notifications, HotAction::Lock];
+    pub const ALL: [HotAction; 6] =
+        [HotAction::None, HotAction::Mission, HotAction::Launchpad, HotAction::Desktop, HotAction::Notifications, HotAction::Lock];
 
     pub fn parse(s: &str) -> Option<HotAction> {
         Self::ALL.into_iter().find(|a| a.key() == s.trim().to_ascii_lowercase())
@@ -201,7 +204,6 @@ impl HotAction {
             HotAction::Mission => "mission",
             HotAction::Launchpad => "launchpad",
             HotAction::Desktop => "desktop",
-            HotAction::Stage => "stage",
             HotAction::Notifications => "notifications",
             HotAction::Lock => "lock",
         }
@@ -285,17 +287,6 @@ pub struct Settings {
     pub menubar_material: bool,
     pub menubar_style: BarStyle,
     pub hot: [HotAction; 4],
-    pub stage: bool,
-    pub switcher: bool,
-    pub stage_right: bool,
-    pub stage_size: u8,
-    pub stage_gap: u8,
-    pub stage_count: u8,
-    pub stage_speed: u8,
-    pub stage_desktop_click: bool,
-    pub stage_media: bool,
-    pub stage_icons: u8,
-    pub stage_titles: bool,
     pub hide_desktop_icons: bool,
     pub dock_plates: bool,
     pub above_fullscreen: bool,
@@ -318,6 +309,8 @@ pub struct Settings {
     pub icon_pack: bool,
     pub ui_scale: u8,
     pub notch_island: bool,
+    pub notch_autohide_delay: u16,
+    pub notch_notif_peek: bool,
     pub widget_style: u8,
     pub battery_pct: u8,
 }
@@ -354,17 +347,6 @@ impl Default for Settings {
             menubar_material: true,
             menubar_style: BarStyle::Dark,
             hot: [HotAction::None; 4],
-            stage: false,
-            switcher: true,
-            stage_right: false,
-            stage_size: 152,
-            stage_gap: 20,
-            stage_count: 6,
-            stage_speed: 100,
-            stage_desktop_click: true,
-            stage_media: false,
-            stage_icons: 2,
-            stage_titles: true,
             hide_desktop_icons: true,
             dock_plates: true,
             above_fullscreen: true,
@@ -387,6 +369,8 @@ impl Default for Settings {
             icon_pack: true,
             ui_scale: 100,
             notch_island: false,
+            notch_autohide_delay: 100,
+            notch_notif_peek: true,
             widget_style: 0,
             battery_pct: 2,
         }
@@ -439,26 +423,6 @@ impl Settings {
                 "hot_tr" => s.hot[1] = HotAction::parse(v).unwrap_or(s.hot[1]),
                 "hot_bl" => s.hot[2] = HotAction::parse(v).unwrap_or(s.hot[2]),
                 "hot_br" => s.hot[3] = HotAction::parse(v).unwrap_or(s.hot[3]),
-                "switcher" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.switcher = b;
-                    }
-                }
-                "stage" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.stage = b;
-                    }
-                }
-                "stage_right" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.stage_right = b;
-                    }
-                }
-                "stage_desktop_click" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.stage_desktop_click = b;
-                    }
-                }
                 "icon_style" => s.icon_style = IconStyle::parse(v).unwrap_or(s.icon_style),
                 "downloads_stack" => {
                     if let Some(b) = parse_bool(v) {
@@ -527,21 +491,6 @@ impl Settings {
                         s.hide_desktop_icons = b;
                     }
                 }
-                "stage_media" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.stage_media = b;
-                    }
-                }
-                "stage_titles" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.stage_titles = b;
-                    }
-                }
-                "stage_size" => s.stage_size = v.parse::<i32>().map(|n| n.clamp(70, 260) as u8).unwrap_or(s.stage_size),
-                "stage_gap" => s.stage_gap = v.parse::<i32>().map(|n| n.clamp(0, 60) as u8).unwrap_or(s.stage_gap),
-                "stage_count" => s.stage_count = v.parse::<i32>().map(|n| n.clamp(2, 10) as u8).unwrap_or(s.stage_count),
-                "stage_speed" => s.stage_speed = v.parse::<i32>().map(|n| n.clamp(50, 200) as u8).unwrap_or(s.stage_speed),
-                "stage_icons" => s.stage_icons = v.parse::<i32>().map(|n| n.clamp(0, 2) as u8).unwrap_or(s.stage_icons),
                 "menubar_style" => {
                     if matches!(v.to_ascii_lowercase().as_str(), "glass" | "kaca") {
                         legacy_glass = true;
@@ -595,6 +544,14 @@ impl Settings {
                         s.notch_island = b;
                     }
                 }
+                "notch_autohide_delay" => {
+                    s.notch_autohide_delay = v.parse::<i32>().map(|n| n.clamp(50, 300) as u16).unwrap_or(s.notch_autohide_delay);
+                }
+                "notch_notif_peek" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.notch_notif_peek = b;
+                    }
+                }
                 "widget_style" => s.widget_style = v.parse::<u8>().map(|n| n.min(1)).unwrap_or(s.widget_style),
                 "battery_pct" => s.battery_pct = v.parse::<u8>().map(|n| n.min(2)).unwrap_or(s.battery_pct),
                 "autostart" => {
@@ -613,7 +570,7 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "# ABRA settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\nstyle={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nstage={}\nswitcher={}\nstage_right={}\nstage_size={}\nstage_gap={}\nstage_count={}\nstage_speed={}\nstage_desktop_click={}\nstage_media={}\nstage_icons={}\nstage_titles={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nwidget_style={}\nbattery_pct={}\n",
+            "# ABRA settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\nstyle={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nwidget_style={}\nbattery_pct={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -644,17 +601,6 @@ impl Settings {
             self.hot[1].key(),
             self.hot[2].key(),
             self.hot[3].key(),
-            self.stage,
-            self.switcher,
-            self.stage_right,
-            self.stage_size,
-            self.stage_gap,
-            self.stage_count,
-            self.stage_speed,
-            self.stage_desktop_click,
-            self.stage_media,
-            self.stage_icons,
-            self.stage_titles,
             self.hide_desktop_icons,
             self.menubar_style.key(),
             self.dock_plates,
@@ -679,6 +625,8 @@ impl Settings {
             self.notch_send,
             self.ui_scale,
             self.notch_island,
+            self.notch_autohide_delay,
+            self.notch_notif_peek,
             self.widget_style,
             self.battery_pct
         )
@@ -819,7 +767,7 @@ menubar_style=glass
 
     #[test]
     fn roundtrip() {
-        let s = Settings { takeover: false, dock: Behavior::Smart, notch: Behavior::Overlay, blur: 12, style: BlurStyle::Clear, transparency: 90, theme: Theme::Light, lang: Lang::En, dock_material: Material::Black, dock_round: 80, notch_material: Material::Glass, notch_round: 10, autostart: true, dock_size: 60, dock_gap: 10, dock_zoom: 200, dock_margin: 30, anim: false, refraction: false, dock_enabled: false, notch_enabled: false, notch_hover_open: false, win_shadow: false, menubar: true, clock_24h: false, menubar_glass: true, hot: [HotAction::Mission, HotAction::Launchpad, HotAction::Lock, HotAction::Stage], stage: true, switcher: false, ..Default::default() };
+        let s = Settings { takeover: false, dock: Behavior::Smart, notch: Behavior::Overlay, blur: 12, style: BlurStyle::Clear, transparency: 90, theme: Theme::Light, lang: Lang::En, dock_material: Material::Black, dock_round: 80, notch_material: Material::Glass, notch_round: 10, autostart: true, dock_size: 60, dock_gap: 10, dock_zoom: 200, dock_margin: 30, anim: false, refraction: false, dock_enabled: false, notch_enabled: false, notch_hover_open: false, win_shadow: false, menubar: true, clock_24h: false, menubar_glass: true, hot: [HotAction::Mission, HotAction::Launchpad, HotAction::Lock, HotAction::Desktop], ..Default::default() };
         assert_eq!(Settings::parse(&s.serialize()), s);
     }
 
@@ -855,8 +803,11 @@ dock_margin=900");
         assert_eq!(Behavior::Overlay.mode(), Mode::Always);
         assert_eq!(Behavior::Smart.mode(), Mode::AutoHide);
         assert!(!Behavior::Smart.reserves());
-        for old in ["autohide", "peek", "smart"] {
-            assert_eq!(Behavior::parse(old), Some(Behavior::Smart));
+        assert_eq!(Behavior::AutoHide.mode(), Mode::OnDemand);
+        assert!(!Behavior::AutoHide.reserves());
+        assert_eq!(Behavior::parse("smart"), Some(Behavior::Smart));
+        for ah in ["autohide", "auto-hide", "peek", "hidden"] {
+            assert_eq!(Behavior::parse(ah), Some(Behavior::AutoHide));
         }
     }
 

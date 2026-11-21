@@ -14,7 +14,7 @@ use windows::UI::Color;
 use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 use windows_core::Interface;
@@ -82,6 +82,7 @@ enum Action {
     LyricsCompact,
     NotchDownloads,
     NotchSend,
+    NotchNotifPeek,
     LyricsOnline,
     LyricsDir,
     Donate,
@@ -100,11 +101,6 @@ enum Action {
     Clock24,
     BarStyle(u8),
     HotCycle(usize),
-    StageOn,
-    SwitcherOn,
-    StageFlag(u8),
-    StageRight(bool),
-    StageIcons(u8),
     HideIcons,
     DockPlates,
     IconPack,
@@ -147,7 +143,7 @@ struct Region {
 enum RowDef {
     Toggle(&'static str, bool, Action),
     Seg(&'static str, Vec<(&'static str, Action)>, usize),
-    Slider(&'static str, u8, u8),
+    Slider(&'static str, u16, u8),
     Pick(&'static str, String, Action),
     Swatches(&'static str, usize),
     Thumbs(&'static str, Vec<(&'static str, Thumb, Action)>, usize),
@@ -445,10 +441,7 @@ impl Win {
             5 => (0.0, 24.0, " dp"),
             6 => (100.0, 250.0, "%"),
             7 => (0.0, 60.0, " dp"),
-            8 => (70.0, 260.0, " dp"),
-            9 => (0.0, 60.0, " dp"),
-            10 => (2.0, 10.0, ""),
-            11 => (50.0, 200.0, "%"),
+            8 => (50.0, 300.0, " ms"),
             _ => (0.0, 100.0, "%"),
         }
     }
@@ -669,8 +662,15 @@ impl Win {
     fn page(&self, page: u8) -> Vec<(Option<&'static str>, Vec<RowDef>)> {
         let s = prefs::get();
         let behaviors = |dock: bool| -> Vec<(&'static str, Action)> {
-            [(prefs::tr("Tetap"), Behavior::Fixed), (prefs::tr("Menimpa"), Behavior::Overlay), (prefs::tr("Pintar"), Behavior::Smart)]
-                .into_iter()
+            let mut list = vec![
+                (prefs::tr("Tetap"), Behavior::Fixed),
+                (prefs::tr("Menimpa"), Behavior::Overlay),
+                (prefs::tr("Pintar"), Behavior::Smart),
+            ];
+            if !dock {
+                list.push((prefs::tr("Auto-hide"), Behavior::AutoHide));
+            }
+            list.into_iter()
                 .map(|(t, b)| (t, if dock { Action::Dock(b) } else { Action::Notch(b) }))
                 .collect()
         };
@@ -678,6 +678,7 @@ impl Win {
             Behavior::Fixed => 0,
             Behavior::Overlay => 1,
             Behavior::Smart => 2,
+            Behavior::AutoHide => 3,
         };
         match page {
             0 => vec![
@@ -719,11 +720,11 @@ impl Win {
                 (
                     Some(prefs::tr("Ukuran")),
                     vec![
-                        RowDef::Slider(prefs::tr("Ukuran ikon"), s.dock_size, 4),
-                        RowDef::Slider(prefs::tr("Jarak antar ikon"), s.dock_gap, 5),
-                        RowDef::Slider(prefs::tr("Zoom saat hover"), s.dock_zoom, 6),
-                        RowDef::Slider(prefs::tr("Jarak dari tepi bawah"), s.dock_margin, 7),
-                        RowDef::Slider(prefs::tr("Kebulatan sudut"), s.dock_round, 2),
+                        RowDef::Slider(prefs::tr("Ukuran ikon"), s.dock_size as u16, 4),
+                        RowDef::Slider(prefs::tr("Jarak antar ikon"), s.dock_gap as u16, 5),
+                        RowDef::Slider(prefs::tr("Zoom saat hover"), s.dock_zoom as u16, 6),
+                        RowDef::Slider(prefs::tr("Jarak dari tepi bawah"), s.dock_margin as u16, 7),
+                        RowDef::Slider(prefs::tr("Kebulatan sudut"), s.dock_round as u16, 2),
                     ],
                 ),
             ],
@@ -733,8 +734,14 @@ impl Win {
                     RowDef::Toggle(prefs::tr("Aktifkan Visor"), s.notch_enabled, Action::NotchOn),
                     RowDef::Seg(prefs::tr("Bentuk"), vec![(prefs::tr("Visor"), Action::NotchShape(false)), (prefs::tr("Capsule"), Action::NotchShape(true))], if s.notch_island { 1 } else { 0 }),
                     RowDef::Seg(prefs::tr("Perilaku"), behaviors(false), beh_idx(s.notch)),
-                    RowDef::Slider(prefs::tr("Kebulatan sudut"), s.notch_round, 3),
+                    RowDef::Slider(prefs::tr("Kebulatan sudut"), s.notch_round as u16, 3),
                     RowDef::Toggle(prefs::tr("Buka otomatis saat kursor di Visor"), s.notch_hover_open, Action::HoverOpen),
+                ],
+            ), (
+                Some(prefs::tr("Auto-hide")),
+                vec![
+                    RowDef::Slider(prefs::tr("Jeda hover Auto-hide"), s.notch_autohide_delay, 8),
+                    RowDef::Toggle(prefs::tr("Intip otomatis saat notifikasi masuk"), s.notch_notif_peek, Action::NotchNotifPeek),
                 ],
             ), (
                 Some(prefs::tr("Saat Visor diam")),
@@ -894,45 +901,18 @@ impl Win {
                         vec![
                             RowDef::Seg(prefs::tr("Material"), mat_opts(true), mat_idx(s.dock_material)),
                             RowDef::Seg(prefs::tr("Material Visor"), mat_opts(false), mat_idx(s.notch_material)),
-                            RowDef::Slider(prefs::tr("Tingkat blur"), s.blur, 0),
-                            RowDef::Slider(prefs::tr("Transparansi"), s.transparency, 1),
+                            RowDef::Slider(prefs::tr("Tingkat blur"), s.blur as u16, 0),
+                            RowDef::Slider(prefs::tr("Transparansi"), s.transparency as u16, 1),
                             RowDef::Toggle(prefs::tr("Refraksi tepi kaca (Deck)"), s.refraction, Action::Refraction),
                         ],
                     ),
                 ]
             }
-            5 => vec![
-                (
-                    None,
-                    vec![
-                        RowDef::Toggle(prefs::tr("Aktifkan Scene"), s.stage, Action::StageOn),
-                        RowDef::Toggle(prefs::tr("Ganti Alt+Tab dengan pengalih ABRA"), s.switcher, Action::SwitcherOn),
-                        RowDef::Toggle(prefs::tr("Klik wallpaper menyimpan semua jendela"), s.stage_desktop_click, Action::StageFlag(1)),
-                        RowDef::Toggle(prefs::tr("Judul jendela saat hover"), s.stage_titles, Action::StageFlag(3)),
-                        RowDef::Toggle(prefs::tr("Jeda media app di latar"), s.stage_media, Action::StageFlag(2)),
-                    ],
-                ),
-                (
-                    Some(prefs::tr("Daftar jendela")),
-                    vec![
-                        RowDef::Seg(prefs::tr("Posisi daftar jendela"), vec![(prefs::tr("Kiri"), Action::StageRight(false)), (prefs::tr("Kanan"), Action::StageRight(true))], if s.stage_right { 1 } else { 0 }),
-                        RowDef::Seg(
-                            prefs::tr("Ikon desktop"),
-                            vec![(prefs::tr("Sembunyi"), Action::StageIcons(0)), (prefs::tr("Otomatis"), Action::StageIcons(1)), (prefs::tr("Tampil"), Action::StageIcons(2))],
-                            s.stage_icons as usize,
-                        ),
-                        RowDef::Slider(prefs::tr("Ukuran kartu"), s.stage_size, 8),
-                        RowDef::Slider(prefs::tr("Jarak antar kartu"), s.stage_gap, 9),
-                        RowDef::Slider(prefs::tr("Jumlah kartu"), s.stage_count, 10),
-                        RowDef::Slider(prefs::tr("Kecepatan animasi"), s.stage_speed, 11),
-                    ],
-                ),
-            ],
-            6 => {
+            5 => {
                 let names = ["Kiri atas", "Kanan atas", "Kiri bawah", "Kanan bawah"];
                 vec![(None, names.iter().enumerate().map(|(i, nm)| RowDef::Pick(prefs::tr(nm), prefs::tr(hot_label(s.hot[i])).to_string(), Action::HotCycle(i))).collect())]
             }
-            8 => vec![(
+            7 => vec![(
                 None,
                 vec![
                     RowDef::Seg(prefs::tr("Material widget"), vec![(prefs::tr("Original"), Action::WidgetStyle(0)), (prefs::tr("Crystal"), Action::WidgetStyle(1))], s.widget_style.min(1) as usize),
@@ -978,16 +958,15 @@ impl Win {
         self.text(c, &user, px0 + av + 10.0 * d, py0 + 2.0 * d, 13.5, 600, look.fg, 0.95, 0);
         self.text(c, prefs::tr("Akun Windows"), px0 + av + 10.0 * d, py0 + 20.0 * d, 11.0, 400, look.fg, 0.6, 0);
 
-        let pages: [(&'static str, &'static str, [u8; 3], u8); 9] = [
+        let pages: [(&'static str, &'static str, [u8; 3], u8); 8] = [
             (prefs::tr("Umum"), "\u{E713}", [142, 142, 147], 0),
             (prefs::tr("Deck"), "\u{E7C4}", [10, 132, 255], 1),
             (prefs::tr("Visor"), "\u{E7F4}", [58, 58, 60], 2),
             (prefs::tr("Rail"), "\u{E700}", [90, 200, 250], 3),
             (prefs::tr("Tampilan"), "\u{E790}", [88, 86, 214], 4),
-            (prefs::tr("Scene"), "\u{E8A0}", [48, 209, 88], 5),
-            (prefs::tr("Screen Corners"), "\u{E73F}", [175, 82, 222], 6),
-            (prefs::tr("Quick Search"), "\u{E721}", [255, 149, 10], 7),
-            (prefs::tr("Widget"), "\u{E737}", [0, 122, 255], 8),
+            (prefs::tr("Screen Corners"), "\u{E73F}", [175, 82, 222], 5),
+            (prefs::tr("Quick Search"), "\u{E721}", [255, 149, 10], 6),
+            (prefs::tr("Widget"), "\u{E737}", [0, 122, 255], 7),
         ];
         let mut sy = 140.0 * d;
         self.side.clear();
@@ -1187,21 +1166,18 @@ impl Win {
 
     fn slide(&self, id: u8, x: f32, sx: f32, sw: f32, save: bool) {
         let (min, max, _) = Self::spec(id);
-        let v = (min + slider::value_at(x, sx, sw, false) * (max - min)).round() as u8;
+        let v = (min + slider::value_at(x, sx, sw, false) * (max - min)).round() as u16;
         prefs::update_with(save, |s| {
             match id {
-                0 => s.blur = v,
-                1 => s.transparency = v,
-                2 => s.dock_round = v,
-                3 => s.notch_round = v,
-                4 => s.dock_size = v,
-                5 => s.dock_gap = v,
-                6 => s.dock_zoom = v,
-                8 => s.stage_size = v,
-                9 => s.stage_gap = v,
-                10 => s.stage_count = v,
-                11 => s.stage_speed = v,
-                _ => s.dock_margin = v,
+                0 => s.blur = v as u8,
+                1 => s.transparency = v as u8,
+                2 => s.dock_round = v as u8,
+                3 => s.notch_round = v as u8,
+                4 => s.dock_size = v as u8,
+                5 => s.dock_gap = v as u8,
+                6 => s.dock_zoom = v as u8,
+                7 => s.dock_margin = v as u8,
+                _ => s.notch_autohide_delay = v.clamp(50, 300),
             }
         });
     }
@@ -1214,7 +1190,6 @@ fn hot_label(a: nacre_core::settings::HotAction) -> &'static str {
         Mission => "Overview",
         Launchpad => "Apps",
         Desktop => "Tampilkan Desktop",
-        Stage => "Scene",
         Notifications => "Pusat Notifikasi",
         Lock => "Kunci Layar",
     }
@@ -1330,7 +1305,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let ch = wp.0 as u32;
             with_win(|w| {
                 if w.edit.is_some() {
-                    if ch >= 32 && ch != 127 && w.edit_buf.chars().count() < 60 {
+                    if ch >= 32 && ch != 127 && w.edit_buf.chars().count() < 256 {
                         if let Some(c) = char::from_u32(ch) {
                             w.edit_buf.push(c);
                             w.render();
@@ -1349,8 +1324,25 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_KEYDOWN => {
             let vk = wp.0 as u16;
+            let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
             with_win(|w| {
                 if w.edit.is_some() {
+                    if ctrl && vk == b'V' as u16 {
+                        if let Some(pasted) = nacre_platform::clipboard::paste_text() {
+                            let clean: String = pasted.chars().filter(|c| !c.is_control()).collect();
+                            let avail = 256usize.saturating_sub(w.edit_buf.chars().count());
+                            if avail > 0 && !clean.is_empty() {
+                                w.edit_buf.extend(clean.chars().take(avail));
+                                w.render();
+                            }
+                        }
+                        return;
+                    }
+                    if ctrl && vk == 0x08 {
+                        w.edit_buf.clear();
+                        w.render();
+                        return;
+                    }
                     match vk {
                         0x08 => {
                             w.edit_buf.pop();
@@ -1366,6 +1358,16 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     return;
                 }
                 if !w.search_focus {
+                    return;
+                }
+                if ctrl && vk == b'V' as u16 {
+                    if let Some(pasted) = nacre_platform::clipboard::paste_text() {
+                        let clean: String = pasted.chars().filter(|c| !c.is_control()).take(80).collect();
+                        if !clean.is_empty() {
+                            w.search.push_str(&clean);
+                            w.render();
+                        }
+                    }
                     return;
                 }
                 match vk {
@@ -1443,6 +1445,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::LyricsCompact) => prefs::update(|s| s.lyrics_compact = !s.lyrics_compact),
                 Some(Action::NotchDownloads) => prefs::update(|s| s.notch_downloads = !s.notch_downloads),
                 Some(Action::NotchSend) => prefs::update(|s| s.notch_send = !s.notch_send),
+                Some(Action::NotchNotifPeek) => prefs::update(|s| s.notch_notif_peek = !s.notch_notif_peek),
                 Some(Action::LyricsOnline) => prefs::update(|s| s.lyrics_online = !s.lyrics_online),
                 Some(Action::Donate) => nacre_platform::launch::open(DONATE_URL),
                 Some(Action::MenuLogoPick) => {
@@ -1509,15 +1512,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::HoverOpen) => prefs::update(|s| s.notch_hover_open = !s.notch_hover_open),
                 Some(Action::MenuBarOn) => prefs::update(|s| s.menubar = !s.menubar),
                 Some(Action::HotCycle(i)) => prefs::update(|s| s.hot[i] = s.hot[i].next()),
-                Some(Action::StageOn) => prefs::update(|s| s.stage = !s.stage),
-                Some(Action::SwitcherOn) => prefs::update(|s| s.switcher = !s.switcher),
-                Some(Action::StageFlag(k)) => prefs::update(|s| match k {
-                    1 => s.stage_desktop_click = !s.stage_desktop_click,
-                    2 => s.stage_media = !s.stage_media,
-                    _ => s.stage_titles = !s.stage_titles,
-                }),
-                Some(Action::StageRight(r)) => prefs::update(|s| s.stage_right = r),
-                Some(Action::StageIcons(m)) => prefs::update(|s| s.stage_icons = m),
                 Some(Action::MacKeys) => prefs::update(|s| s.mac_shortcuts = !s.mac_shortcuts),
                 Some(Action::Accent(i)) => prefs::update(|s| s.accent = i),
                 Some(Action::IconStyle(m)) => prefs::update(|s| {

@@ -8,11 +8,37 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 pub const WM_VOLUME: u32 = WM_APP + 20;
 pub const WM_BRIGHT: u32 = WM_APP + 21;
 pub const WM_RADIO: u32 = WM_APP + 22;
+pub const WM_GFX_RESET: u32 = WM_APP + 160;
 
 static HUD: AtomicIsize = AtomicIsize::new(0);
 static ISLAND: AtomicIsize = AtomicIsize::new(0);
+static GFX_LISTENERS: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 static AUDIO: OnceLock<Sender<audio::Cmd>> = OnceLock::new();
 static BRIGHT: OnceLock<Sender<brightness::Cmd>> = OnceLock::new();
+
+pub fn listen_gfx(h: HWND) {
+    let mut g = GFX_LISTENERS.lock().unwrap_or_else(|e| e.into_inner());
+    let v = h.0 as isize;
+    if !g.contains(&v) {
+        g.push(v);
+    }
+}
+
+pub fn unlisten_gfx(h: HWND) {
+    let v = h.0 as isize;
+    GFX_LISTENERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| *x != v);
+}
+
+pub fn broadcast_gfx_reset() {
+    let list: Vec<isize> = GFX_LISTENERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for h in list {
+        if h != 0 {
+            unsafe {
+                let _ = PostMessageW(Some(HWND(h as *mut _)), WM_GFX_RESET, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
 
 pub fn register_hud(h: HWND) {
     HUD.store(h.0 as isize, Ordering::Relaxed);
@@ -33,6 +59,7 @@ fn post_all(msg: u32) {
 }
 
 pub fn init() {
+    nacre_ui::gfx::set_on_reset(broadcast_gfx_reset);
     if AUDIO.get().is_some() {
         return;
     }
@@ -65,10 +92,21 @@ static NOTCH_L: AtomicI32 = AtomicI32::new(0);
 static NOTCH_R: AtomicI32 = AtomicI32::new(0);
 static NOTCH_H: AtomicI32 = AtomicI32::new(0);
 
-pub fn set_notch(l: i32, r: i32, h: i32) {
-    NOTCH_L.store(l, Ordering::Relaxed);
-    NOTCH_R.store(r, Ordering::Relaxed);
-    NOTCH_H.store(h, Ordering::Relaxed);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotchLayout {
+    pub gap: Option<(i32, i32)>,
+    pub rail_h: Option<i32>,
+}
+
+pub fn set_notch_layout(gap: Option<(i32, i32)>, rail_h: Option<i32>) {
+    let (l, r) = gap.unwrap_or((0, 0));
+    let h = rail_h.unwrap_or(0).max(0);
+    let prev_l = NOTCH_L.swap(l, Ordering::Relaxed);
+    let prev_r = NOTCH_R.swap(r, Ordering::Relaxed);
+    let prev_h = NOTCH_H.swap(h, Ordering::Relaxed);
+    if (prev_l, prev_r, prev_h) == (l, r, h) {
+        return;
+    }
     let bar = BAR.load(Ordering::Relaxed);
     if bar != 0 {
         unsafe {
@@ -77,9 +115,14 @@ pub fn set_notch(l: i32, r: i32, h: i32) {
     }
 }
 
-pub fn notch() -> Option<(i32, i32, i32)> {
-    let (l, r, h) = (NOTCH_L.load(Ordering::Relaxed), NOTCH_R.load(Ordering::Relaxed), NOTCH_H.load(Ordering::Relaxed));
-    (r > l && h > 0).then_some((l, r, h))
+pub fn notch_layout() -> NotchLayout {
+    let l = NOTCH_L.load(Ordering::Relaxed);
+    let r = NOTCH_R.load(Ordering::Relaxed);
+    let h = NOTCH_H.load(Ordering::Relaxed);
+    NotchLayout {
+        gap: (r > l).then_some((l, r)),
+        rail_h: (h > 0).then_some(h),
+    }
 }
 
 static BAR: AtomicIsize = AtomicIsize::new(0);

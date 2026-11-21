@@ -74,7 +74,7 @@ unsafe extern "system" fn collect(h: HWND, lp: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-const BASE_LAYERS: [&str; 6] = ["AbraWidget", "NacreEdgeStrip", "NacreDock", "AbraMenuBar", "AbraNotchShadow", "AbraNotch"];
+const BASE_LAYERS: [&str; 5] = ["AbraWidget", "NacreEdgeStrip", "NacreDock", "AbraMenuBar", "AbraNotch"];
 
 fn class_of(h: HWND) -> String {
     let mut buf = [0u16; 64];
@@ -89,6 +89,21 @@ fn raise(h: isize) {
 }
 
 pub fn raise_all() {
+    let fg = nacre_platform::wins::focus::foreground();
+    if nacre_platform::wins::overlap::is_shell_flyout(fg) {
+        return;
+    }
+    if !crate::prefs::get().above_fullscreen {
+        let ov = nacre_platform::wins::overlap::evaluate(
+            fg,
+            std::process::id(),
+            (0, 0, 0, 0),
+            nacre_platform::sys::screen_size(),
+        );
+        if ov.fullscreen {
+            return;
+        }
+    }
     let mut v: Vec<isize> = Vec::new();
     unsafe {
         let _ = EnumWindows(Some(collect), LPARAM(&mut v as *mut _ as isize));
@@ -124,11 +139,15 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_TIMER => {
             let _ = KillTimer(Some(hwnd), wp.0);
-            RAISE_QUEUED.store(false, Ordering::Relaxed);
             let now = now_ms();
-            if now - LAST_RAISE.load(Ordering::Relaxed) >= 250 {
+            let elapsed = now - LAST_RAISE.load(Ordering::Relaxed);
+            if elapsed >= 250 {
+                RAISE_QUEUED.store(false, Ordering::Relaxed);
                 LAST_RAISE.store(now, Ordering::Relaxed);
                 raise_all();
+            } else {
+                let wait = (250 - elapsed).clamp(20, 250) as u32;
+                SetTimer(Some(hwnd), T_RAISE, wait, None);
             }
             LRESULT(0)
         }

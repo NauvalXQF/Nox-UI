@@ -10,6 +10,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
+const WM_POWERBROADCAST: u32 = 0x0218;
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 const ID_TOGGLE_TASKBAR: usize = 1;
 pub const ID_QUIT: usize = 2;
 const TIMER_EXIT: usize = 1;
@@ -95,6 +98,10 @@ pub fn apply_autostart() {
     nacre_platform::log::line("startup", &format!("autostart={want} hasil={ok:?}"));
 }
 
+pub fn apply_desktop_icons() {
+    nacre_platform::desktopicons::set_visible(!crate::prefs::get().hide_desktop_icons);
+}
+
 pub fn set_taskbar_hidden(on: bool) {
     if on {
         if let Err(e) = taskbar::hide(&paths::marker(), &paths::guard_exe()) {
@@ -126,14 +133,32 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     let tc = TASKBAR_CREATED.load(Ordering::Relaxed);
     if tc != 0 && msg == tc {
         add_tray(hwnd);
+        nacre_platform::shell::appbar::invalidate_all();
         taskbar::reassert();
         crate::dock::request_appbar_resync();
+        crate::menubar::request_resync();
+        crate::notch::request_reconfigure();
         nacre_platform::log::line("shell", "TaskbarCreated");
         return LRESULT(0);
     }
     match msg {
+        WM_POWERBROADCAST => {
+            if wp.0 == PBT_APMRESUMEAUTOMATIC || wp.0 == PBT_APMRESUMESUSPEND {
+                nacre_platform::log::line("power", "bangun dari tidur; menyinkronkan ulang shell & hook");
+                taskbar::reassert();
+                nacre_platform::wins::tracker::reinstall();
+                crate::mediakeys::reinstall();
+                nacre_platform::shell::appbar::invalidate_all();
+                crate::dock::request_reconfigure();
+                crate::menubar::request_resync();
+                crate::notch::request_reconfigure();
+                crate::topmost::request_raise();
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         crate::prefs::WM_PREFS => {
             apply_autostart();
+            apply_desktop_icons();
             if TAKEOVER_ALLOWED.load(Ordering::Relaxed) {
                 let p = crate::prefs::get();
                 let want = p.takeover && p.dock_enabled;
@@ -170,12 +195,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_ENDSESSION => {
             if wp.0 != 0 {
+                nacre_platform::desktopicons::set_visible(true);
                 taskbar::restore();
             }
             LRESULT(0)
         }
         WM_DESTROY => {
             crate::fx::restore_all();
+            nacre_platform::desktopicons::set_visible(true);
             taskbar::restore();
             remove_tray(hwnd);
             PostQuitMessage(0);

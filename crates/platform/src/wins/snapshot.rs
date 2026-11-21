@@ -135,3 +135,21 @@ fn corner_alpha(x: f32, y: f32, w: f32, h: f32, r: f32) -> u8 {
     let d = (dx * dx + dy * dy).sqrt();
     ((r - d + 0.5).clamp(0.0, 1.0) * 255.0) as u8
 }
+
+pub fn is_blank(b: &Bitmap) -> bool {
+    if b.w < 4 || b.h < 4 {
+        return true;
+    }
+    let first = &b.bgra[0..3];
+    for sy in 0..12u32 {
+        for sx in 0..12u32 {
+            let (x, y) = ((sx * (b.w - 1)) / 11, (sy * (b.h - 1)) / 11);
+            let i = ((y * b.w + x) * 4) as usize;
+            let d = (0..3).map(|c| (b.bgra[i + c] as i32 - first[c] as i32).abs()).max().unwrap_or(0);
+            if d > 6 {
+                return false;
+            }
+        }
+    }
+    true
+}

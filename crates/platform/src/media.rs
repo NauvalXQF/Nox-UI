@@ -10,6 +10,7 @@ use windows::Media::Control::{
 };
 use windows::Storage::Streams::{DataReader, IRandomAccessStreamReference};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows_core::{IUnknown, Interface};
 
 pub enum ArtUpdate {
     Unchanged,
@@ -84,6 +85,43 @@ struct Subscriptions {
     tokens: (i64, i64, i64),
 }
 
+fn same_com_session(a: &GlobalSystemMediaTransportControlsSession, b: &GlobalSystemMediaTransportControlsSession) -> bool {
+    match (a.cast::<IUnknown>(), b.cast::<IUnknown>()) {
+        (Ok(ua), Ok(ub)) => ua.as_raw() == ub.as_raw(),
+        _ => false,
+    }
+}
+
+fn is_playing(s: &GlobalSystemMediaTransportControlsSession) -> bool {
+    s.GetPlaybackInfo()
+        .ok()
+        .and_then(|p| p.PlaybackStatus().ok())
+        .is_some_and(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+}
+
+fn pick_session(manager: &GlobalSystemMediaTransportControlsSessionManager) -> Option<GlobalSystemMediaTransportControlsSession> {
+    let cur = manager.GetCurrentSession().ok();
+    if let Some(ref c) = cur {
+        if is_playing(c) {
+            return cur;
+        }
+    }
+    if let Ok(list) = manager.GetSessions() {
+        let n = list.Size().unwrap_or(0);
+        for i in 0..n {
+            if let Ok(s) = list.GetAt(i) {
+                if is_playing(&s) {
+                    return Some(s);
+                }
+            }
+        }
+        if cur.is_none() && n > 0 {
+            return list.GetAt(0).ok();
+        }
+    }
+    cur
+}
+
 impl Subscriptions {
     fn drop_session(&mut self) {
         if let Some(s) = self.session.take() {
@@ -93,17 +131,19 @@ impl Subscriptions {
         }
     }
 
-    fn follow(&mut self, session: Option<GlobalSystemMediaTransportControlsSession>, tx: &Sender<Command>) {
+    /// Re-subscribes when the underlying COM session object changes (even if AUMID matches,
+    /// e.g. switching between browser tabs). Returns `true` if the session identity changed.
+    fn follow(&mut self, session: Option<GlobalSystemMediaTransportControlsSession>, tx: &Sender<Command>) -> bool {
         let same = match (&self.session, &session) {
-            (Some(a), Some(b)) => a.SourceAppUserModelId().ok() == b.SourceAppUserModelId().ok(),
+            (Some(a), Some(b)) => same_com_session(a, b),
             (None, None) => true,
             _ => false,
         };
         if same {
-            return;
+            return false;
         }
         self.drop_session();
-        let Some(s) = session else { return };
+        let Some(s) = session else { return true };
         let t1 = tx.clone();
         let a = s.MediaPropertiesChanged(&TypedEventHandler::<_, MediaPropertiesChangedEventArgs>::new(move |_, _| {
             PROPS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -122,6 +162,7 @@ impl Subscriptions {
         }));
         self.tokens = (a.unwrap_or(0), b.unwrap_or(0), c.unwrap_or(0));
         self.session = Some(s);
+        true
     }
 }
 
@@ -157,11 +198,14 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Media {
         loop {
             if pending {
                 pending = false;
-                let current = manager.GetCurrentSession().ok().or_else(|| {
-                    manager.GetSessions().ok().and_then(|v| v.GetAt(0).ok())
-                });
-                subs.follow(current.clone(), &tx_for_events);
-                let recheck = PROPS_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed);
+                let current = pick_session(&manager);
+                let switched = subs.follow(current.clone(), &tx_for_events);
+                if switched {
+                    art_state.key.clear();
+                    art_state.hash = 0;
+                    art_state.since = std::time::Instant::now();
+                }
+                let recheck = switched || PROPS_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed);
                 let snap = build(current.as_ref(), &mut art_state, recheck);
                 if snap_tx.send(snap).is_err() {
                     return;
@@ -196,7 +240,7 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Media {
 }
 
 fn act(manager: &GlobalSystemMediaTransportControlsSessionManager, cmd: Command) {
-    let Ok(s) = manager.GetCurrentSession() else { return };
+    let Some(s) = pick_session(manager) else { return };
     match cmd {
         Command::PlayPause => {
             let _ = s.TryTogglePlayPauseAsync();
@@ -290,49 +334,4 @@ fn build(session: Option<&GlobalSystemMediaTransportControlsSession>, art_state:
     };
     let app = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
     Snapshot { has_media: true, title, artist, album, playing, position_ms, duration_ms, can_seek, art, app }
-}
-
-pub fn pause_app(exe_stem: String, done: impl FnOnce(Vec<String>) + Send + 'static) {
-    std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
-        let mut paused = Vec::new();
-        if let Some(m) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().ok().and_then(|o| o.join().ok()) {
-            if let Ok(list) = m.GetSessions() {
-                for s in list {
-                    let id = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
-                    if !id.to_ascii_lowercase().contains(&exe_stem) {
-                        continue;
-                    }
-                    let playing = s.GetPlaybackInfo().and_then(|i| i.PlaybackStatus()).map(|p| p == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing).unwrap_or(false);
-                    if playing && s.TryPauseAsync().and_then(|o| o.join()).unwrap_or(false) {
-                        paused.push(id);
-                    }
-                }
-            }
-        }
-        done(paused);
-    });
-}
-
-pub fn resume_ids(ids: Vec<String>) {
-    if ids.is_empty() {
-        return;
-    }
-    std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
-        if let Some(m) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().ok().and_then(|o| o.join().ok()) {
-            if let Ok(list) = m.GetSessions() {
-                for s in list {
-                    let id = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
-                    if ids.contains(&id) {
-                        let _ = s.TryPlayAsync().and_then(|o| o.join());
-                    }
-                }
-            }
-        }
-    });
 }
