@@ -85,6 +85,8 @@ enum Action {
     NotchNotifPeek,
     NotchNotifs,
     NotifSetup,
+    GoogleTasksToggle,
+    GeminiModel(u8),
     LyricsOnline,
     LyricsDir,
     Donate,
@@ -450,14 +452,31 @@ impl Win {
 
     fn commit_edit(&mut self) {
         let Some(f) = self.edit.take() else { return };
-        let t = nacre_core::settings::ShortText::new(&self.edit_buf);
-        prefs::update(|s| {
-            if f == 0 {
-                s.greet_name = t;
-            } else {
-                s.greet_text = t;
+        match f {
+            0 | 1 => {
+                let t = nacre_core::settings::ShortText::new(&self.edit_buf);
+                prefs::update(|s| {
+                    if f == 0 {
+                        s.greet_name = t;
+                    } else {
+                        s.greet_text = t;
+                    }
+                });
             }
-        });
+            2 => {
+                nacre_platform::cred::write_secret(nacre_platform::cred::TARGET_GEMINI_KEY, &self.edit_buf);
+                prefs::broadcast();
+            }
+            3 => {
+                nacre_platform::cred::write_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_ID, &self.edit_buf);
+                prefs::broadcast();
+            }
+            4 => {
+                nacre_platform::cred::write_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_SECRET, &self.edit_buf);
+                prefs::broadcast();
+            }
+            _ => {}
+        }
         self.render();
     }
 
@@ -794,6 +813,40 @@ impl Win {
                     RowDef::Toggle(prefs::tr("Tampilkan unduhan (Store, Steam, peramban)"), s.notch_downloads, Action::NotchDownloads),
                     RowDef::Toggle(prefs::tr("Kirim ke HP lewat QR (Wi-Fi yang sama)"), s.notch_send, Action::NotchSend),
                 ],
+            ), (
+                Some(prefs::tr("Google To-Do")),
+                {
+                    use nacre_platform::cred;
+                    use nacre_platform::gtasks::{status, SyncStatus};
+                    let st = match status() {
+                        SyncStatus::Synced => prefs::tr("Putuskan"),
+                        SyncStatus::Syncing => prefs::tr("Sinkronisasi…"),
+                        SyncStatus::Connecting => prefs::tr("Menyambung…"),
+                        SyncStatus::NeedsClientConfig => prefs::tr("Butuh Client ID"),
+                        SyncStatus::Disconnected | SyncStatus::Error => prefs::tr("Sambungkan"),
+                    };
+                    let cid = cred::read_secret(cred::TARGET_GTASKS_CLIENT_ID).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+                    let csec = cred::read_secret(cred::TARGET_GTASKS_CLIENT_SECRET).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+                    vec![
+                        RowDef::Pick(prefs::tr("Akun Google Tasks"), st.to_string(), Action::GoogleTasksToggle),
+                        RowDef::Text(prefs::tr("Google Client ID"), cid, prefs::tr("Tempel ID…").to_string(), 3),
+                        RowDef::Text(prefs::tr("Google Client Secret"), csec, prefs::tr("Tempel rahasia…").to_string(), 4),
+                    ]
+                },
+            ), (
+                Some(prefs::tr("Ask Gemini")),
+                {
+                    use nacre_platform::cred;
+                    let key = cred::read_secret(cred::TARGET_GEMINI_KEY).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+                    vec![
+                        RowDef::Text(prefs::tr("Gemini API Key"), key, prefs::tr("Tempel kunci…").to_string(), 2),
+                        RowDef::Seg(
+                            prefs::tr("Model Gemini"),
+                            vec![("2.5 Flash", Action::GeminiModel(0)), ("2.5 Pro", Action::GeminiModel(1))],
+                            s.gemini_model.min(1) as usize,
+                        ),
+                    ]
+                },
             )],
             3 => {
                 let cur = if s.menubar_material {
@@ -1451,7 +1504,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                                 w.commit_edit();
                             }
                             let s = prefs::get();
-                            w.edit_buf = if f == 0 { s.greet_name.as_str().to_string() } else { s.greet_text.as_str().to_string() };
+                            w.edit_buf = match f {
+                                0 => s.greet_name.as_str().to_string(),
+                                1 => s.greet_text.as_str().to_string(),
+                                2 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GEMINI_KEY).unwrap_or_default(),
+                                3 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_ID).unwrap_or_default(),
+                                4 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_SECRET).unwrap_or_default(),
+                                _ => String::new(),
+                            };
                             w.edit = Some(f);
                             w.render();
                         }
@@ -1465,6 +1525,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::NotchSend) => prefs::update(|s| s.notch_send = !s.notch_send),
                 Some(Action::NotchNotifPeek) => prefs::update(|s| s.notch_notif_peek = !s.notch_notif_peek),
                 Some(Action::NotchNotifs) => prefs::update(|s| s.notch_notifs = !s.notch_notifs),
+                Some(Action::GeminiModel(m)) => prefs::update(|s| s.gemini_model = m),
+                Some(Action::GoogleTasksToggle) => {
+                    use nacre_platform::gtasks::{status, SyncStatus};
+                    match status() {
+                        SyncStatus::Synced => crate::notch::trigger_gtasks_disconnect(),
+                        _ => crate::notch::trigger_gtasks_connect(),
+                    }
+                    with_win(|w| w.render());
+                }
                 Some(Action::NotifSetup) => {
                     use nacre_platform::notifications::{status, Status};
                     match status() {

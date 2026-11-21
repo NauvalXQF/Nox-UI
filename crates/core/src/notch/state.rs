@@ -3,17 +3,22 @@ pub enum Tab {
     Play,
     Alerts,
     Shelf,
+    Todo,
+    Gemini,
     Timer,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Timer];
+    pub const MAIN: [Tab; 5] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini];
+    pub const ALL: [Tab; 6] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini, Tab::Timer];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Play => "Putar",
             Tab::Alerts => "Notifikasi",
             Tab::Shelf => "Rak",
+            Tab::Todo => "To-Do",
+            Tab::Gemini => "Gemini",
             Tab::Timer => "Timer",
         }
     }
@@ -169,8 +174,10 @@ pub fn size(l: Look, dpi: f32) -> Size {
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
         View::Compact(_) => (292.0, 30.0, 15.0),
-        View::Open(Tab::Play) | View::Open(Tab::Alerts) => (600.0, 214.0, 28.0),
-        View::Open(_) => (600.0, 176.0, 28.0),
+        View::Open(Tab::Play) | View::Open(Tab::Alerts) => (620.0, 218.0, 28.0),
+        View::Open(Tab::Todo) => (620.0, 248.0, 28.0),
+        View::Open(Tab::Gemini) => (620.0, 268.0, 28.0),
+        View::Open(_) => (620.0, 184.0, 28.0),
         View::Drop => (520.0, 120.0, 28.0),
     };
     if l.peek && matches!(l.view, View::Rest | View::Compact(_)) {
@@ -291,12 +298,12 @@ mod tests {
         assert!(music.w > rest.w && music.h == rest.h);
         assert!(lyr.w > music.w && lyr.h >= music.h && lyr.h < 40.0, "lirik ringkas: satu baris yang lebih lebar");
         let open = size(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0);
-        assert_eq!((open.w, open.h, open.radius), (600.0, 214.0, 28.0));
+        assert_eq!((open.w, open.h, open.radius), (620.0, 218.0, 28.0));
         for t in Tab::ALL {
-            assert_eq!(size(look(Mode::Open(t), None), 1.0).w, 600.0);
+            assert_eq!(size(look(Mode::Open(t), None), 1.0).w, 620.0);
         }
         let b = size(look(Mode::Open(Tab::Play), None), 1.5);
-        assert_eq!((b.w, b.radius), (900.0, 42.0));
+        assert_eq!((b.w, b.radius), (930.0, 42.0));
     }
 
     #[test]

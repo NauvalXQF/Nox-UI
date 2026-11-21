@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::Instant;
-use text_input::FocusController;
+use text_input::{FocusController, InputOutcome, TextInput};
 use views::{Action, Data, Frame, LyrState, LyricsView, MediaView, Region};
 use windows::core::w;
 use windows::UI::Composition::{AnimationDelayBehavior, CompositionDrawingSurface, CompositionObject, Compositor, Visual};
@@ -64,6 +64,9 @@ const WM_RECONF: u32 = WM_APP + 26;
 const WM_ICON: u32 = WM_APP + 27;
 const WM_START_DRAGOUT: u32 = WM_APP + 28;
 const WM_NOTIF: u32 = WM_APP + 29;
+const WM_GTASKS: u32 = WM_APP + 30;
+const WM_GEMINI: u32 = WM_APP + 31;
+const WM_GTASKS_ACTION: u32 = WM_APP + 32;
 
 const T_DWELL: usize = 1;
 const T_LEAVE: usize = 2;
@@ -85,8 +88,16 @@ const T_SEND: usize = 19;
 const T_SENDDONE: usize = 20;
 const T_TESTSEND: usize = 21;
 const T_NOTIF_TOAST: usize = 22;
+const T_CARET: usize = 23;
+const T_COPIED: usize = 24;
 const NOTIF_TOAST_MS: u32 = 4500;
 const SEND_IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveInput {
+    Todo,
+    Gemini,
+}
 
 struct SendSess {
     server: nacre_platform::sendsrv::Server,
@@ -98,8 +109,8 @@ struct SendSess {
     done_at: Option<Instant>,
 }
 
-const WIN_W: f32 = 640.0;
-const WIN_H: f32 = 222.0;
+const WIN_W: f32 = 660.0;
+const WIN_H: f32 = 276.0;
 const SHADOW_PAD: f32 = 36.0;
 const EAR_DP: f32 = 13.0;
 
@@ -118,6 +129,8 @@ enum Deferred {
     Privacy,
     Icon,
     Notif,
+    GTasks,
+    Gemini,
 }
 
 thread_local! {
@@ -150,6 +163,20 @@ pub fn request_reconfigure() {
     let h = NOTCH_HWND.load(Ordering::Relaxed);
     if h != 0 {
         post(h, WM_RECONF);
+    }
+}
+
+pub fn trigger_gtasks_connect() {
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        post_w(h, WM_GTASKS_ACTION, 1);
+    }
+}
+
+pub fn trigger_gtasks_disconnect() {
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        post_w(h, WM_GTASKS_ACTION, 2);
     }
 }
 
@@ -210,6 +237,8 @@ fn drain_deferred(hwnd: HWND) {
             Deferred::Privacy => d.on_privacy(),
             Deferred::Icon => d.on_icon(),
             Deferred::Notif => d.on_notif(),
+            Deferred::GTasks => d.on_gtasks(),
+            Deferred::Gemini => d.on_gemini(),
         }
     }
 }
@@ -370,6 +399,22 @@ pub struct Notch {
     notif_peeking: bool,
     alerts_scroll: usize,
     internal_notif_id: u32,
+    todos: nacre_core::notch::todo::TodoStore,
+    todo_scroll: usize,
+    todo_status: nacre_platform::gtasks::SyncStatus,
+    gtasks: nacre_platform::gtasks::GTasks,
+    gemini: nacre_platform::gemini::Gemini,
+    gemini_req_id: u64,
+    gemini_resp: String,
+    gemini_err: String,
+    gemini_streaming: bool,
+    gemini_scroll: usize,
+    gemini_copied: bool,
+    active_input: Option<ActiveInput>,
+    todo_input: Option<TextInput>,
+    todo_draft: String,
+    gemini_input: Option<TextInput>,
+    gemini_draft: String,
     dl_watch: Option<nacre_platform::dlwatch::Watch>,
     dl: Option<nacre_core::notch::download::Download>,
     dl_done: Option<nacre_core::notch::download::Download>,
@@ -435,7 +480,10 @@ impl Notch {
             let hw = hwnd.0 as isize;
             let privacy_mon = Some(privacy::spawn(move || post(hw, WM_PRIVACY)));
             let icons = icons_worker::spawn(move || post(hw, WM_ICON));
+            let gtasks = nacre_platform::gtasks::spawn(move || post(hw, WM_GTASKS));
+            let gemini = nacre_platform::gemini::spawn(move || post(hw, WM_GEMINI));
             let shelf = load_persisted_shelf();
+            let todos = load_persisted_todos();
 
             let mut n = Box::new(Notch {
                 hwnd,
@@ -527,6 +575,22 @@ impl Notch {
                 notif_peeking: false,
                 alerts_scroll: 0,
                 internal_notif_id: 800_000,
+                todos,
+                todo_scroll: 0,
+                todo_status: nacre_platform::gtasks::status(),
+                gtasks,
+                gemini,
+                gemini_req_id: 0,
+                gemini_resp: String::new(),
+                gemini_err: String::new(),
+                gemini_streaming: false,
+                gemini_scroll: 0,
+                gemini_copied: false,
+                active_input: None,
+                todo_input: None,
+                todo_draft: String::new(),
+                gemini_input: None,
+                gemini_draft: String::new(),
                 dl_watch: None,
                 dl: None,
                 dl_done: None,
@@ -947,6 +1011,209 @@ impl Notch {
         }
     }
 
+    fn save_todos(&self) {
+        save_persisted_todos(&self.todos);
+    }
+
+    fn focus_input(&mut self, which: ActiveInput) {
+        self.active_input = Some(which);
+        self.focus.acquire(self.hwnd);
+        if let Some(ti) = self.todo_input.as_mut() {
+            ti.set_focused(which == ActiveInput::Todo, &mut self.paint);
+        }
+        if let Some(gi) = self.gemini_input.as_mut() {
+            gi.set_focused(which == ActiveInput::Gemini, &mut self.paint);
+        }
+        timer(self.hwnd, T_CARET, 530);
+    }
+
+    fn blur_inputs(&mut self, restore_prev: bool) {
+        self.active_input = None;
+        kill(self.hwnd, T_CARET);
+        if let Some(ti) = self.todo_input.as_mut() {
+            self.todo_draft = ti.buf.as_str().to_string();
+            ti.set_focused(false, &mut self.paint);
+        }
+        if let Some(gi) = self.gemini_input.as_mut() {
+            self.gemini_draft = gi.buf.as_str().to_string();
+            gi.set_focused(false, &mut self.paint);
+        }
+        self.focus.release(self.hwnd, restore_prev);
+        self.update_visibility();
+    }
+
+    fn submit_todo(&mut self) {
+        let text = self
+            .todo_input
+            .as_ref()
+            .map(|ti| ti.buf.as_str().to_string())
+            .unwrap_or_else(|| self.todo_draft.clone());
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if let Some(item) = self.todos.add_local(trimmed, now) {
+            self.todo_draft.clear();
+            if let Some(ti) = self.todo_input.as_mut() {
+                ti.buf.clear();
+            }
+            self.todo_scroll = 0;
+            self.save_todos();
+            let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::Add {
+                local_id: item.id,
+                title: item.title,
+            });
+            self.render();
+        }
+    }
+
+    fn submit_gemini(&mut self) {
+        let prompt = self
+            .gemini_input
+            .as_ref()
+            .map(|gi| gi.buf.as_str().to_string())
+            .unwrap_or_else(|| self.gemini_draft.clone());
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.gemini_req_id = self.gemini_req_id.wrapping_add(1);
+        let id = self.gemini_req_id;
+        self.gemini_resp.clear();
+        self.gemini_err.clear();
+        self.gemini_streaming = true;
+        self.gemini_scroll = 0;
+        self.gemini_copied = false;
+        self.gemini_draft.clear();
+        if let Some(gi) = self.gemini_input.as_mut() {
+            gi.buf.clear();
+        }
+        let model = nacre_core::notch::gemini::model_id(crate::prefs::get().gemini_model).to_string();
+        let _ = self.gemini.commands.send(nacre_platform::gemini::Cmd::Ask {
+            id,
+            prompt: trimmed.to_string(),
+            model,
+        });
+        self.render();
+    }
+
+    fn on_char(&mut self, unit: u16) {
+        match self.active_input {
+            Some(ActiveInput::Todo) => {
+                if let Some(ti) = self.todo_input.as_mut() {
+                    ti.on_char(unit, &mut self.paint);
+                    self.todo_draft = ti.buf.as_str().to_string();
+                }
+            }
+            Some(ActiveInput::Gemini) => {
+                if let Some(gi) = self.gemini_input.as_mut() {
+                    gi.on_char(unit, &mut self.paint);
+                    self.gemini_draft = gi.buf.as_str().to_string();
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn on_keydown(&mut self, vk: u16) {
+        let outcome = match self.active_input {
+            Some(ActiveInput::Todo) => self.todo_input.as_mut().map(|ti| {
+                let r = ti.on_keydown(vk, &mut self.paint);
+                self.todo_draft = ti.buf.as_str().to_string();
+                r
+            }),
+            Some(ActiveInput::Gemini) => self.gemini_input.as_mut().map(|gi| {
+                let r = gi.on_keydown(vk, &mut self.paint);
+                self.gemini_draft = gi.buf.as_str().to_string();
+                r
+            }),
+            None => None,
+        };
+        match (self.active_input, outcome) {
+            (Some(ActiveInput::Todo), Some(InputOutcome::Submit)) => self.submit_todo(),
+            (Some(ActiveInput::Gemini), Some(InputOutcome::Submit)) => self.submit_gemini(),
+            (_, Some(InputOutcome::Blur)) => self.blur_inputs(true),
+            _ => {}
+        }
+    }
+
+    fn on_gtasks(&mut self) {
+        let mut changed = false;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        while let Ok(ev) = self.gtasks.events.try_recv() {
+            match ev {
+                nacre_platform::gtasks::Event::Status(st) => {
+                    self.todo_status = st;
+                    changed = true;
+                }
+                nacre_platform::gtasks::Event::Synced(list) => {
+                    self.todos.merge_remote(list, now);
+                    self.save_todos();
+                    changed = true;
+                }
+                nacre_platform::gtasks::Event::Created { local_id, remote_id } => {
+                    self.todos.bind_remote(&local_id, remote_id);
+                    self.save_todos();
+                    changed = true;
+                }
+                nacre_platform::gtasks::Event::MutationDone { local_id } => {
+                    self.todos.mark_synced(&local_id);
+                    self.save_todos();
+                }
+            }
+        }
+        if changed && self.mode == Mode::Open(Tab::Todo) {
+            self.render();
+        }
+    }
+
+    fn on_gemini(&mut self) {
+        let mut delta = false;
+        let mut state_changed = false;
+        while let Ok(ev) = self.gemini.events.try_recv() {
+            match ev {
+                nacre_platform::gemini::Event::Delta { id, text } if id == self.gemini_req_id => {
+                    self.gemini_resp.push_str(&text);
+                    delta = true;
+                }
+                nacre_platform::gemini::Event::Done { id } if id == self.gemini_req_id => {
+                    self.gemini_streaming = false;
+                    state_changed = true;
+                }
+                nacre_platform::gemini::Event::Error { id, message } if id == self.gemini_req_id => {
+                    self.gemini_streaming = false;
+                    self.gemini_err = message;
+                    state_changed = true;
+                }
+                _ => {}
+            }
+        }
+        if self.mode != Mode::Open(Tab::Gemini) {
+            return;
+        }
+        if state_changed {
+            self.render();
+        } else if delta {
+            let has_key = nacre_platform::gemini::has_api_key();
+            views::refresh_gemini_response(
+                &mut self.paint,
+                &self.live_vis,
+                &self.gemini_resp,
+                &self.gemini_err,
+                has_key,
+                self.gemini_streaming,
+                self.gemini_scroll,
+            );
+        }
+    }
+
     fn on_notif(&mut self) {
         let Some(mon) = &self.notif_mon else { return };
         let mut events = Vec::new();
@@ -1145,6 +1412,9 @@ impl Notch {
         self.first = false;
         self.look = new;
         let view_changed = old.view != new.view || first;
+        if view_changed && self.focus.is_active() {
+            self.blur_inputs(false);
+        }
         if !matches!(new.view, View::Open(_)) {
             self.cal_sel = 0;
         }
@@ -1202,6 +1472,14 @@ impl Notch {
     }
 
     fn render(&mut self) {
+        if let Some(ti) = &self.todo_input {
+            self.todo_draft = ti.buf.as_str().to_string();
+        }
+        if let Some(gi) = &self.gemini_input {
+            self.gemini_draft = gi.buf.as_str().to_string();
+        }
+        self.todo_input = None;
+        self.gemini_input = None;
         let c = self.shell.content.clone();
         if let Ok(k) = c.Children() {
             let _ = k.RemoveAll();
@@ -1272,6 +1550,9 @@ impl Notch {
         let app_icons = &self.app_icons;
         let notif_toast = self.toast_id.and_then(|id| self.notifs.get(id)).map(|n| notif_row(n, app_icons, now_unix, en));
         let notif_list: Vec<views::NotifRow> = self.notifs.items().iter().map(|n| notif_row(n, app_icons, now_unix, en)).collect();
+        let todos = self.todos.visible();
+        let gemini_model_label = nacre_core::notch::gemini::model_label(crate::prefs::get().gemini_model);
+        let gemini_has_key = nacre_platform::gemini::has_api_key();
         let d = Data {
             battery: self.battery,
             timer: &self.timer,
@@ -1293,8 +1574,33 @@ impl Notch {
             notif_unread: self.notifs.unread_count(),
             notif_scroll: self.alerts_scroll,
             notif_status: self.notif_status,
+            timer_running: self.timer.phase == Phase::Running,
+            todos,
+            todo_scroll: self.todo_scroll,
+            todo_status: self.todo_status,
+            gemini_text: &self.gemini_resp,
+            gemini_streaming: self.gemini_streaming,
+            gemini_error: &self.gemini_err,
+            gemini_has_key,
+            gemini_scroll: self.gemini_scroll,
+            gemini_model_label,
+            gemini_copied: self.gemini_copied,
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
+        if let Some((ix, iy, iw, ih)) = self.live_vis.todo_input_box {
+            if let Ok(mut ti) = TextInput::new(&self.paint.comp, &c, ix, iy, iw, ih, self.dpi, crate::prefs::tr("Tambah tugas…"), 180) {
+                ti.buf.set(&self.todo_draft);
+                ti.set_focused(self.active_input == Some(ActiveInput::Todo), &mut self.paint);
+                self.todo_input = Some(ti);
+            }
+        }
+        if let Some((ix, iy, iw, ih)) = self.live_vis.gemini_input_box {
+            if let Ok(mut gi) = TextInput::new(&self.paint.comp, &c, ix, iy, iw, ih, self.dpi, crate::prefs::tr("Tanya Gemini…"), 512) {
+                gi.buf.set(&self.gemini_draft);
+                gi.set_focused(self.active_input == Some(ActiveInput::Gemini), &mut self.paint);
+                self.gemini_input = Some(gi);
+            }
+        }
         if let Some(r) = self.hover_act.and_then(|a| self.regions.iter().find(|r| r.action == a)) {
             if let Some(v) = &r.vis {
                 let k = hover_scale(r.action);
@@ -1954,6 +2260,73 @@ impl Notch {
                 self.refresh();
                 self.update_visibility();
             }
+            Action::TodoFocus => self.focus_input(ActiveInput::Todo),
+            Action::TodoToggle(idx) => {
+                let id_opt = self.todos.visible().get(idx).map(|t| (t.id.clone(), t.remote_id.clone()));
+                if let Some((id, remote_id)) = id_opt {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    if let Some(updated) = self.todos.toggle(&id, now) {
+                        self.save_todos();
+                        let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::Toggle {
+                            local_id: updated.id,
+                            remote_id,
+                            completed: updated.completed,
+                        });
+                        self.render();
+                    }
+                }
+            }
+            Action::TodoDelete(idx) => {
+                let id_opt = self.todos.visible().get(idx).map(|t| (t.id.clone(), t.remote_id.clone()));
+                if let Some((id, remote_id)) = id_opt {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    if let Some(deleted) = self.todos.delete(&id, now) {
+                        self.save_todos();
+                        let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::Delete {
+                            local_id: deleted.id,
+                            remote_id,
+                        });
+                        let vis_len = self.todos.visible().len();
+                        self.todo_scroll = self.todo_scroll.min(vis_len.saturating_sub(1));
+                        self.render();
+                    }
+                }
+            }
+            Action::TodoSync => {
+                let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::SyncNow);
+            }
+            Action::TodoConnect => {
+                let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::Connect);
+            }
+            Action::GeminiFocus => self.focus_input(ActiveInput::Gemini),
+            Action::GeminiSend => self.submit_gemini(),
+            Action::GeminiStop => {
+                self.gemini.cancel_current();
+                self.gemini_streaming = false;
+                self.render();
+            }
+            Action::GeminiCopy => {
+                if !self.gemini_resp.is_empty() && nacre_platform::clipboard::copy_text(&self.gemini_resp) {
+                    self.gemini_copied = true;
+                    timer(self.hwnd, T_COPIED, 1500);
+                    self.render();
+                }
+            }
+            Action::GeminiClear => {
+                self.gemini.cancel_current();
+                self.gemini_streaming = false;
+                self.gemini_resp.clear();
+                self.gemini_err.clear();
+                self.gemini_scroll = 0;
+                self.gemini_copied = false;
+                self.render();
+            }
         }
     }
 
@@ -1971,10 +2344,44 @@ impl Notch {
                 return;
             }
         }
+        if self.mode == Mode::Open(Tab::Todo) && self.todos.visible().len() > 4 {
+            let max_scroll = self.todos.visible().len().saturating_sub(4);
+            let next = if delta < 0 {
+                (self.todo_scroll + 1).min(max_scroll)
+            } else {
+                self.todo_scroll.saturating_sub(1)
+            };
+            if next != self.todo_scroll {
+                self.todo_scroll = next;
+                self.render();
+                return;
+            }
+        }
+        if self.mode == Mode::Open(Tab::Gemini) && !self.gemini_resp.is_empty() {
+            let next = if delta < 0 {
+                self.gemini_scroll.saturating_add(2)
+            } else {
+                self.gemini_scroll.saturating_sub(2)
+            };
+            if next != self.gemini_scroll {
+                self.gemini_scroll = next;
+                let has_key = nacre_platform::gemini::has_api_key();
+                views::refresh_gemini_response(
+                    &mut self.paint,
+                    &self.live_vis,
+                    &self.gemini_resp,
+                    &self.gemini_err,
+                    has_key,
+                    self.gemini_streaming,
+                    self.gemini_scroll,
+                );
+                return;
+            }
+        }
         if let Mode::Open(cur) = self.mode {
-            let i = Tab::ALL.iter().position(|t| *t == cur).unwrap_or(0) as i32;
-            let n = Tab::ALL.len() as i32;
-            let next = Tab::ALL[(i + if delta > 0 { -1 } else { 1 }).rem_euclid(n) as usize];
+            let i = Tab::MAIN.iter().position(|t| *t == cur).unwrap_or(0) as i32;
+            let n = Tab::MAIN.len() as i32;
+            let next = Tab::MAIN[(i + if delta > 0 { -1 } else { 1 }).rem_euclid(n) as usize];
             if next == Tab::Alerts {
                 self.notifs.mark_all_read();
                 self.alerts_scroll = 0;
@@ -2224,11 +2631,32 @@ impl Notch {
     }
 
     fn on_timer(&mut self, id: usize) {
-        if id != T_TICK && id != T_FRAME {
+        if id != T_TICK && id != T_FRAME && id != T_CARET {
             kill(self.hwnd, id);
         }
         match id {
             T_FRAME => self.tick_frame(),
+            T_CARET => {
+                match self.active_input {
+                    Some(ActiveInput::Todo) => {
+                        if let Some(ti) = self.todo_input.as_mut() {
+                            ti.blink_caret();
+                        }
+                    }
+                    Some(ActiveInput::Gemini) => {
+                        if let Some(gi) = self.gemini_input.as_mut() {
+                            gi.blink_caret();
+                        }
+                    }
+                    None => kill(self.hwnd, T_CARET),
+                }
+            }
+            T_COPIED => {
+                self.gemini_copied = false;
+                if self.mode == Mode::Open(Tab::Gemini) {
+                    self.render();
+                }
+            }
             T_DWELL => {
                 if self.tracking && !self.cursor_on_media_button() {
                     self.dispatch(Event::Dwell);
@@ -2348,6 +2776,22 @@ fn notif_row<'a>(
     }
 }
 
+fn todos_file() -> std::path::PathBuf {
+    crate::paths::config_dir().join("todos.json")
+}
+
+fn load_persisted_todos() -> nacre_core::notch::todo::TodoStore {
+    let Ok(src) = std::fs::read_to_string(todos_file()) else {
+        return nacre_core::notch::todo::TodoStore::new();
+    };
+    nacre_core::notch::todo::TodoStore::parse(&src)
+}
+
+fn save_persisted_todos(store: &nacre_core::notch::todo::TodoStore) {
+    let _ = std::fs::create_dir_all(crate::paths::config_dir());
+    let _ = std::fs::write(todos_file(), store.serialize());
+}
+
 fn shelf_file() -> std::path::PathBuf {
     crate::paths::config_dir().join("shelf.txt")
 }
@@ -2414,11 +2858,20 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             if (wp.0 & 0xFFFF) == 0 {
                 with(hwnd, |d| {
                     if d.focus.is_active() {
-                        d.focus.release(hwnd, false);
-                        d.update_visibility();
+                        d.blur_inputs(false);
                     }
                 });
             }
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            let unit = wp.0 as u16;
+            with(hwnd, |d| d.on_char(unit));
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let vk = wp.0 as u16;
+            with(hwnd, |d| d.on_keydown(vk));
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -2489,6 +2942,30 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             if with(hwnd, |d| d.on_notif()).is_none() {
                 defer(Deferred::Notif);
             }
+            LRESULT(0)
+        }
+        WM_GTASKS => {
+            if with(hwnd, |d| d.on_gtasks()).is_none() {
+                defer(Deferred::GTasks);
+            }
+            LRESULT(0)
+        }
+        WM_GEMINI => {
+            if with(hwnd, |d| d.on_gemini()).is_none() {
+                defer(Deferred::Gemini);
+            }
+            LRESULT(0)
+        }
+        WM_GTASKS_ACTION => {
+            with(hwnd, |d| match wp.0 {
+                1 => {
+                    let _ = d.gtasks.commands.send(nacre_platform::gtasks::Cmd::Connect);
+                }
+                2 => {
+                    let _ = d.gtasks.commands.send(nacre_platform::gtasks::Cmd::Disconnect);
+                }
+                _ => {}
+            });
             LRESULT(0)
         }
         WM_START_DRAGOUT => {

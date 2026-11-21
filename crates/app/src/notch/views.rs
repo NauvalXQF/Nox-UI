@@ -32,6 +32,16 @@ pub enum Action {
     NotifFocus(u32),
     NotifDismiss(u32),
     NotifClearAll,
+    TodoFocus,
+    TodoToggle(usize),
+    TodoDelete(usize),
+    TodoSync,
+    TodoConnect,
+    GeminiFocus,
+    GeminiSend,
+    GeminiStop,
+    GeminiCopy,
+    GeminiClear,
 }
 
 pub struct Region {
@@ -103,6 +113,17 @@ pub struct Data<'a> {
     pub notif_unread: usize,
     pub notif_scroll: usize,
     pub notif_status: nacre_platform::notifications::Status,
+    pub timer_running: bool,
+    pub todos: Vec<&'a nacre_core::notch::todo::TodoItem>,
+    pub todo_scroll: usize,
+    pub todo_status: nacre_platform::gtasks::SyncStatus,
+    pub gemini_text: &'a str,
+    pub gemini_streaming: bool,
+    pub gemini_error: &'a str,
+    pub gemini_has_key: bool,
+    pub gemini_scroll: usize,
+    pub gemini_model_label: &'static str,
+    pub gemini_copied: bool,
 }
 
 pub struct NotifRow<'a> {
@@ -270,6 +291,14 @@ pub struct LyricsHostLive {
     pub card: bool,
 }
 
+pub struct GeminiRespHost {
+    pub host: ContainerVisual,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 #[derive(Default)]
 pub struct Live {
     pub bars: Vec<SpriteVisual>,
@@ -277,6 +306,9 @@ pub struct Live {
     pub scrub: Option<ScrubLive>,
     pub drop_zones: Vec<DropZoneLive>,
     pub lyrics_host: Option<LyricsHostLive>,
+    pub todo_input_box: Option<(f32, f32, f32, f32)>,
+    pub gemini_input_box: Option<(f32, f32, f32, f32)>,
+    pub gemini_resp_host: Option<GeminiRespHost>,
     pub lyric: Option<SpriteVisual>,
     pub lyric_scroll: Option<ContainerVisual>,
     pub lyric_shift: f32,
@@ -313,6 +345,8 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
                 Tab::Shelf if d.send.is_some() => send_card(p, c, f, d, regions),
                 Tab::Shelf if d.shelf.is_empty() => shelf_empty(p, c, f),
                 Tab::Shelf => shelf_tab(p, c, f, d, regions),
+                Tab::Todo => todo_tab(p, c, f, d, regions, live),
+                Tab::Gemini => gemini_tab(p, c, f, d, regions, live),
                 Tab::Timer => timer(p, c, f, d, regions),
             }
         }
@@ -882,39 +916,256 @@ fn compact_charging(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
 
 fn header(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>) {
     let (cy, bh, pad) = (p.px(25.0), p.px(26.0), p.px(3.0));
-    let widths: Vec<f32> = Tab::ALL.iter().map(|t| (p.measure(tr(t.title()), 12.5, 600) + p.px(28.0)).max(p.px(60.0))).collect();
+    let widths: Vec<f32> = Tab::MAIN.iter().map(|t| (p.measure(tr(t.title()), 12.0, 600) + p.px(20.0)).max(p.px(48.0))).collect();
     let total: f32 = widths.iter().sum::<f32>() + 2.0 * pad;
-    let x = f.x0 + p.px(16.0);
+    let x = f.x0 + p.px(14.0);
     p.rect(c, x, cy - bh / 2.0, total, bh, bh / 2.0, white(26));
     let mut sx = x + pad;
-    let th = p.px(12.5) * 1.3;
-    for (t, w) in Tab::ALL.iter().zip(&widths) {
+    let th = p.px(12.0) * 1.3;
+    for (t, w) in Tab::MAIN.iter().zip(&widths) {
         let on = *t == cur;
         let n0 = kids(c);
         if on {
             p.rect(c, sx, cy - bh / 2.0 + pad, *w, bh - 2.0 * pad, (bh - 2.0 * pad) / 2.0, white(236));
         }
-        p.text(c, tr(t.title()), sx + w / 2.0, cy - th / 2.0, 12.5, 600, if on { INK } else { WHITE }, if on { 1.0 } else { 0.78 }, Anchor::Center, *w);
+        p.text(c, tr(t.title()), sx + w / 2.0, cy - th / 2.0, 12.0, 600, if on { INK } else { WHITE }, if on { 1.0 } else { 0.78 }, Anchor::Center, *w);
         if *t == Tab::Alerts && d.notif_unread > 0 {
-            let dot = p.px(5.5);
+            let dot = p.px(5.0);
             let acc = crate::prefs::accent();
-            p.rect(c, sx + *w - p.px(10.0), cy - p.px(7.0), dot, dot, dot / 2.0, Color { A: 255, R: acc[0], G: acc[1], B: acc[2] });
+            p.rect(c, sx + *w - p.px(8.0), cy - p.px(7.0), dot, dot, dot / 2.0, Color { A: 255, R: acc[0], G: acc[1], B: acc[2] });
         }
         regions.push(Region { x: sx, y: cy - bh / 2.0 - pad, w: *w, h: bh + 2.0 * pad, action: Action::Tab(*t), vis: group_since(c, n0) });
         sx += w;
     }
-    let gx = f.x0 + f.w - p.px(28.0);
+    let gx = f.x0 + f.w - p.px(24.0);
     let n0 = kids(c);
-    p.sym(c, Sym::Gear, gx, cy, 16.0, WHITE, 0.7);
-    regions.push(Region { x: gx - p.px(16.0), y: cy - p.px(15.0), w: p.px(32.0), h: p.px(30.0), action: Action::Settings, vis: group_since(c, n0) });
-    let px_btn = gx - p.px(28.0);
+    p.sym(c, Sym::Gear, gx, cy, 15.0, WHITE, 0.7);
+    regions.push(Region { x: gx - p.px(14.0), y: cy - p.px(14.0), w: p.px(28.0), h: p.px(28.0), action: Action::Settings, vis: group_since(c, n0) });
+
+    let px_btn = gx - p.px(26.0);
     let n0 = kids(c);
     let pin_rgb = if d.pinned { crate::prefs::accent() } else { WHITE };
-    p.sym(c, Sym::Pin, px_btn, cy, 15.0, pin_rgb, if d.pinned { 1.0 } else { 0.62 });
-    regions.push(Region { x: px_btn - p.px(14.0), y: cy - p.px(15.0), w: p.px(28.0), h: p.px(30.0), action: Action::Pin, vis: group_since(c, n0) });
+    p.sym(c, Sym::Pin, px_btn, cy, 14.5, pin_rgb, if d.pinned { 1.0 } else { 0.62 });
+    regions.push(Region { x: px_btn - p.px(13.0), y: cy - p.px(14.0), w: p.px(26.0), h: p.px(28.0), action: Action::Pin, vis: group_since(c, n0) });
+
+    let tx_btn = px_btn - p.px(26.0);
+    let n0 = kids(c);
+    let timer_on = cur == Tab::Timer;
+    let timer_rgb = if d.timer_running { ORANGE } else if timer_on { crate::prefs::accent() } else { WHITE };
+    p.sym(c, Sym::Stopwatch, tx_btn, cy, 15.0, timer_rgb, if timer_on || d.timer_running { 1.0 } else { 0.68 });
+    regions.push(Region { x: tx_btn - p.px(13.0), y: cy - p.px(14.0), w: p.px(26.0), h: p.px(28.0), action: Action::Tab(Tab::Timer), vis: group_since(c, n0) });
+
     if let Some((pct, charging)) = d.battery {
         let label = if charging { format!("\u{26A1}{pct}%") } else { format!("{pct}%") };
-        p.text(c, &label, px_btn - p.px(18.0), cy - th / 2.0, 12.5, 600, if charging { GREEN } else { WHITE }, 0.82, Anchor::Right, p.px(80.0));
+        p.text(c, &label, tx_btn - p.px(16.0), cy - th / 2.0, 11.5, 600, if charging { GREEN } else { WHITE }, 0.78, Anchor::Right, p.px(64.0));
+    }
+}
+
+fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
+    use nacre_platform::gtasks::SyncStatus;
+    let pad = p.px(14.0);
+    let (top, h) = (p.px(48.0), f.h - p.px(48.0) - pad);
+    let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
+    card(p, c, x0, top, w, h);
+
+    let accent = crate::prefs::accent();
+    let (iy, ih) = (top + p.px(10.0), p.px(30.0));
+    let btn_w = p.px(96.0);
+    let (ix, iw) = (x0 + p.px(10.0), w - p.px(28.0) - btn_w);
+    live.todo_input_box = Some((ix, iy, iw, ih));
+    regions.push(Region { x: ix, y: iy, w: iw, h: ih, action: Action::TodoFocus, vis: None });
+
+    let (bx, by) = (ix + iw + p.px(8.0), iy);
+    let (btn_label, btn_act, btn_fill) = match d.todo_status {
+        SyncStatus::Synced => (tr("Tersinkron"), Action::TodoSync, Color { A: 48, R: GREEN[0], G: GREEN[1], B: GREEN[2] }),
+        SyncStatus::Syncing => (tr("Sinkronisasi…"), Action::TodoSync, white(28)),
+        SyncStatus::Connecting => (tr("Menyambung…"), Action::TodoSync, white(28)),
+        SyncStatus::NeedsClientConfig => (tr("Butuh Client ID"), Action::Settings, white(26)),
+        SyncStatus::Disconnected | SyncStatus::Error => (tr("Sambungkan"), Action::TodoConnect, Color { A: 210, R: accent[0], G: accent[1], B: accent[2] }),
+    };
+    let n0 = kids(c);
+    p.rect(c, bx, by, btn_w, ih, ih / 2.0, btn_fill);
+    let th = p.px(11.0) * 1.3;
+    p.text(c, &p.fit(btn_label, 11.0, 600, btn_w - p.px(12.0)), bx + btn_w / 2.0, by + ih / 2.0 - th / 2.0, 11.0, 600, WHITE, 0.96, Anchor::Center, btn_w - p.px(8.0));
+    regions.push(Region { x: bx, y: by, w: btn_w, h: ih, action: btn_act, vis: group_since(c, n0) });
+
+    let list_top = iy + ih + p.px(10.0);
+    if d.todos.is_empty() {
+        let cx = x0 + w / 2.0;
+        let cy = list_top + (top + h - list_top) / 2.0;
+        p.text(c, tr("Belum ada tugas"), cx, cy - p.px(14.0), 13.0, 600, WHITE, 0.8, Anchor::Center, w - p.px(24.0));
+        p.text(c, tr("Ketik di atas dan tekan Enter untuk menambah tugas."), cx, cy + p.px(6.0), 11.5, 400, WHITE, 0.5, Anchor::Center, w - p.px(24.0));
+        return;
+    }
+
+    let row_h = p.px(32.0);
+    let gap = p.px(4.0);
+    let max_rows = (((top + h - p.px(6.0)) - list_top) / (row_h + gap)).floor().max(1.0) as usize;
+    let start = d.todo_scroll.min(d.todos.len().saturating_sub(1));
+    let chk = p.px(16.0);
+    for (idx, it) in d.todos.iter().enumerate().skip(start).take(max_rows) {
+        let vis_idx = idx - start;
+        let ry = list_top + vis_idx as f32 * (row_h + gap);
+        let rx = x0 + p.px(10.0);
+        let rw = w - p.px(20.0);
+        let n0 = kids(c);
+        p.rect(c, rx, ry, rw, row_h, p.px(10.0), white(if it.completed { 8 } else { 15 }));
+        let cx = rx + p.px(16.0);
+        let cy = ry + row_h / 2.0;
+        if it.completed {
+            p.rect(c, cx - chk / 2.0, cy - chk / 2.0, chk, chk, chk / 2.0, Color { A: 240, R: GREEN[0], G: GREEN[1], B: GREEN[2] });
+            p.sym(c, Sym::Check, cx, cy, 10.0, WHITE, 1.0);
+        } else {
+            p.rect(c, cx - chk / 2.0, cy - chk / 2.0, chk, chk, chk / 2.0, white(55));
+            p.rect(c, cx - chk / 2.0 + p.px(1.5), cy - chk / 2.0 + p.px(1.5), chk - p.px(3.0), chk - p.px(3.0), (chk - p.px(3.0)) / 2.0, Color { A: 220, R: 22, G: 22, B: 26 });
+        }
+        let del_cx = rx + rw - p.px(16.0);
+        let mut right_edge = del_cx - p.px(16.0);
+        if let Some(due) = &it.due {
+            let dw = p.measure(due, 10.0, 500) + p.px(8.0);
+            let dth = p.px(10.0) * 1.3;
+            p.text(c, due, right_edge, cy - dth / 2.0, 10.0, 500, WHITE, 0.5, Anchor::Right, dw);
+            right_edge -= dw + p.px(6.0);
+        }
+        let tx = cx + chk / 2.0 + p.px(10.0);
+        let tw = (right_edge - tx).max(p.px(40.0));
+        let tth = p.px(12.5) * 1.3;
+        p.text(c, &p.fit(&it.title, 12.5, if it.completed { 400 } else { 500 }, tw), tx, cy - tth / 2.0, 12.5, if it.completed { 400 } else { 500 }, WHITE, if it.completed { 0.42 } else { 0.94 }, Anchor::Left, tw + p.px(2.0));
+        let row_vis = group_since(c, n0);
+        let d0 = kids(c);
+        p.sym(c, Sym::Close, del_cx, cy, 8.5, WHITE, 0.45);
+        regions.push(Region { x: del_cx - p.px(12.0), y: ry, w: p.px(24.0), h: row_h, action: Action::TodoDelete(idx), vis: group_since(c, d0) });
+        regions.push(Region { x: rx, y: ry, w: del_cx - p.px(12.0) - rx, h: row_h, action: Action::TodoToggle(idx), vis: row_vis });
+    }
+}
+
+fn gemini_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
+    let pad = p.px(14.0);
+    let (top, h) = (p.px(48.0), f.h - p.px(48.0) - pad);
+    let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
+    card(p, c, x0, top, w, h);
+
+    let accent = crate::prefs::accent();
+    let (iy, ih) = (top + p.px(10.0), p.px(30.0));
+    let btn_w = p.px(76.0);
+    let (ix, iw) = (x0 + p.px(10.0), w - p.px(28.0) - btn_w);
+    live.gemini_input_box = Some((ix, iy, iw, ih));
+    regions.push(Region { x: ix, y: iy, w: iw, h: ih, action: Action::GeminiFocus, vis: None });
+
+    let (bx, by) = (ix + iw + p.px(8.0), iy);
+    let n0 = kids(c);
+    let (label, act, fill) = if d.gemini_streaming {
+        (tr("Hentikan"), Action::GeminiStop, Color { A: 225, R: 255, G: 69, B: 58 })
+    } else {
+        (tr("Kirim"), Action::GeminiSend, Color { A: 235, R: accent[0], G: accent[1], B: accent[2] })
+    };
+    p.rect(c, bx, by, btn_w, ih, ih / 2.0, fill);
+    let th = p.px(11.5) * 1.3;
+    p.text(c, label, bx + btn_w / 2.0, by + ih / 2.0 - th / 2.0, 11.5, 600, WHITE, 1.0, Anchor::Center, btn_w);
+    regions.push(Region { x: bx, y: by, w: btn_w, h: ih, action: act, vis: group_since(c, n0) });
+
+    // Micro toolbar row: model pill on left, Copy + Clear on right.
+    let bar_y = iy + ih + p.px(8.0);
+    p.sym(c, Sym::Sparkle, x0 + p.px(18.0), bar_y + p.px(7.0), 12.0, accent, 0.95);
+    let st_text = if d.gemini_streaming { tr("Berpikir…") } else { d.gemini_model_label };
+    p.text(c, st_text, x0 + p.px(28.0), bar_y, 10.5, 600, WHITE, 0.55, Anchor::Left, w * 0.5);
+    if !d.gemini_text.is_empty() {
+        let clr = tr("Kosongkan");
+        let clw = p.measure(clr, 10.5, 600) + p.px(4.0);
+        let clx = x0 + w - p.px(12.0);
+        p.text(c, clr, clx, bar_y, 10.5, 600, WHITE, 0.55, Anchor::Right, clw + 4.0);
+        regions.push(Region { x: clx - clw - p.px(4.0), y: bar_y - p.px(4.0), w: clw + p.px(8.0), h: p.px(20.0), action: Action::GeminiClear, vis: None });
+
+        let cpy_x = clx - clw - p.px(18.0);
+        let n0 = kids(c);
+        let sym = if d.gemini_copied { Sym::Check } else { Sym::Copy };
+        let rgb = if d.gemini_copied { GREEN } else { WHITE };
+        p.sym(c, sym, cpy_x, bar_y + p.px(7.0), 12.0, rgb, 0.85);
+        regions.push(Region { x: cpy_x - p.px(12.0), y: bar_y - p.px(4.0), w: p.px(24.0), h: p.px(20.0), action: Action::GeminiCopy, vis: group_since(c, n0) });
+    }
+
+    let rx = x0 + p.px(12.0);
+    let ry = bar_y + p.px(20.0);
+    let rw = w - p.px(24.0);
+    let rh = (top + h - p.px(8.0) - ry).max(p.px(40.0));
+    if let Ok(host) = p.comp.CreateContainerVisual() {
+        let _ = c.Children().and_then(|k| k.InsertAtTop(&host));
+        draw_gemini_response(p, &host, rx, ry, rw, rh, d.gemini_text, d.gemini_error, d.gemini_has_key, d.gemini_streaming, d.gemini_scroll);
+        live.gemini_resp_host = Some(GeminiRespHost { host, x: rx, y: ry, w: rw, h: rh });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_gemini_response(
+    p: &mut Painter,
+    live: &Live,
+    text: &str,
+    error: &str,
+    has_key: bool,
+    streaming: bool,
+    scroll: usize,
+) {
+    let Some(h) = live.gemini_resp_host.as_ref() else { return };
+    if let Ok(k) = h.host.Children() {
+        let _ = k.RemoveAll();
+    }
+    draw_gemini_response(p, &h.host, h.x, h.y, h.w, h.h, text, error, has_key, streaming, scroll);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_gemini_response(
+    p: &mut Painter,
+    c: &ContainerVisual,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    text: &str,
+    error: &str,
+    has_key: bool,
+    streaming: bool,
+    scroll: usize,
+) {
+    if !error.is_empty() {
+        p.text(c, &p.fit(error, 12.0, 500, w), x, y + p.px(8.0), 12.0, 500, [255, 110, 100], 0.95, Anchor::Left, w + p.px(2.0));
+        return;
+    }
+    if text.is_empty() {
+        let msg = if streaming {
+            tr("Berpikir…")
+        } else if !has_key {
+            tr("Atur Gemini API Key di Pengaturan → Visor untuk mulai bertanya.")
+        } else {
+            tr("Ketik pertanyaan dan tekan Enter.")
+        };
+        p.text(c, &p.fit(msg, 12.0, 400, w), x + w / 2.0, y + h / 2.0 - p.px(10.0), 12.0, 400, WHITE, 0.48, Anchor::Center, w + p.px(2.0));
+        return;
+    }
+    let font = 12.0;
+    let line_h = p.px(font) * 1.38;
+    let mut wrapped: Vec<String> = Vec::new();
+    for para in text.lines() {
+        let t = para.trim_end();
+        if t.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        for line in nacre_core::notch::typeset::wrap(t, w - p.px(4.0), 40, |s| p.measure(s, font, 400)) {
+            wrapped.push(line);
+        }
+    }
+    let max_lines = (h / line_h).floor().max(1.0) as usize;
+    let start = if streaming {
+        wrapped.len().saturating_sub(max_lines)
+    } else {
+        scroll.min(wrapped.len().saturating_sub(max_lines))
+    };
+    let mut yy = y;
+    for line in wrapped.iter().skip(start).take(max_lines) {
+        if !line.is_empty() {
+            p.text(c, line, x, yy, font, 400, WHITE, 0.92, Anchor::Left, w + p.px(4.0));
+        }
+        yy += line_h;
     }
 }
 

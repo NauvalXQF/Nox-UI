@@ -1,4 +1,5 @@
 pub mod download;
+pub mod gemini;
 pub mod send;
 pub mod glance;
 pub mod input;
@@ -11,4 +12,5 @@ pub mod shelf;
 pub mod spring;
 pub mod state;
 pub mod tint;
+pub mod todo;
 pub mod typeset;
