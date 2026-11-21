@@ -404,6 +404,7 @@ pub struct Notch {
     dragging_out: bool,
     pinned: bool,
     lyrics_open: bool,
+    play_glide_active: bool,
     swipe: state::SwipeLatch,
     last_pub_half: i32,
     todo_adding: bool,
@@ -602,6 +603,7 @@ impl Notch {
                 dragging_out: false,
                 pinned: false,
                 lyrics_open: true,
+                play_glide_active: false,
                 swipe: state::SwipeLatch::default(),
                 last_pub_half: -1,
                 todo_adding: false,
@@ -786,6 +788,61 @@ impl Notch {
         }
     }
 
+    fn sync_play_glide(&mut self) {
+        let Some(pl) = &self.live_vis.play_layout else { return };
+        let cur_w = self.sp_w.pos.max(8.0);
+        let cur_h = self.sp_h.pos.max(8.0);
+        let cur_x0 = self.x0_for(cur_w);
+        let lp = self.sp_lyrics.pos.clamp(0.0, 1.0);
+        let pad = 18.0 * self.dpi;
+        let cur_mx = cur_x0 + pad + 4.0 * self.dpi;
+        let mw_full = (cur_w - 2.0 * pad - 8.0 * self.dpi).max(180.0 * self.dpi);
+        let mw_split = 224.0 * self.dpi;
+        let cur_mw = mw_full + (mw_split - mw_full) * lp;
+
+        // Keep album art + title/artist glued to the animated left edge (zero left-edge clipping).
+        let _ = pl.left_group.SetOffset(Vector3 { X: (cur_mx - pl.base_mx).round(), Y: 0.0, Z: 0.0 });
+
+        // Smoothly stretch/contract scrub bar + timestamps in lockstep with `sp_w`.
+        if let Some(scrub) = self.live_vis.scrub.as_mut() {
+            scrub.set_bounds(cur_mx, cur_mx + cur_mw, 37.0 * self.dpi, 43.0 * self.dpi, 40.0 * self.dpi);
+        }
+        self.update_scrub_in_place();
+
+        // Continuously glide all 5 transport controls between compact split and full-width spacing
+        // (including vertical lift to make room for the bottom page dots when closing lyrics).
+        let Some(pl) = &self.live_vis.play_layout else { return };
+        let cx = cur_mx + cur_mw / 2.0;
+        let step = (48.0 + (41.0 - 48.0) * lp) * self.dpi;
+        let dy_ctrl = if pl.lyrics_panel.is_some() { -(1.0 - lp) * 12.0 * self.dpi } else { 0.0 };
+        for (act, base_bx, vis) in &pl.ctrl_groups {
+            let target_bx = match act {
+                Action::ToggleLyrics => (cur_mx + 22.0 * self.dpi) * (1.0 - lp) + (cx - 2.0 * step) * lp,
+                Action::Prev => cx - step,
+                Action::PlayPause => cx,
+                Action::Next => cx + step,
+                Action::ToggleMute => (cur_mx + cur_mw - 22.0 * self.dpi) * (1.0 - lp) + (cx + 2.0 * step) * lp,
+                _ => *base_bx,
+            };
+            let _ = vis.SetOffset(Vector3 { X: (target_bx - *base_bx).round(), Y: dy_ctrl.round(), Z: 0.0 });
+        }
+
+        // Sync ambient glow dimensions & opacity with animated shell width + `sp_lyrics`.
+        if let Some(gv) = &pl.lyrics_glow {
+            let _ = gv.SetOpacity(lp);
+            let _ = gv.SetOffset(Vector3 { X: cur_x0.round(), Y: 0.0, Z: 0.0 });
+            let _ = gv.SetSize(Vector2 { X: cur_w.ceil(), Y: cur_h.ceil() });
+        }
+        // Slide lyrics panel + 1px vertical divider smoothly into/out of the right column.
+        if let Some(panel) = &pl.lyrics_panel {
+            let cur_div_x = cur_mx + cur_mw + 14.0 * self.dpi;
+            let slide_x = (cur_div_x - pl.base_div_x) - (1.0 - lp) * 12.0 * self.dpi;
+            let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
+            let _ = panel.SetOpacity(panel_op);
+            let _ = panel.SetOffset(Vector3 { X: slide_x.round(), Y: 0.0, Z: 0.0 });
+        }
+    }
+
     fn tick_frame(&mut self) {
         let now = Instant::now();
         let dt = (now - self.frame_last).as_secs_f32().clamp(0.001, 0.05);
@@ -817,29 +874,30 @@ impl Notch {
             }
         }
 
-        // Smooth gliding reveal/hide for Tab::Play lyrics panel, vertical divider & ambient glow.
+        // Smooth gliding reveal/hide for Tab::Play (controls, scrub bar, divider, lyrics panel & glow).
         let lyrics_moving = self.sp_lyrics.step(dt);
-        if lyrics_moving || (springs_moving && self.live_vis.lyrics_glow.is_some()) {
-            let lp = self.sp_lyrics.pos.clamp(0.0, 1.0);
-            if let Some(gv) = &self.live_vis.lyrics_glow {
-                let _ = gv.SetOpacity(lp);
-                let gx = ((self.win.0 as f32 - self.sp_w.pos) / 2.0).round();
-                let _ = gv.SetOffset(Vector3 { X: gx, Y: 0.0, Z: 0.0 });
-                let _ = gv.SetSize(Vector2 { X: self.sp_w.pos, Y: self.sp_h.pos });
-            }
-            if let Some(panel) = &self.live_vis.lyrics_panel {
-                let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
-                let slide_x = -(1.0 - lp) * 12.0 * self.dpi;
-                let _ = panel.SetOpacity(panel_op);
-                let _ = panel.SetOffset(Vector3 { X: slide_x, Y: 0.0, Z: 0.0 });
-            }
-            if lyrics_moving {
-                springs_moving = true;
-            }
+        if lyrics_moving {
+            springs_moving = true;
         }
-        if !lyrics_moving && !self.lyrics_open && self.mode == Mode::Open(Tab::Play) && self.live_vis.lyrics_panel.is_some() {
-            // Closing glide completed: switch cleanly to full-width non-lyrics player + bottom dots.
+        if self.play_glide_active && self.live_vis.play_layout.is_some() && (springs_moving || lyrics_moving) {
+            self.sync_play_glide();
+        }
+        if self.play_glide_active
+            && !lyrics_moving
+            && self.sp_w.is_settled()
+            && self.sp_lyrics.is_settled()
+            && self.mode == Mode::Open(Tab::Play)
+        {
+            // Glide completed at exact target coordinates: commit final hit-regions & bottom dots.
+            self.play_glide_active = false;
             self.render();
+            if !self.lyrics_open {
+                if let Some(nav) = &self.live_vis.nav {
+                    if let Ok(o) = nav.anchor.cast::<CompositionObject>() {
+                        let _ = keyframes_glide(&self.paint.comp, &o, "Opacity", 0.0, 1.0, 180, 0);
+                    }
+                }
+            }
         }
 
         // Smooth scrub-bar hover bloom (track thicken + thumb expand).
@@ -1683,6 +1741,9 @@ impl Notch {
         } else {
             self.prev_tab = None;
         }
+        if view_changed {
+            self.play_glide_active = false;
+        }
         if view_changed && self.focus.is_active() {
             self.blur_inputs(false);
         }
@@ -1897,6 +1958,9 @@ impl Notch {
             gemini_copied: self.gemini_copied,
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
+        if self.play_glide_active && self.live_vis.play_layout.is_some() {
+            self.sync_play_glide();
+        }
         if let Some(nav) = self.live_vis.nav.as_mut() {
             nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
         }
@@ -2688,11 +2752,20 @@ impl Notch {
                     kill(self.hwnd, T_NAV_COLLAPSE);
                 }
                 let glide = SpringParams::lyrics_glide();
+                self.play_glide_active = true;
                 self.sp_lyrics.set_target(if self.lyrics_open { 1.0 } else { 0.0 }, glide);
                 self.apply_size(Some(glide));
                 self.publish_notch();
-                if self.lyrics_open || self.live_vis.lyrics_panel.is_none() {
-                    // Mount lyrics panel at current `sp_lyrics.pos` so it glides smoothly in without flashing the player.
+                let has_lyrics_layer = self
+                    .live_vis
+                    .play_layout
+                    .as_ref()
+                    .and_then(|pl| pl.lyrics_panel.as_ref())
+                    .is_some();
+                if self.lyrics_open && !has_lyrics_layer {
+                    // Mount lyrics panel at current `sp_lyrics.pos` and lock controls to `sp_w.pos` (zero frame-0 jump).
+                    self.render();
+                } else if !self.lyrics_open && !has_lyrics_layer {
                     self.render();
                 }
                 self.start_frame();

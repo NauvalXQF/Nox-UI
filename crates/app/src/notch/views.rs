@@ -236,9 +236,19 @@ pub struct ScrubLive {
     pub pos_vis: SpriteVisual,
     pub rem_vis: SpriteVisual,
     last_pos_sec: i64,
+    last_pos_h: f32,
+    last_rem_w: f32,
+    last_rem_h: f32,
 }
 
 impl ScrubLive {
+    pub fn set_bounds(&mut self, left_x: f32, right_x: f32, left_time_w: f32, right_time_w: f32, min_sw: f32) {
+        self.left_x = left_x;
+        self.right_x = right_x;
+        self.sx = left_x + left_time_w;
+        self.sw = (right_x - left_x - left_time_w - right_time_w).max(min_sw);
+    }
+
     pub fn update(&mut self, p: &mut Painter, frac: f32, hover_t: f32, dragging: bool, pos_ms: i64) {
         let fr = frac.clamp(0.0, 1.0);
         let ht = if dragging { 1.0 } else { hover_t.clamp(0.0, 1.0) };
@@ -281,12 +291,8 @@ impl ScrubLive {
                     let _ = br.SetBitmapInterpolationMode(CompositionBitmapInterpolationMode::NearestNeighbor);
                     let _ = self.pos_vis.SetBrush(&br);
                 }
+                self.last_pos_h = th as f32;
                 let _ = self.pos_vis.SetSize(Vector2 { X: tw as f32, Y: th as f32 });
-                let _ = self.pos_vis.SetOffset(Vector3 {
-                    X: self.left_x.round(),
-                    Y: (self.sy - th as f32 / 2.0).round(),
-                    Z: 0.0,
-                });
             }
             let rem_s = format!("-{}", mmss_pad((self.dur_ms - pos_ms).max(0)));
             if let Some((surf, tw, th)) = p.render_text_surface(&rem_s, 11.0, 500, WHITE, p.px(48.0)) {
@@ -295,15 +301,36 @@ impl ScrubLive {
                     let _ = br.SetBitmapInterpolationMode(CompositionBitmapInterpolationMode::NearestNeighbor);
                     let _ = self.rem_vis.SetBrush(&br);
                 }
+                self.last_rem_w = tw as f32;
+                self.last_rem_h = th as f32;
                 let _ = self.rem_vis.SetSize(Vector2 { X: tw as f32, Y: th as f32 });
-                let _ = self.rem_vis.SetOffset(Vector3 {
-                    X: (self.right_x - tw as f32).round(),
-                    Y: (self.sy - th as f32 / 2.0).round(),
-                    Z: 0.0,
-                });
             }
         }
+        // Always track animated left_x / right_x without re-rasterizing text surfaces.
+        if self.last_pos_h > 0.0 {
+            let _ = self.pos_vis.SetOffset(Vector3 {
+                X: self.left_x.round(),
+                Y: (self.sy - self.last_pos_h / 2.0).round(),
+                Z: 0.0,
+            });
+        }
+        if self.last_rem_h > 0.0 {
+            let _ = self.rem_vis.SetOffset(Vector3 {
+                X: (self.right_x - self.last_rem_w).round(),
+                Y: (self.sy - self.last_rem_h / 2.0).round(),
+                Z: 0.0,
+            });
+        }
     }
+}
+
+pub struct PlayLayoutLive {
+    pub base_mx: f32,
+    pub base_div_x: f32,
+    pub left_group: ContainerVisual,
+    pub ctrl_groups: Vec<(Action, f32, ContainerVisual)>,
+    pub lyrics_panel: Option<ContainerVisual>,
+    pub lyrics_glow: Option<SpriteVisual>,
 }
 
 pub struct DropZoneLive {
@@ -425,8 +452,7 @@ pub struct Live {
     pub compact_glow: Option<SpriteVisual>,
     pub nav: Option<NavLive>,
     pub pin_vis: Option<ContainerVisual>,
-    pub lyrics_panel: Option<ContainerVisual>,
-    pub lyrics_glow: Option<SpriteVisual>,
+    pub play_layout: Option<PlayLayoutLive>,
     pub album_art: Option<ContainerVisual>,
 }
 
@@ -529,12 +555,12 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
     let mut right_x = f.x0 + f.w - p.px(22.0);
     let media_playing = d.media.as_ref().is_some_and(|m| m.playing);
 
-    // Reserve right slot if Shelf or Alerts already has a top-right header control.
-    let shelf_has_top_right = cur == Tab::Shelf && d.send.is_none();
+    // Reserve right slot only when Shelf (non-empty) or Alerts already has a top-right Clear action.
+    let shelf_has_clear = cur == Tab::Shelf && d.send.is_none() && !d.shelf.is_empty();
     let alerts_has_clear = cur == Tab::Alerts && !d.notif_list.is_empty();
     let gemini_has_btn = cur == Tab::Gemini;
 
-    if shelf_has_top_right {
+    if shelf_has_clear {
         right_x -= p.px(66.0);
     } else if alerts_has_clear {
         right_x -= p.px(68.0);
@@ -1008,17 +1034,6 @@ fn shelf_empty(p: &mut Painter, c: &ContainerVisual, f: Frame) {
     let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
     p.text(c, tr("Rak"), x0 + p.px(4.0), top, 14.5, 700, WHITE, 0.98, Anchor::Left, w * 0.5);
 
-    // Nusa-style compact mode pill top-right ([Folder active] | [Clipboard/Tray]).
-    let (pw, ph) = (p.px(56.0), p.px(20.0));
-    let px = x0 + w - pw;
-    let py = top + p.px(1.0);
-    p.rect(c, px, py, pw, ph, ph / 2.0, white(16));
-    let aw = p.px(26.0);
-    let acc = crate::prefs::accent();
-    p.rect(c, px + p.px(2.0), py + p.px(2.0), aw, ph - p.px(4.0), (ph - p.px(4.0)) / 2.0, Color { A: 245, R: acc[0], G: acc[1], B: acc[2] });
-    p.sym(c, Sym::Folder, px + p.px(2.0) + aw / 2.0, py + ph / 2.0, 11.5, WHITE, 1.0);
-    p.sym(c, Sym::Copy, px + pw - p.px(13.0), py + ph / 2.0, 10.5, WHITE, 0.52);
-
     let zy = top + p.px(27.0);
     let zh = (f.h - p.px(DOTS_STRIP_DP + 6.0) - zy).max(p.px(60.0));
     p.dashed_rect(c, x0, zy, w, zh, p.px(14.0), white(54));
@@ -1210,7 +1225,10 @@ fn music_column(
     art_scale: f32,
     regions: &mut Vec<Region>,
     live: &mut Live,
-) {
+) -> Option<(ContainerVisual, Vec<(Action, f32, ContainerVisual)>)> {
+    let left_group = p.comp.CreateContainerVisual().ok()?;
+    let _ = c.Children().and_then(|k| k.InsertAtTop(&left_group));
+
     let art = p.px(58.0);
     let (ax, ay) = (x, y);
     if let Ok(art_wrap) = p.comp.CreateContainerVisual() {
@@ -1219,7 +1237,7 @@ fn music_column(
         let _ = art_wrap.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
         let art_op = (0.78 + 0.22 * ((sc - 0.90) / 0.10).clamp(0.0, 1.0)).clamp(0.76, 1.0);
         let _ = art_wrap.SetOpacity(art_op);
-        let _ = c.Children().and_then(|k| k.InsertAtTop(&art_wrap));
+        let _ = left_group.Children().and_then(|k| k.InsertAtTop(&art_wrap));
         match m.art {
             Some(s) => {
                 p.image(&art_wrap, s, ax, ay, art, art, p.px(13.0));
@@ -1234,9 +1252,9 @@ fn music_column(
     let tx = ax + art + p.px(12.0);
     let tw = (x + w - tx - if lyrics_open { 0.0 } else { p.px(34.0) }).max(p.px(40.0));
     let title = p.fit(m.title, 15.0, 700, tw);
-    p.text(c, &title, tx, ay + p.px(11.0), 15.0, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
+    p.text(&left_group, &title, tx, ay + p.px(11.0), 15.0, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
     let artist = p.fit(m.artist, 12.0, 500, tw);
-    p.text(c, &artist, tx, ay + p.px(33.0), 12.0, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
+    p.text(&left_group, &artist, tx, ay + p.px(33.0), 12.0, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
 
     // Inline Nusa scrub row aligned right at vertical midpoint (y ≈ 93dp on 186dp Visor).
     let sy = ay + art + p.px(21.0);
@@ -1299,6 +1317,9 @@ fn music_column(
             pos_vis,
             rem_vis,
             last_pos_sec: -1,
+            last_pos_h: 0.0,
+            last_rem_w: 0.0,
+            last_rem_h: 0.0,
         })
     };
     if let Ok(mut sl) = build_scrub() {
@@ -1334,11 +1355,17 @@ fn music_column(
             (vol_sym, x + w - p.px(22.0), 18.5, Action::ToggleMute, vol_op),
         ]
     };
+    let mut ctrl_groups = Vec::with_capacity(5);
     for (s, bx, size, a, op) in controls {
-        let n0 = kids(c);
-        p.sym(c, s, bx, cy, size, WHITE, op);
-        regions.push(Region { x: bx - p.px(18.0), y: cy - p.px(16.0), w: p.px(36.0), h: p.px(32.0), action: a, vis: group_since(c, n0), hover_bg: None });
+        if let Ok(wrap) = p.comp.CreateContainerVisual() {
+            let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
+            let n0 = kids(&wrap);
+            p.sym(&wrap, s, bx, cy, size, WHITE, op);
+            regions.push(Region { x: bx - p.px(18.0), y: cy - p.px(16.0), w: p.px(36.0), h: p.px(32.0), action: a, vis: group_since(&wrap, n0), hover_bg: None });
+            ctrl_groups.push((a, bx, wrap));
+        }
     }
+    Some((left_group, ctrl_groups))
 }
 
 fn compact_glance(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
@@ -1441,21 +1468,21 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
     let bot = f.h - p.px(DOTS_STRIP_DP + 4.0);
     let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
 
-    // Uniform 395 x 186 dp Nusa TodoList layout:
-    let lw = p.px(158.0);
-    let rx = x0 + lw + p.px(9.0);
-    let rw = (x0 + w - rx).max(p.px(110.0));
+    // Slimmer left column (116 dp) with vertically stacked pills -> wider right task list (~233 dp).
+    let lw = p.px(116.0);
+    let rx = x0 + lw + p.px(10.0);
+    let rw = (x0 + w - rx).max(p.px(150.0));
 
     // Two-tone "TodoList" title matching Nusa reference.
-    let todo_w = p.text(c, "Todo", x0 + p.px(2.0), top, 14.5, 700, WHITE, 0.98, Anchor::Left, p.px(64.0));
-    p.text(c, "List", x0 + p.px(2.0) + todo_w - p.px(1.0), top, 14.5, 700, GREEN, 0.96, Anchor::Left, p.px(64.0));
+    let todo_w = p.text(c, "Todo", x0 + p.px(2.0), top, 14.5, 700, WHITE, 0.98, Anchor::Left, p.px(56.0));
+    p.text(c, "List", x0 + p.px(2.0) + todo_w - p.px(1.0), top, 14.5, 700, GREEN, 0.96, Anchor::Left, p.px(56.0));
 
     // Big progress counter + circular Google Tasks sync badge with blue status dot.
     let ratio = format!("{}/{}", d.todo_done, d.todo_total);
-    let num_w = p.text(c, &ratio, x0 + p.px(2.0), top + p.px(23.0), 30.0, 700, WHITE, 1.0, Anchor::Left, p.px(110.0));
-    let sync_dia = p.px(27.0);
-    let scx = (x0 + num_w + p.px(24.0)).min(x0 + lw - sync_dia / 2.0 - p.px(4.0));
-    let scy = top + p.px(42.0);
+    let num_w = p.text(c, &ratio, x0 + p.px(2.0), top + p.px(19.0), 28.0, 700, WHITE, 1.0, Anchor::Left, p.px(82.0));
+    let sync_dia = p.px(25.0);
+    let scx = (x0 + num_w + p.px(20.0)).min(x0 + lw - sync_dia / 2.0 - p.px(2.0));
+    let scy = top + p.px(37.0);
     let sync_act = match d.todo_status {
         SyncStatus::Synced | SyncStatus::Syncing | SyncStatus::Connecting => Action::TodoSync,
         SyncStatus::NeedsClientConfig => Action::Settings,
@@ -1463,14 +1490,14 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
     };
     let n0 = kids(c);
     p.rect(c, (scx - sync_dia / 2.0).round(), (scy - sync_dia / 2.0).round(), sync_dia, sync_dia, sync_dia / 2.0, white(20));
-    p.sym(c, Sym::Calendar, scx, scy, 13.5, WHITE, 0.72);
+    p.sym(c, Sym::Calendar, scx, scy, 13.0, WHITE, 0.72);
     let dot_rgb = match d.todo_status {
         SyncStatus::Synced => BLUE,
         SyncStatus::Syncing | SyncStatus::Connecting => ORANGE,
         SyncStatus::Disconnected | SyncStatus::Error | SyncStatus::NeedsClientConfig => BLUE,
     };
-    let dot = p.px(6.5);
-    p.rect(c, scx + p.px(6.0), scy - p.px(12.5), dot, dot, dot / 2.0, Color { A: 255, R: dot_rgb[0], G: dot_rgb[1], B: dot_rgb[2] });
+    let dot = p.px(6.0);
+    p.rect(c, scx + p.px(5.5), scy - p.px(11.5), dot, dot, dot / 2.0, Color { A: 255, R: dot_rgb[0], G: dot_rgb[1], B: dot_rgb[2] });
     regions.push(Region {
         x: scx - sync_dia / 2.0,
         y: scy - sync_dia / 2.0,
@@ -1481,29 +1508,29 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
         hover_bg: None,
     });
 
-    p.text(c, tr("Selesai hari ini"), x0 + p.px(2.0), top + p.px(67.0), 11.0, 500, WHITE, 0.50, Anchor::Left, lw);
+    p.text(c, tr("Selesai hari ini"), x0 + p.px(2.0), top + p.px(55.0), 10.5, 500, WHITE, 0.50, Anchor::Left, lw);
 
-    // Bottom pill buttons: [+ Add Task] and [Edit Task]
-    let btn_y = (bot - p.px(26.0)).max(top + p.px(88.0));
-    let btn_h = p.px(25.0);
+    // Vertically stacked pill buttons: [+ Add Task] on top, [Edit Task] below (uniform 116 x 26 dp, 6 dp gap).
+    let btn_h = p.px(26.0);
     let btn_gap = p.px(6.0);
-    let bw = (lw - btn_gap) / 2.0;
-    let th_btn = p.px(10.0) * 1.3;
+    let bw = lw;
+    let btn2_y = (bot - btn_h).max(top + p.px(110.0));
+    let btn1_y = btn2_y - btn_gap - btn_h;
+    let th_btn = p.px(10.5) * 1.3;
 
-    // + Add Task pill
+    // + Add Task pill (top)
     let n0 = kids(c);
-    p.rect(c, x0, btn_y, bw, btn_h, btn_h / 2.0, if d.todo_adding { white(36) } else { white(18) });
-    p.sym(c, Sym::Plus, x0 + p.px(13.0), btn_y + btn_h / 2.0, 10.5, WHITE, 0.95);
-    p.text(c, &p.fit(tr("Tambah Tugas"), 10.0, 600, bw - p.px(24.0)), x0 + p.px(22.0), btn_y + btn_h / 2.0 - th_btn / 2.0, 10.0, 600, WHITE, 0.94, Anchor::Left, bw - p.px(22.0));
-    regions.push(Region { x: x0, y: btn_y, w: bw, h: btn_h, action: Action::TodoAddOpen, vis: group_since(c, n0), hover_bg: None });
+    p.rect(c, x0, btn1_y, bw, btn_h, btn_h / 2.0, if d.todo_adding { white(36) } else { white(18) });
+    p.sym(c, Sym::Plus, x0 + p.px(15.0), btn1_y + btn_h / 2.0, 11.0, WHITE, 0.95);
+    p.text(c, &p.fit(tr("Tambah Tugas"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn1_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
+    regions.push(Region { x: x0, y: btn1_y, w: bw, h: btn_h, action: Action::TodoAddOpen, vis: group_since(c, n0), hover_bg: None });
 
-    // Edit Task pill
-    let ex = x0 + bw + btn_gap;
+    // Edit Task pill (bottom)
     let n1 = kids(c);
-    p.rect(c, ex, btn_y, bw, btn_h, btn_h / 2.0, if d.todo_editing { white(36) } else { white(18) });
-    p.sym(c, Sym::Pencil, ex + p.px(13.0), btn_y + btn_h / 2.0, 10.5, WHITE, 0.92);
-    p.text(c, &p.fit(tr("Edit Tugas"), 10.0, 600, bw - p.px(24.0)), ex + p.px(22.0), btn_y + btn_h / 2.0 - th_btn / 2.0, 10.0, 600, WHITE, 0.94, Anchor::Left, bw - p.px(22.0));
-    regions.push(Region { x: ex, y: btn_y, w: bw, h: btn_h, action: Action::TodoEditToggle, vis: group_since(c, n1), hover_bg: None });
+    p.rect(c, x0, btn2_y, bw, btn_h, btn_h / 2.0, if d.todo_editing { white(36) } else { white(18) });
+    p.sym(c, Sym::Pencil, x0 + p.px(15.0), btn2_y + btn_h / 2.0, 10.5, WHITE, 0.92);
+    p.text(c, &p.fit(tr("Edit Tugas"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn2_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
+    regions.push(Region { x: x0, y: btn2_y, w: bw, h: btn_h, action: Action::TodoEditToggle, vis: group_since(c, n1), hover_bg: None });
 
     // Right rounded #141416 checklist container
     let card_y = top + p.px(24.0);
@@ -1697,12 +1724,13 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
     let show_lyrics_layer = d.lyrics_open || lp > 0.01;
 
     // Contextual ambient glow: smoothly fades in/out in lockstep with `sp_lyrics`.
+    let mut lyrics_glow = None;
     if show_lyrics_layer {
         if let Some(m) = &d.media {
             let glow = accent_or(m.tint);
             if let Some(gv) = p.ambient_glow(c, bf.x0, 0.0, bf.w, full_h, 0.0, glow, false) {
                 let _ = gv.SetOpacity(lp);
-                live.lyrics_glow = Some(gv);
+                lyrics_glow = Some(gv);
             }
         }
     }
@@ -1719,8 +1747,8 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
         let lx = div_x + p.px(15.0);
         let lw = (bf.x0 + bf.w - pad - lx).max(p.px(80.0));
 
-        match &d.media {
-            Some(m) => music_column(p, c, mx, top, mw, h, m, d.lyrics_open, d.muted, d.scrub_hover, d.art_scale, regions, live),
+        let mc = match &d.media {
+            Some(m) => music_column(p, c, mx, top, mw, h, m, true, d.muted, d.scrub_hover, d.art_scale, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
                 p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
@@ -1729,9 +1757,11 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
                 let n0 = kids(c);
                 p.sym(c, Sym::Quote, qx, qy, 20.5, WHITE, if d.lyrics_open { 0.95 } else { 0.52 });
                 regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
+                None
             }
-        }
+        };
         // Gliding lyrics panel container: slides out from behind the music player (`-12 dp -> 0`) + opacity sync.
+        let mut lyrics_panel = None;
         if let Ok(panel) = p.comp.CreateContainerVisual() {
             let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
             let slide_x = -(1.0 - lp) * p.px(12.0);
@@ -1740,17 +1770,27 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
             let _ = c.Children().and_then(|k| k.InsertAtTop(&panel));
             p.divider_v(&panel, div_x, top + p.px(4.0), h - p.px(8.0));
             lyrics_slot(p, &panel, lx, top, lw, h, d, live, false);
-            live.lyrics_panel = Some(panel);
+            lyrics_panel = Some(panel);
         } else {
             p.divider_v(c, div_x, top + p.px(4.0), h - p.px(8.0));
             lyrics_slot(p, c, lx, top, lw, h, d, live, false);
+        }
+        if let Some((left_group, ctrl_groups)) = mc {
+            live.play_layout = Some(PlayLayoutLive {
+                base_mx: mx,
+                base_div_x: div_x,
+                left_group,
+                ctrl_groups,
+                lyrics_panel,
+                lyrics_glow,
+            });
         }
     } else {
         let bot = bf.h - p.px(DOTS_STRIP_DP + 2.0);
         let h = (bot - top).max(p.px(80.0));
         let mx = bf.x0 + pad + p.px(4.0);
         let mw = (bf.w - 2.0 * pad - p.px(8.0)).max(p.px(180.0));
-        match &d.media {
+        let mc = match &d.media {
             Some(m) => music_column(p, c, mx, top, mw, h, m, false, d.muted, d.scrub_hover, d.art_scale, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
@@ -1760,7 +1800,18 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
                 let n0 = kids(c);
                 p.sym(c, Sym::Quote, qx, qy, 21.0, WHITE, 0.48);
                 regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
+                None
             }
+        };
+        if let Some((left_group, ctrl_groups)) = mc {
+            live.play_layout = Some(PlayLayoutLive {
+                base_mx: mx,
+                base_div_x: mx + mw + p.px(14.0),
+                left_group,
+                ctrl_groups,
+                lyrics_panel: None,
+                lyrics_glow: None,
+            });
         }
     }
 }
