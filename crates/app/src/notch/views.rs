@@ -1678,7 +1678,15 @@ fn draw_gemini_response(
     scroll: usize,
 ) {
     if !error.is_empty() {
-        p.text(c, &p.fit(error, 11.5, 500, w), x, y + p.px(8.0), 11.5, 500, [255, 110, 100], 0.95, Anchor::Left, w + p.px(2.0));
+        let font = 11.5;
+        let line_h = p.px(font) * 1.38;
+        let max_lines = (h / line_h).floor().max(1.0) as usize;
+        let lines = nacre_core::notch::typeset::wrap(error, w - p.px(4.0), max_lines, |s| p.measure(s, font, 500));
+        let mut yy = y + p.px(4.0);
+        for line in lines.iter().take(max_lines) {
+            p.text(c, line, x, yy, font, 500, [255, 110, 100], 0.95, Anchor::Left, w + p.px(4.0));
+            yy += line_h;
+        }
         return;
     }
     if text.is_empty() {

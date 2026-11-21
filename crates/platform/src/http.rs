@@ -4,9 +4,10 @@ use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::{
     WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
     WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE, WINHTTP_FLAG_SECURE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, WINHTTP_PROTOCOL_FLAG_HTTP2, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_STATUS_CODE,
 };
 
 struct Handle(*mut c_void);
@@ -85,6 +86,12 @@ fn open_and_send(
             0,
         ))?;
         let _ = WinHttpSetTimeouts(session.0, 15_000, 15_000, 30_000, recv_timeout_ms);
+        let http2 = WINHTTP_PROTOCOL_FLAG_HTTP2.to_ne_bytes();
+        let _ = WinHttpSetOption(
+            Some(session.0),
+            WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL,
+            Some(&http2),
+        );
         let connect = Handle::new(WinHttpConnect(session.0, &host_h, parsed.port, 0))?;
         let flags = if parsed.https { WINHTTP_FLAG_SECURE } else { windows::Win32::Networking::WinHttp::WINHTTP_OPEN_REQUEST_FLAGS(0) };
         let req = Handle::new(WinHttpOpenRequest(
@@ -139,21 +146,31 @@ pub fn request(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> Result<(u16, String), String> {
-    let (_s, _c, req, status) = open_and_send(method, url, headers, body, 20_000)?;
+    request_with_timeout(method, url, headers, body, 25_000)
+}
+
+pub fn request_with_timeout(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    recv_timeout_ms: i32,
+) -> Result<(u16, String), String> {
+    let (_s, _c, req, status) = open_and_send(method, url, headers, body, recv_timeout_ms)?;
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
     unsafe {
         loop {
             let mut avail = 0u32;
             WinHttpQueryDataAvailable(req.0, &mut avail)
-                .map_err(|e| format!("WinHttpQueryDataAvailable: {e}"))?;
+                .map_err(|e| format_winhttp_err("WinHttpQueryDataAvailable", &e))?;
             if avail == 0 {
                 break;
             }
             let want = (avail as usize).min(buf.len()) as u32;
             let mut read = 0u32;
             WinHttpReadData(req.0, buf.as_mut_ptr() as *mut c_void, want, &mut read)
-                .map_err(|e| format!("WinHttpReadData: {e}"))?;
+                .map_err(|e| format_winhttp_err("WinHttpReadData", &e))?;
             if read == 0 {
                 break;
             }
@@ -166,10 +183,17 @@ pub fn request(
     Ok((status, String::from_utf8_lossy(&out).into_owned()))
 }
 
+const TIMEOUT_ERR_MSG: &str =
+    "Waktu habis (timeout) menunggu respons server. Coba lagi atau pilih model Flash.";
+
+pub fn is_timeout_err(msg: &str) -> bool {
+    msg == TIMEOUT_ERR_MSG || msg.contains("timeout") || msg.contains("0x80072EE2")
+}
+
 fn format_winhttp_err(stage: &str, e: &windows_core::Error) -> String {
     let code = e.code().0 as u32;
     if code == 0x8007_2EE2 || (code & 0xFFFF) == 12002 {
-        "Waktu habis (timeout) menunggu respons server. Coba lagi atau pilih model Flash.".into()
+        TIMEOUT_ERR_MSG.into()
     } else if code == 0x8007_2EE7 || (code & 0xFFFF) == 12007 {
         "Tidak dapat menjangkau server (periksa koneksi internet).".into()
     } else {
@@ -183,10 +207,20 @@ pub fn stream_post(
     headers: &[(&str, &str)],
     body: &[u8],
     cancel: &AtomicBool,
+    on_chunk: impl FnMut(&[u8]),
+) -> Result<u16, String> {
+    stream_post_with_timeout(url, headers, body, 25_000, cancel, on_chunk)
+}
+
+pub fn stream_post_with_timeout(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    recv_timeout_ms: i32,
+    cancel: &AtomicBool,
     mut on_chunk: impl FnMut(&[u8]),
 ) -> Result<u16, String> {
-    // Thinking/reasoning models (Gemini 3.5/3.6/4) can spend >60s before flushing first SSE bytes.
-    let (_s, _c, req, status) = open_and_send("POST", url, headers, Some(body), 180_000)?;
+    let (_s, _c, req, status) = open_and_send("POST", url, headers, Some(body), recv_timeout_ms)?;
     let mut buf = [0u8; 4096];
     unsafe {
         loop {
@@ -195,7 +229,7 @@ pub fn stream_post(
             }
             let mut avail = 0u32;
             WinHttpQueryDataAvailable(req.0, &mut avail)
-                .map_err(|e| format!("WinHttpQueryDataAvailable: {e}"))?;
+                .map_err(|e| format_winhttp_err("WinHttpQueryDataAvailable", &e))?;
             if avail == 0 {
                 break;
             }
@@ -205,7 +239,7 @@ pub fn stream_post(
             let want = (avail as usize).min(buf.len()) as u32;
             let mut read = 0u32;
             WinHttpReadData(req.0, buf.as_mut_ptr() as *mut c_void, want, &mut read)
-                .map_err(|e| format!("WinHttpReadData: {e}"))?;
+                .map_err(|e| format_winhttp_err("WinHttpReadData", &e))?;
             if read == 0 {
                 break;
             }

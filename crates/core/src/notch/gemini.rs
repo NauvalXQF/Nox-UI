@@ -131,14 +131,68 @@ fn model_sort_key(id: &str) -> (u32, u32, u8, u8) {
 pub fn build_request_body(prompt: &str) -> String {
     let mut out = String::from("{\"systemInstruction\":{\"parts\":[{\"text\":\"Be concise, clear, and helpful. Keep answers compact for a desktop HUD card.\"}]},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":");
     push_json_str(&mut out, prompt);
-    out.push_str("}]}]}");
+    out.push_str("}]}],\"generationConfig\":{\"maxOutputTokens\":2048}}");
     out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SsePiece {
     Text(String),
+    Thought,
     Error(String),
+}
+
+/// Extracts an API error message from either `{ "error": { "message": "..." } }`
+/// or an array-wrapped `[{ "error": { "message": "..." } }]` Gemini error body.
+pub fn parse_error_message(body: &str) -> Option<String> {
+    let root = json::parse(body.trim())?;
+    extract_error_from_json(&root)
+}
+
+fn extract_error_from_json(root: &Json) -> Option<String> {
+    if let Some(msg) = root
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Json::as_str)
+    {
+        return Some(msg.to_string());
+    }
+    if let Some(arr) = root.as_arr() {
+        for item in arr {
+            if let Some(msg) = item
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Json::as_str)
+            {
+                return Some(msg.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn collect_parts_from_response(root: &Json, text: &mut String, saw_thought: &mut bool) {
+    let Some(cands) = root.get("candidates").and_then(Json::as_arr) else {
+        return;
+    };
+    let Some(parts) = cands
+        .first()
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(Json::as_arr)
+    else {
+        return;
+    };
+    for p in parts {
+        // Skip internal reasoning/thought chunks emitted by Gemini 2.5/3/4 thinking models.
+        if p.get("thought").and_then(Json::as_bool) == Some(true) {
+            *saw_thought = true;
+            continue;
+        }
+        if let Some(t) = p.get("text").and_then(Json::as_str) {
+            text.push_str(t);
+        }
+    }
 }
 
 /// Parses one SSE `data: ...` payload from Gemini `streamGenerateContent?alt=sse`.
@@ -148,27 +202,55 @@ pub fn parse_sse_data(payload: &str) -> Option<SsePiece> {
         return None;
     }
     let root = json::parse(trimmed)?;
-    if let Some(err) = root.get("error").and_then(|e| e.get("message")).and_then(Json::as_str) {
-        return Some(SsePiece::Error(err.to_string()));
+    if let Some(err) = extract_error_from_json(&root) {
+        return Some(SsePiece::Error(err));
     }
-    let parts = root
-        .get("candidates")
-        .and_then(Json::as_arr)?
-        .first()?
-        .get("content")?
-        .get("parts")
-        .and_then(Json::as_arr)?;
     let mut text = String::new();
-    for p in parts {
-        // Skip internal reasoning/thought chunks emitted by Gemini 2.5/3/4 thinking models.
-        if p.get("thought").and_then(Json::as_bool) == Some(true) {
-            continue;
-        }
-        if let Some(t) = p.get("text").and_then(Json::as_str) {
-            text.push_str(t);
-        }
+    let mut saw_thought = false;
+    collect_parts_from_response(&root, &mut text, &mut saw_thought);
+    if !text.is_empty() {
+        Some(SsePiece::Text(text))
+    } else if saw_thought {
+        Some(SsePiece::Thought)
+    } else {
+        None
     }
-    (!text.is_empty()).then_some(SsePiece::Text(text))
+}
+
+/// Parses a complete JSON response from Gemini `:generateContent` (or an array of chunks).
+pub fn parse_generate_content_response(body: &str) -> Option<SsePiece> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let root = json::parse(trimmed)?;
+    if let Some(err) = extract_error_from_json(&root) {
+        return Some(SsePiece::Error(err));
+    }
+    let mut text = String::new();
+    let mut saw_thought = false;
+    if let Some(arr) = root.as_arr() {
+        for item in arr {
+            collect_parts_from_response(item, &mut text, &mut saw_thought);
+        }
+    } else {
+        collect_parts_from_response(&root, &mut text, &mut saw_thought);
+    }
+    if !text.is_empty() {
+        return Some(SsePiece::Text(text));
+    }
+    if let Some(reason) = root
+        .get("promptFeedback")
+        .and_then(|f| f.get("blockReason"))
+        .and_then(Json::as_str)
+    {
+        return Some(SsePiece::Error(format!("Diblokir oleh filter keamanan ({reason}).")));
+    }
+    if saw_thought {
+        Some(SsePiece::Thought)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -178,11 +260,37 @@ mod tests {
     #[test]
     fn builds_valid_json_and_parses_sse_delta() {
         let body = build_request_body("Halo \"Gemini\"\nbaris 2");
-        assert!(json::parse(&body).is_some());
+        let parsed = json::parse(&body).expect("valid request json");
+        assert!(parsed.get("generationConfig").is_some());
         let sse = r#"{"candidates":[{"content":{"parts":[{"text":"Halo! "},{"text":"Ada yang bisa dibantu?"}]}}]}"#;
         assert_eq!(parse_sse_data(sse), Some(SsePiece::Text("Halo! Ada yang bisa dibantu?".into())));
         let err = r#"{"error":{"code":400,"message":"API key not valid"}}"#;
         assert_eq!(parse_sse_data(err), Some(SsePiece::Error("API key not valid".into())));
+    }
+
+    #[test]
+    fn filters_thoughts_and_parses_generate_content_fallback() {
+        let thought_only = r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"internal reasoning"}]}}]}"#;
+        assert_eq!(parse_sse_data(thought_only), Some(SsePiece::Thought));
+
+        let mixed = r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan"},{"text":"Jawaban ringkas."}]}}]}"#;
+        assert_eq!(
+            parse_generate_content_response(mixed),
+            Some(SsePiece::Text("Jawaban ringkas.".into()))
+        );
+
+        let arr_err = r#"[{"error":{"code":503,"message":"Model overloaded"}}]"#;
+        assert_eq!(parse_error_message(arr_err), Some("Model overloaded".into()));
+        assert_eq!(
+            parse_generate_content_response(arr_err),
+            Some(SsePiece::Error("Model overloaded".into()))
+        );
+
+        let blocked = r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#;
+        assert_eq!(
+            parse_generate_content_response(blocked),
+            Some(SsePiece::Error("Diblokir oleh filter keamanan (SAFETY).".into()))
+        );
     }
 
     #[test]
