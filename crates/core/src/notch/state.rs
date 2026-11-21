@@ -1,16 +1,18 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Play,
+    Alerts,
     Shelf,
     Timer,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Play, Tab::Shelf, Tab::Timer];
+    pub const ALL: [Tab; 4] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Timer];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Play => "Putar",
+            Tab::Alerts => "Notifikasi",
             Tab::Shelf => "Rak",
             Tab::Timer => "Timer",
         }
@@ -64,6 +66,7 @@ pub fn step(mode: Mode, ev: Event, open_on: OpenOn, hovering: bool) -> Mode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
+    Notification,
     TimerEnding,
     Download,
     Player,
@@ -77,6 +80,7 @@ pub enum Activity {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Live {
+    pub notification: bool,
     pub media: bool,
     pub playing: bool,
     pub lyric_line: bool,
@@ -90,6 +94,9 @@ pub struct Live {
 }
 
 pub fn activity(l: &Live) -> Option<Activity> {
+    if l.notification {
+        return Some(Activity::Notification);
+    }
     if l.timer_left_s.is_some_and(|s| s <= 60) {
         return Some(Activity::TimerEnding);
     }
@@ -156,12 +163,13 @@ pub const PEEK_GROW: (f32, f32) = (16.0, 4.0);
 pub fn size(l: Look, dpi: f32) -> Size {
     let (mut w, mut h, mut r): (f32, f32, f32) = match l.view {
         View::Rest => (184.0, 30.0, 15.0),
+        View::Compact(Activity::Notification) => (360.0, 46.0, 20.0),
         View::Compact(Activity::Lyrics) => (420.0, 32.0, 16.0),
         View::Compact(Activity::Glance) => (220.0, 30.0, 15.0),
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
         View::Compact(_) => (292.0, 30.0, 15.0),
-        View::Open(Tab::Play) => (600.0, 214.0, 28.0),
+        View::Open(Tab::Play) | View::Open(Tab::Alerts) => (600.0, 214.0, 28.0),
         View::Open(_) => (600.0, 176.0, 28.0),
         View::Drop => (520.0, 120.0, 28.0),
     };
@@ -244,7 +252,8 @@ mod tests {
 
     #[test]
     fn activity_priority() {
-        let base = Live { media: true, playing: true, lyric_line: true, lyrics_on: true, timer_left_s: Some(30), charging_fresh: true, shelf: 2, glance: true, download: true, wide_music: false };
+        let base = Live { notification: false, media: true, playing: true, lyric_line: true, lyrics_on: true, timer_left_s: Some(30), charging_fresh: true, shelf: 2, glance: true, download: true, wide_music: false };
+        assert_eq!(activity(&Live { notification: true, ..base }), Some(Activity::Notification));
         assert_eq!(activity(&base), Some(Activity::TimerEnding));
         assert_eq!(activity(&Live { timer_left_s: Some(300), ..base }), Some(Activity::Download), "unduhan di atas lirik dan musik");
         let l = Live { timer_left_s: Some(300), download: false, ..base };

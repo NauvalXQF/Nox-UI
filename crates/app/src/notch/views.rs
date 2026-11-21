@@ -29,6 +29,9 @@ pub enum Action {
     TimerMinus,
     CalDay(i32),
     SendDone,
+    NotifFocus(u32),
+    NotifDismiss(u32),
+    NotifClearAll,
 }
 
 pub struct Region {
@@ -95,6 +98,21 @@ pub struct Data<'a> {
     pub send: Option<SendView<'a>>,
     pub send_zone: bool,
     pub pinned: bool,
+    pub notif_toast: Option<NotifRow<'a>>,
+    pub notif_list: Vec<NotifRow<'a>>,
+    pub notif_unread: usize,
+    pub notif_scroll: usize,
+    pub notif_status: nacre_platform::notifications::Status,
+}
+
+pub struct NotifRow<'a> {
+    pub id: u32,
+    pub app_name: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub time: String,
+    pub unread: bool,
+    pub icon: Option<&'a CompositionDrawingSurface>,
 }
 
 pub struct SendView<'a> {
@@ -275,6 +293,7 @@ fn card(p: &Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32) {
 pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
     match look.view {
         View::Rest => {}
+        View::Compact(Activity::Notification) => compact_notification(p, c, f, d, regions),
         View::Compact(Activity::Timer) | View::Compact(Activity::TimerEnding) => {
             let urgent = look.view == View::Compact(Activity::TimerEnding);
             compact_timer(p, c, f, d, urgent)
@@ -290,6 +309,7 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
             header(p, c, f, tab, d, regions);
             match tab {
                 Tab::Play => play(p, c, f, d, regions, live),
+                Tab::Alerts => alerts_tab(p, c, f, d, regions),
                 Tab::Shelf if d.send.is_some() => send_card(p, c, f, d, regions),
                 Tab::Shelf if d.shelf.is_empty() => shelf_empty(p, c, f),
                 Tab::Shelf => shelf_tab(p, c, f, d, regions),
@@ -319,6 +339,115 @@ pub(super) fn count_text(n: usize) -> String {
         format!("{n} {}", if n == 1 { "file" } else { "files" })
     } else {
         format!("{n} berkas")
+    }
+}
+
+fn compact_notification(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
+    let Some(n) = &d.notif_toast else { return };
+    let cy = f.h / 2.0;
+    let isz = p.px(28.0);
+    let ix = f.x0 + p.px(12.0);
+    match n.icon {
+        Some(s) => {
+            p.image(c, s, ix, cy - isz / 2.0, isz, isz, p.px(7.0));
+        }
+        None => {
+            let acc = crate::prefs::accent();
+            p.rect(c, ix, cy - isz / 2.0, isz, isz, p.px(7.0), Color { A: 220, R: acc[0], G: acc[1], B: acc[2] });
+            p.sym(c, Sym::Bell, ix + isz / 2.0, cy, 14.0, WHITE, 0.95);
+        }
+    }
+    let dx = f.x0 + f.w - p.px(20.0);
+    let tx = ix + isz + p.px(10.0);
+    let tw = (dx - p.px(14.0) - tx).max(p.px(40.0));
+    let head = if n.app_name.is_empty() || n.title.eq_ignore_ascii_case(n.app_name) {
+        n.title.to_string()
+    } else {
+        format!("{} \u{00B7} {}", n.app_name, n.title)
+    };
+    let top_y = if n.body.is_empty() { cy - p.px(8.0) } else { p.px(7.0) };
+    p.text(c, &p.fit(&head, 12.0, 700, tw), tx, top_y, 12.0, 700, WHITE, 0.98, Anchor::Left, tw + p.px(2.0));
+    if !n.body.is_empty() {
+        p.text(c, &p.fit(n.body, 11.0, 400, tw), tx, p.px(24.0), 11.0, 400, WHITE, 0.72, Anchor::Left, tw + p.px(2.0));
+    }
+    // Dismiss X button (registered BEFORE body hit region? No: regions searched front-to-back, so register dismiss first!)
+    let n0 = kids(c);
+    p.sym(c, Sym::Close, dx, cy, 9.5, WHITE, 0.6);
+    regions.push(Region { x: dx - p.px(12.0), y: cy - p.px(12.0), w: p.px(24.0), h: p.px(24.0), action: Action::NotifDismiss(n.id), vis: group_since(c, n0) });
+    regions.push(Region { x: f.x0, y: 0.0, w: dx - p.px(12.0) - f.x0, h: f.h, action: Action::NotifFocus(n.id), vis: None });
+}
+
+fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
+    use nacre_platform::notifications::Status;
+    let pad = p.px(14.0);
+    let (top, h) = (p.px(48.0), f.h - p.px(48.0) - pad);
+    let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
+    card(p, c, x0, top, w, h);
+
+    if d.notif_list.is_empty() {
+        let cx = x0 + w / 2.0;
+        let cy = top + h / 2.0;
+        p.sym(c, Sym::Bell, cx, cy - p.px(22.0), 22.0, WHITE, 0.38);
+        p.text(c, tr("Belum ada notifikasi"), cx, cy + p.px(2.0), 13.0, 600, WHITE, 0.85, Anchor::Center, w - p.px(24.0));
+        let sub = match d.notif_status {
+            Status::NeedsIdentity => tr("Jalankan packaging\\register-sparse.ps1 untuk membaca notifikasi Windows."),
+            Status::Denied => tr("Aktifkan izin notifikasi untuk ABRA di Pengaturan Privasi Windows."),
+            _ => tr("Notifikasi baru dari aplikasi Windows akan muncul di sini."),
+        };
+        p.text(c, &p.fit(sub, 11.0, 400, w - p.px(32.0)), cx, cy + p.px(22.0), 11.0, 400, WHITE, 0.5, Anchor::Center, w - p.px(28.0));
+        return;
+    }
+
+    let hdr = format!("{} {}", d.notif_list.len(), tr("Notifikasi"));
+    p.text(c, &hdr, x0 + p.px(14.0), top + p.px(9.0), 11.5, 600, WHITE, 0.55, Anchor::Left, w / 2.0);
+    let clear = tr("Kosongkan");
+    let cw = p.measure(clear, 11.5, 600) + p.px(4.0);
+    let accent = crate::prefs::accent();
+    p.text(c, clear, x0 + w - p.px(14.0), top + p.px(9.0), 11.5, 600, accent, 0.95, Anchor::Right, cw + 4.0);
+    regions.push(Region { x: x0 + w - p.px(14.0) - cw - p.px(6.0), y: top + p.px(2.0), w: cw + p.px(12.0), h: p.px(24.0), action: Action::NotifClearAll, vis: None });
+
+    let row_h = p.px(40.0);
+    let gap = p.px(4.0);
+    let list_top = top + p.px(30.0);
+    let max_rows = (((top + h - p.px(6.0)) - list_top) / (row_h + gap)).floor().max(1.0) as usize;
+    let start = d.notif_scroll.min(d.notif_list.len().saturating_sub(1));
+    let isz = p.px(24.0);
+    for (idx, n) in d.notif_list.iter().skip(start).take(max_rows).enumerate() {
+        let ry = list_top + idx as f32 * (row_h + gap);
+        let rx = x0 + p.px(10.0);
+        let rw = w - p.px(20.0);
+        let n0 = kids(c);
+        p.rect(c, rx, ry, rw, row_h, p.px(12.0), white(if n.unread { 22 } else { 12 }));
+        let ix = rx + p.px(9.0);
+        let icy = ry + row_h / 2.0;
+        match n.icon {
+            Some(s) => {
+                p.image(c, s, ix, icy - isz / 2.0, isz, isz, p.px(6.0));
+            }
+            None => {
+                p.rect(c, ix, icy - isz / 2.0, isz, isz, p.px(6.0), Color { A: 200, R: accent[0], G: accent[1], B: accent[2] });
+                p.sym(c, Sym::Bell, ix + isz / 2.0, icy, 12.0, WHITE, 0.95);
+            }
+        }
+        let close_cx = rx + rw - p.px(16.0);
+        let time_x = close_cx - p.px(14.0);
+        let tx = ix + isz + p.px(10.0);
+        let tw = (time_x - p.px(34.0) - tx).max(p.px(40.0));
+        let head = if n.app_name.is_empty() || n.title.eq_ignore_ascii_case(n.app_name) {
+            n.title.to_string()
+        } else {
+            format!("{} \u{00B7} {}", n.app_name, n.title)
+        };
+        p.text(c, &p.fit(&head, 12.0, 600, tw), tx, ry + p.px(5.0), 12.0, 600, WHITE, 0.96, Anchor::Left, tw + p.px(2.0));
+        if !n.body.is_empty() {
+            p.text(c, &p.fit(n.body, 11.0, 400, tw), tx, ry + p.px(21.0), 11.0, 400, WHITE, 0.62, Anchor::Left, tw + p.px(2.0));
+        }
+        p.text(c, &n.time, time_x, ry + p.px(6.0), 10.0, 500, WHITE, 0.48, Anchor::Right, p.px(38.0));
+        let row_vis = group_since(c, n0);
+        let c0 = kids(c);
+        p.sym(c, Sym::Close, close_cx, icy, 9.0, WHITE, 0.52);
+        regions.push(Region { x: close_cx - p.px(12.0), y: ry, w: p.px(24.0), h: row_h, action: Action::NotifDismiss(n.id), vis: group_since(c, c0) });
+        regions.push(Region { x: rx, y: ry, w: close_cx - p.px(12.0) - rx, h: row_h, action: Action::NotifFocus(n.id), vis: row_vis });
     }
 }
 
@@ -766,6 +895,11 @@ fn header(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, re
             p.rect(c, sx, cy - bh / 2.0 + pad, *w, bh - 2.0 * pad, (bh - 2.0 * pad) / 2.0, white(236));
         }
         p.text(c, tr(t.title()), sx + w / 2.0, cy - th / 2.0, 12.5, 600, if on { INK } else { WHITE }, if on { 1.0 } else { 0.78 }, Anchor::Center, *w);
+        if *t == Tab::Alerts && d.notif_unread > 0 {
+            let dot = p.px(5.5);
+            let acc = crate::prefs::accent();
+            p.rect(c, sx + *w - p.px(10.0), cy - p.px(7.0), dot, dot, dot / 2.0, Color { A: 255, R: acc[0], G: acc[1], B: acc[2] });
+        }
         regions.push(Region { x: sx, y: cy - bh / 2.0 - pad, w: *w, h: bh + 2.0 * pad, action: Action::Tab(*t), vis: group_since(c, n0) });
         sx += w;
     }

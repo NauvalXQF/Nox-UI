@@ -385,6 +385,18 @@ const EN: &[(&str, &str)] = &[
     ("Salin ke folder", "Copy to folder"),
     ("Jeda hover Auto-hide", "Auto-hide hover delay"),
     ("Intip otomatis saat notifikasi masuk", "Auto-peek on incoming notifications"),
+    ("Notifikasi", "Alerts"),
+    ("Notifikasi Sistem", "System Notifications"),
+    ("Tampilkan notifikasi Windows di Visor", "Mirror Windows notifications in Visor"),
+    ("Izin notifikasi Windows", "Windows notification access"),
+    ("Butuh Paket Identitas", "Needs Package Identity"),
+    ("Ditolak", "Denied"),
+    ("Tidak didukung", "Unsupported"),
+    ("Belum ada notifikasi", "No notifications yet"),
+    ("Notifikasi baru dari aplikasi Windows akan muncul di sini.", "Incoming Windows notifications will appear here."),
+    ("Jalankan packaging\\register-sparse.ps1 untuk membaca notifikasi Windows.", "Run packaging\\register-sparse.ps1 to mirror Windows notifications."),
+    ("Aktifkan izin notifikasi untuk ABRA di Pengaturan Privasi Windows.", "Enable notification access for ABRA in Windows Privacy Settings."),
+    ("Timer selesai", "Timer finished"),
 ];
 
 pub fn is_known(src: &str) -> bool {

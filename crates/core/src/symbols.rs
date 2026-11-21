@@ -45,6 +45,8 @@ pub enum Sym {
     Check,
     ArrowUp,
     Pin,
+    Bell,
+    Close,
 }
 
 pub fn for_command(id: usize) -> Option<Sym> {
@@ -339,6 +341,18 @@ fn shape(sym: Sym, p: P) -> bool {
             let needle = line(p, (0.50, 0.54), (0.50, 0.88), 0.075) <= 0.0;
             head || body || bar || needle
         }
+        Sym::Bell => {
+            let dome = circle(p, (0.50, 0.42), 0.24) <= 0.0 && p.1 <= 0.54;
+            let skirt = poly(p, &[(0.26, 0.42), (0.74, 0.42), (0.82, 0.72), (0.18, 0.72)]) <= 0.0;
+            let rim = line(p, (0.18, 0.72), (0.82, 0.72), 0.075) <= 0.0;
+            let clapper = circle(p, (0.50, 0.84), 0.085) <= 0.0;
+            let top = circle(p, (0.50, 0.16), 0.06) <= 0.0;
+            dome || skirt || rim || clapper || top
+        }
+        Sym::Close => {
+            let w = 0.095;
+            line(p, (0.26, 0.26), (0.74, 0.74), w) <= 0.0 || line(p, (0.74, 0.26), (0.26, 0.74), w) <= 0.0
+        }
     }
 }
 
@@ -385,7 +399,7 @@ mod tests {
     fn menu_symbols_draw_and_command_map() {
         assert_eq!(for_command(111), Some(Sym::Restart));
         assert_eq!(for_command(999), None);
-        for s in [Sym::Info, Sym::Gear, Sym::Bag, Sym::Grid, Sym::Windows, Sym::XCircle, Sym::Moon, Sym::Restart, Sym::Power, Sym::Lock, Sym::EyeSlash, Sym::Speaker, Sym::SpeakerWave, Sym::SpeakerLow, Sym::SpeakerMid, Sym::SpeakerMute, Sym::Sun, Sym::SunSmall, Sym::Bluetooth, Sym::Play, Sym::Pause, Sym::Backward, Sym::Forward, Sym::Plus, Sym::Minus, Sym::Calendar, Sym::Note, Sym::Stopwatch, Sym::Clock, Sym::Tray, Sym::Folder, Sym::Wifi1, Sym::Wifi2, Sym::ChevronRight, Sym::ChevronDown, Sym::Headphones, Sym::Keyboard, Sym::Mouse, Sym::ArrowDown, Sym::Check, Sym::ArrowUp, Sym::Pin] {
+        for s in [Sym::Info, Sym::Gear, Sym::Bag, Sym::Grid, Sym::Windows, Sym::XCircle, Sym::Moon, Sym::Restart, Sym::Power, Sym::Lock, Sym::EyeSlash, Sym::Speaker, Sym::SpeakerWave, Sym::SpeakerLow, Sym::SpeakerMid, Sym::SpeakerMute, Sym::Sun, Sym::SunSmall, Sym::Bluetooth, Sym::Play, Sym::Pause, Sym::Backward, Sym::Forward, Sym::Plus, Sym::Minus, Sym::Calendar, Sym::Note, Sym::Stopwatch, Sym::Clock, Sym::Tray, Sym::Folder, Sym::Wifi1, Sym::Wifi2, Sym::ChevronRight, Sym::ChevronDown, Sym::Headphones, Sym::Keyboard, Sym::Mouse, Sym::ArrowDown, Sym::Check, Sym::ArrowUp, Sym::Pin, Sym::Bell, Sym::Close] {
             let b = render(s, 40, [255, 255, 255]);
             let filled = b.chunks_exact(4).filter(|p| p[3] > 128).count();
             assert!(filled > 40 && filled < 40 * 40 * 3 / 4, "{s:?} terisi {filled}");

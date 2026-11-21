@@ -63,6 +63,7 @@ const WM_PRIVACY: u32 = WM_APP + 25;
 const WM_RECONF: u32 = WM_APP + 26;
 const WM_ICON: u32 = WM_APP + 27;
 const WM_START_DRAGOUT: u32 = WM_APP + 28;
+const WM_NOTIF: u32 = WM_APP + 29;
 
 const T_DWELL: usize = 1;
 const T_LEAVE: usize = 2;
@@ -83,6 +84,8 @@ const T_DLDONE: usize = 18;
 const T_SEND: usize = 19;
 const T_SENDDONE: usize = 20;
 const T_TESTSEND: usize = 21;
+const T_NOTIF_TOAST: usize = 22;
+const NOTIF_TOAST_MS: u32 = 4500;
 const SEND_IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 struct SendSess {
@@ -114,6 +117,7 @@ enum Deferred {
     GfxReset,
     Privacy,
     Icon,
+    Notif,
 }
 
 thread_local! {
@@ -205,6 +209,7 @@ fn drain_deferred(hwnd: HWND) {
             Deferred::GfxReset => d.on_gfx_reset(),
             Deferred::Privacy => d.on_privacy(),
             Deferred::Icon => d.on_icon(),
+            Deferred::Notif => d.on_notif(),
         }
     }
 }
@@ -358,6 +363,13 @@ pub struct Notch {
     menu_item: Option<usize>,
     privacy: (bool, bool),
     privacy_mon: Option<privacy::Monitor>,
+    notif_mon: Option<nacre_platform::notifications::Notifications>,
+    notifs: nacre_core::notch::notif::NotifStore,
+    notif_status: nacre_platform::notifications::Status,
+    toast_id: Option<u32>,
+    notif_peeking: bool,
+    alerts_scroll: usize,
+    internal_notif_id: u32,
     dl_watch: Option<nacre_platform::dlwatch::Watch>,
     dl: Option<nacre_core::notch::download::Download>,
     dl_done: Option<nacre_core::notch::download::Download>,
@@ -508,6 +520,13 @@ impl Notch {
                 menu_item: None,
                 privacy: (false, false),
                 privacy_mon,
+                notif_mon: None,
+                notifs: nacre_core::notch::notif::NotifStore::new(24),
+                notif_status: nacre_platform::notifications::status(),
+                toast_id: None,
+                notif_peeking: false,
+                alerts_scroll: 0,
+                internal_notif_id: 800_000,
                 dl_watch: None,
                 dl: None,
                 dl_done: None,
@@ -554,6 +573,7 @@ impl Notch {
                 d.publish_notch();
                 d.update_visibility();
                 d.sync_download_watch();
+                d.sync_notif_watch();
             });
             crate::prefs::listen(hwnd);
             if std::env::var_os("NACRE_TEST_SEND").is_some() {
@@ -704,6 +724,7 @@ impl Notch {
     fn live(&self) -> Live {
         let running = self.timer.phase == Phase::Running;
         Live {
+            notification: crate::prefs::get().notch_notifs && self.toast_id.is_some_and(|id| self.notifs.get(id).is_some()),
             media: self.has_media,
             playing: self.playing,
             lyric_line: self.lyr.as_ref().is_some_and(|l| l.synced),
@@ -866,7 +887,9 @@ impl Notch {
                     }
                 }
                 IconKind::MediaApp => {
-                    let cur = resp.key == self.media_app && self.art.is_none();
+                    let cur = (resp.key == self.media_app && self.art.is_none())
+                        || self.mode == Mode::Open(Tab::Alerts)
+                        || self.look.view == View::Compact(state::Activity::Notification);
                     self.app_icons.insert(resp.key, surf);
                     if cur {
                         need_render = true;
@@ -892,6 +915,85 @@ impl Notch {
         }
         let px = (48.0 * self.dpi).round() as i32;
         self.request_icon(IconKind::MediaApp, id, px);
+    }
+
+    fn sync_notif_watch(&mut self) {
+        let on = crate::prefs::get().notch_notifs;
+        if on && self.notif_mon.is_none() {
+            let hw = self.hwnd.0 as isize;
+            self.notif_mon = Some(nacre_platform::notifications::spawn(move || post(hw, WM_NOTIF)));
+        } else if !on && self.notif_mon.is_some() {
+            self.notif_mon = None;
+            self.toast_id = None;
+            self.notif_peeking = false;
+            kill(self.hwnd, T_NOTIF_TOAST);
+        }
+    }
+
+    fn push_notification(&mut self, notif: nacre_core::notch::notif::Notification) {
+        let aumid = notif.aumid.clone();
+        let id = notif.id;
+        let is_new = self.notifs.push(notif);
+        if !aumid.is_empty() && !self.app_icons.contains_key(&aumid) {
+            let px = (48.0 * self.dpi).round() as i32;
+            self.request_icon(IconKind::MediaApp, aumid, px);
+        }
+        if is_new && crate::prefs::get().notch_notifs {
+            self.toast_id = Some(id);
+            timer(self.hwnd, T_NOTIF_TOAST, NOTIF_TOAST_MS);
+            if crate::prefs::get().notch_notif_peek && !self.overlap.fullscreen {
+                self.notif_peeking = true;
+            }
+        }
+    }
+
+    fn on_notif(&mut self) {
+        let Some(mon) = &self.notif_mon else { return };
+        let mut events = Vec::new();
+        while let Ok(ev) = mon.events.try_recv() {
+            events.push(ev);
+        }
+        if events.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for ev in events {
+            match ev {
+                nacre_platform::notifications::Event::Status(st) => {
+                    self.notif_status = st;
+                    if self.mode == Mode::Open(Tab::Alerts) {
+                        changed = true;
+                    }
+                }
+                nacre_platform::notifications::Event::Arrived(raw) => {
+                    self.push_notification(nacre_core::notch::notif::Notification {
+                        id: raw.id,
+                        app_name: raw.app_name,
+                        aumid: raw.aumid,
+                        title: raw.title,
+                        body: raw.body,
+                        timestamp_s: raw.timestamp_s,
+                        read: self.mode == Mode::Open(Tab::Alerts),
+                    });
+                    changed = true;
+                }
+                nacre_platform::notifications::Event::Removed(id) => {
+                    if self.notifs.dismiss(id) {
+                        changed = true;
+                    }
+                    if self.toast_id == Some(id) {
+                        self.toast_id = None;
+                        self.notif_peeking = false;
+                        kill(self.hwnd, T_NOTIF_TOAST);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.refresh();
+            self.update_visibility();
+        }
     }
 
     fn sync_download_watch(&mut self) {
@@ -1162,6 +1264,14 @@ impl Notch {
         let lyrics = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms, lrclib: self.lyr_lrclib };
         let shelf = self.shelf.items().iter().map(|i| (i.name(), self.shelf_icons.get(&i.path))).collect();
         let drop_count = if self.mode == Mode::Drop { self.dnd.borrow().len() } else { 0 };
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
+        let app_icons = &self.app_icons;
+        let notif_toast = self.toast_id.and_then(|id| self.notifs.get(id)).map(|n| notif_row(n, app_icons, now_unix, en));
+        let notif_list: Vec<views::NotifRow> = self.notifs.items().iter().map(|n| notif_row(n, app_icons, now_unix, en)).collect();
         let d = Data {
             battery: self.battery,
             timer: &self.timer,
@@ -1178,6 +1288,11 @@ impl Notch {
             send,
             send_zone: crate::prefs::get().notch_send,
             pinned: self.pinned,
+            notif_toast,
+            notif_list,
+            notif_unread: self.notifs.unread_count(),
+            notif_scroll: self.alerts_scroll,
+            notif_status: self.notif_status,
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
         if let Some(r) = self.hover_act.and_then(|a| self.regions.iter().find(|r| r.action == a)) {
@@ -1710,8 +1825,11 @@ impl Notch {
         self.update_visibility();
     }
 
-    fn on_media_button(&self, x: f32, y: f32) -> bool {
-        self.look.view == View::Compact(state::Activity::Player) && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::PlayPause | Action::Next | Action::Prev))
+    fn on_compact_action(&self, x: f32, y: f32) -> bool {
+        (self.look.view == View::Compact(state::Activity::Player)
+            && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::PlayPause | Action::Next | Action::Prev)))
+            || (self.look.view == View::Compact(state::Activity::Notification)
+                && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::NotifFocus(_) | Action::NotifDismiss(_))))
     }
 
     fn cursor_on_media_button(&self) -> bool {
@@ -1722,11 +1840,11 @@ impl Notch {
             }
             let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut pt);
         }
-        self.on_media_button(pt.x as f32, pt.y as f32 - self.sp_y.pos)
+        self.on_compact_action(pt.x as f32, pt.y as f32 - self.sp_y.pos)
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
-        if !matches!(self.mode, Mode::Open(_)) && !self.on_media_button(x, y) {
+        if !matches!(self.mode, Mode::Open(_)) && !self.on_compact_action(x, y) {
             kill(self.hwnd, T_DWELL);
             self.dispatch(Event::Click);
             return;
@@ -1755,7 +1873,13 @@ impl Notch {
                 self.save_shelf();
                 self.refresh();
             }
-            Action::Tab(t) => self.dispatch(Event::SelectTab(t)),
+            Action::Tab(t) => {
+                if t == Tab::Alerts {
+                    self.notifs.mark_all_read();
+                    self.alerts_scroll = 0;
+                }
+                self.dispatch(Event::SelectTab(t));
+            }
             Action::Pin => {
                 self.pinned = !self.pinned;
                 self.render();
@@ -1789,14 +1913,72 @@ impl Notch {
                 self.cal_sel = (self.cal_sel + n).clamp(-3650, 3650);
                 self.render();
             }
+            Action::NotifFocus(id) => {
+                let target = self.notifs.get(id).map(|n| (n.aumid.clone(), n.app_name.clone()));
+                self.notifs.mark_read(id);
+                if self.toast_id == Some(id) {
+                    self.toast_id = None;
+                    self.notif_peeking = false;
+                    kill(self.hwnd, T_NOTIF_TOAST);
+                }
+                if matches!(self.mode, Mode::Open(_)) && !self.pinned {
+                    self.dispatch(Event::Leave);
+                } else {
+                    self.refresh();
+                    self.update_visibility();
+                }
+                if let Some((aumid, app_name)) = target {
+                    if !aumid.is_empty() || !app_name.is_empty() {
+                        let ok = nacre_platform::wins::focus::focus_app_by_identity(&aumid, &app_name);
+                        log::line("notif", &format!("fokus app={app_name} aumid={aumid} ok={ok}"));
+                    }
+                }
+            }
+            Action::NotifDismiss(id) => {
+                self.notifs.dismiss(id);
+                if self.toast_id == Some(id) {
+                    self.toast_id = None;
+                    self.notif_peeking = false;
+                    kill(self.hwnd, T_NOTIF_TOAST);
+                }
+                self.alerts_scroll = self.alerts_scroll.min(self.notifs.len().saturating_sub(1));
+                self.refresh();
+                self.update_visibility();
+            }
+            Action::NotifClearAll => {
+                self.notifs.clear();
+                self.toast_id = None;
+                self.notif_peeking = false;
+                self.alerts_scroll = 0;
+                kill(self.hwnd, T_NOTIF_TOAST);
+                self.refresh();
+                self.update_visibility();
+            }
         }
     }
 
     fn on_wheel(&mut self, delta: i16) {
+        if self.mode == Mode::Open(Tab::Alerts) && self.notifs.len() > 3 {
+            let max_scroll = self.notifs.len().saturating_sub(3);
+            let next = if delta < 0 {
+                (self.alerts_scroll + 1).min(max_scroll)
+            } else {
+                self.alerts_scroll.saturating_sub(1)
+            };
+            if next != self.alerts_scroll {
+                self.alerts_scroll = next;
+                self.render();
+                return;
+            }
+        }
         if let Mode::Open(cur) = self.mode {
             let i = Tab::ALL.iter().position(|t| *t == cur).unwrap_or(0) as i32;
             let n = Tab::ALL.len() as i32;
             let next = Tab::ALL[(i + if delta > 0 { -1 } else { 1 }).rem_euclid(n) as usize];
+            if next == Tab::Alerts {
+                self.notifs.mark_all_read();
+                self.alerts_scroll = 0;
+            }
             self.dispatch(Event::SelectTab(next));
         }
     }
@@ -1820,6 +2002,24 @@ impl Notch {
         if finished {
             log::line("notch", "timer selesai");
             self.sync_tick();
+            if crate::prefs::get().notch_notifs {
+                self.internal_notif_id = self.internal_notif_id.wrapping_add(1);
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                self.push_notification(nacre_core::notch::notif::Notification {
+                    id: self.internal_notif_id,
+                    app_name: "ABRA".into(),
+                    aumid: String::new(),
+                    title: crate::prefs::tr("Timer selesai").into(),
+                    body: String::new(),
+                    timestamp_s: ts,
+                    read: false,
+                });
+                self.refresh();
+                self.update_visibility();
+            }
         }
     }
 
@@ -1886,7 +2086,7 @@ impl Notch {
             edge_armed: self.edge_armed,
             starting: self.starting,
             fullscreen: self.overlap.fullscreen,
-            revealing: false,
+            revealing: self.notif_peeking,
         };
         let hide = self.off || should_hide(self.vis, &inputs);
         if let Some(s) = &self.strip {
@@ -1963,6 +2163,7 @@ impl Notch {
         self.update_visibility();
         self.publish_notch();
         self.sync_download_watch();
+        self.sync_notif_watch();
         let look = self.look;
         self.apply_size(Some(SpringParams::swap()));
         self.transition(look);
@@ -2106,6 +2307,12 @@ impl Notch {
                 self.dl_done = None;
                 self.refresh();
             }
+            T_NOTIF_TOAST => {
+                self.toast_id = None;
+                self.notif_peeking = false;
+                self.refresh();
+                self.update_visibility();
+            }
             T_PROGRESS => {
                 if self.mode == Mode::Open(Tab::Play) {
                     self.update_scrub_in_place();
@@ -2121,6 +2328,23 @@ impl Notch {
             }
             _ => {}
         }
+    }
+}
+
+fn notif_row<'a>(
+    n: &'a nacre_core::notch::notif::Notification,
+    app_icons: &'a std::collections::HashMap<String, Option<CompositionDrawingSurface>>,
+    now_unix: i64,
+    en: bool,
+) -> views::NotifRow<'a> {
+    views::NotifRow {
+        id: n.id,
+        app_name: &n.app_name,
+        title: &n.title,
+        body: &n.body,
+        time: nacre_core::notch::notif::relative_time(now_unix, n.timestamp_s, en),
+        unread: !n.read,
+        icon: app_icons.get(&n.aumid).and_then(|s| s.as_ref()),
     }
 }
 
@@ -2258,6 +2482,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_ICON => {
             if with(hwnd, |d| d.on_icon()).is_none() {
                 defer(Deferred::Icon);
+            }
+            LRESULT(0)
+        }
+        WM_NOTIF => {
+            if with(hwnd, |d| d.on_notif()).is_none() {
+                defer(Deferred::Notif);
             }
             LRESULT(0)
         }

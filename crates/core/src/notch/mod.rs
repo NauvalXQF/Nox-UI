@@ -5,6 +5,7 @@ pub mod input;
 pub mod json;
 pub mod lrclib;
 pub mod lyrics;
+pub mod notif;
 pub mod shade;
 pub mod shelf;
 pub mod spring;

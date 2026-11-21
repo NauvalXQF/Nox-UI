@@ -20,6 +20,7 @@ pub mod media;
 pub mod menus;
 pub mod media_fake;
 pub mod log;
+pub mod notifications;
 pub mod osd;
 pub mod pick;
 pub mod privacy;

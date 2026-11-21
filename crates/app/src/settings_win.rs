@@ -83,6 +83,8 @@ enum Action {
     NotchDownloads,
     NotchSend,
     NotchNotifPeek,
+    NotchNotifs,
+    NotifSetup,
     LyricsOnline,
     LyricsDir,
     Donate,
@@ -743,6 +745,22 @@ impl Win {
                     RowDef::Slider(prefs::tr("Jeda hover Auto-hide"), s.notch_autohide_delay, 8),
                     RowDef::Toggle(prefs::tr("Intip otomatis saat notifikasi masuk"), s.notch_notif_peek, Action::NotchNotifPeek),
                 ],
+            ), (
+                Some(prefs::tr("Notifikasi Sistem")),
+                {
+                    use nacre_platform::notifications::{status, Status};
+                    let st = match status() {
+                        Status::Connected => prefs::tr("Tersambung"),
+                        Status::NeedsIdentity => prefs::tr("Butuh Paket Identitas"),
+                        Status::Denied => prefs::tr("Ditolak"),
+                        Status::Unsupported => prefs::tr("Tidak didukung"),
+                        Status::Connecting => prefs::tr("Menyambung…"),
+                    };
+                    vec![
+                        RowDef::Toggle(prefs::tr("Tampilkan notifikasi Windows di Visor"), s.notch_notifs, Action::NotchNotifs),
+                        RowDef::Pick(prefs::tr("Izin notifikasi Windows"), st.to_string(), Action::NotifSetup),
+                    ]
+                },
             ), (
                 Some(prefs::tr("Saat Visor diam")),
                 {
@@ -1446,6 +1464,24 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::NotchDownloads) => prefs::update(|s| s.notch_downloads = !s.notch_downloads),
                 Some(Action::NotchSend) => prefs::update(|s| s.notch_send = !s.notch_send),
                 Some(Action::NotchNotifPeek) => prefs::update(|s| s.notch_notif_peek = !s.notch_notif_peek),
+                Some(Action::NotchNotifs) => prefs::update(|s| s.notch_notifs = !s.notch_notifs),
+                Some(Action::NotifSetup) => {
+                    use nacre_platform::notifications::{status, Status};
+                    match status() {
+                        Status::NeedsIdentity => {
+                            let dir = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().and_then(|d| d.parent()).and_then(|d| d.parent()).map(|r| r.join("packaging")))
+                                .filter(|p| p.exists());
+                            if let Some(p) = dir {
+                                nacre_platform::launch::open(&p.to_string_lossy());
+                            } else {
+                                nacre_platform::launch::open("ms-settings:privacy-notifications");
+                            }
+                        }
+                        _ => nacre_platform::launch::open("ms-settings:privacy-notifications"),
+                    }
+                }
                 Some(Action::LyricsOnline) => prefs::update(|s| s.lyrics_online = !s.lyrics_online),
                 Some(Action::Donate) => nacre_platform::launch::open(DONATE_URL),
                 Some(Action::MenuLogoPick) => {
