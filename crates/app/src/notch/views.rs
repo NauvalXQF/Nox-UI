@@ -111,6 +111,9 @@ pub struct Data<'a> {
     pub hovered: bool,
     pub nav_expanded: bool,
     pub nav_progress: f32,
+    pub prev_tab: Option<Tab>,
+    pub scrub_hover: f32,
+    pub art_scale: f32,
     pub shelf: Vec<(&'a str, Option<&'a CompositionDrawingSurface>)>,
     pub drop_zone: Option<usize>,
     pub drop_count: usize,
@@ -222,8 +225,10 @@ pub struct ScrubLive {
     pub sx: f32,
     pub sw: f32,
     pub sy: f32,
-    pub th: f32,
+    pub base_th: f32,
     pub dur_ms: i64,
+    pub track: SpriteVisual,
+    pub track_geo: CompositionRoundedRectangleGeometry,
     pub fill: SpriteVisual,
     pub fill_geo: CompositionRoundedRectangleGeometry,
     pub knob: SpriteVisual,
@@ -235,23 +240,37 @@ pub struct ScrubLive {
 }
 
 impl ScrubLive {
-    pub fn update(&mut self, p: &mut Painter, frac: f32, dragging: bool, pos_ms: i64) {
+    pub fn update(&mut self, p: &mut Painter, frac: f32, hover_t: f32, dragging: bool, pos_ms: i64) {
         let fr = frac.clamp(0.0, 1.0);
-        let fw = (self.sw * fr).max(self.th);
-        let _ = self.fill.SetSize(Vector2 { X: fw, Y: self.th });
-        let _ = self.fill_geo.SetSize(Vector2 { X: fw, Y: self.th });
+        let ht = if dragging { 1.0 } else { hover_t.clamp(0.0, 1.0) };
+        let th = self.base_th + p.px(1.5) * ht;
+        let ty = (self.sy - th / 2.0).round();
 
+        let _ = self.track.SetSize(Vector2 { X: self.sw, Y: th });
+        let _ = self.track.SetOffset(Vector3 { X: self.sx, Y: ty, Z: 0.0 });
+        let _ = self.track_geo.SetSize(Vector2 { X: self.sw, Y: th });
+        let _ = self.track_geo.SetCornerRadius(Vector2 { X: th / 2.0, Y: th / 2.0 });
+
+        let fw = (self.sw * fr).max(th);
+        let _ = self.fill.SetSize(Vector2 { X: fw, Y: th });
+        let _ = self.fill.SetOffset(Vector3 { X: self.sx, Y: ty, Z: 0.0 });
+        let _ = self.fill_geo.SetSize(Vector2 { X: fw, Y: th });
+        let _ = self.fill_geo.SetCornerRadius(Vector2 { X: th / 2.0, Y: th / 2.0 });
+
+        // Clean flush bar while idle (matching Nusa); circular thumb blooms smoothly on hover/drag.
         let kx = self.sx + self.sw * fr;
-        let (kw, kh, alpha) = if dragging {
-            (p.px(12.0), p.px(12.0), 255u8)
+        let k_size = if dragging {
+            p.px(13.0)
         } else {
-            (p.px(7.5), p.px(7.5), 240u8)
+            (p.px(10.0) * ht).max(0.5)
         };
-        let _ = self.knob.SetSize(Vector2 { X: kw, Y: kh });
-        let _ = self.knob.SetOffset(Vector3 { X: (kx - kw / 2.0).round(), Y: (self.sy - kh / 2.0).round(), Z: 0.0 });
-        let _ = self.knob_geo.SetSize(Vector2 { X: kw, Y: kh });
-        let _ = self.knob_geo.SetCornerRadius(Vector2 { X: kh / 2.0, Y: kh / 2.0 });
-        let _ = self.knob_brush.SetColor(white(alpha));
+        let k_op = if dragging { 1.0 } else { ht };
+        let _ = self.knob.SetSize(Vector2 { X: k_size, Y: k_size });
+        let _ = self.knob.SetOffset(Vector3 { X: (kx - k_size / 2.0).round(), Y: (self.sy - k_size / 2.0).round(), Z: 0.0 });
+        let _ = self.knob.SetOpacity(k_op);
+        let _ = self.knob_geo.SetSize(Vector2 { X: k_size, Y: k_size });
+        let _ = self.knob_geo.SetCornerRadius(Vector2 { X: k_size / 2.0, Y: k_size / 2.0 });
+        let _ = self.knob_brush.SetColor(white(if dragging { 255 } else { 248 }));
 
         let sec = (pos_ms.max(0) + 500) / 1000;
         if sec != self.last_pos_sec {
@@ -408,6 +427,9 @@ pub struct Live {
     pub nav: Option<NavLive>,
     pub pin_vis: Option<ContainerVisual>,
     pub chevrons_vis: Option<ContainerVisual>,
+    pub chev_left_slide: Option<ContainerVisual>,
+    pub chev_right_slide: Option<ContainerVisual>,
+    pub album_art: Option<ContainerVisual>,
 }
 
 const ORANGE: [u8; 3] = [255, 159, 10];
@@ -417,7 +439,7 @@ const RED: [u8; 3] = [255, 59, 48];
 const CARD_DARK: Color = Color { A: 255, R: 20, G: 20, B: 22 }; // #141416
 
 const DOTS_STRIP_DP: f32 = 22.0;
-const EDGE_PAD_DP: f32 = 22.0;
+const EDGE_PAD_DP: f32 = 18.0;
 
 fn base_height(p: &Painter, f: Frame, tab: Tab, d: &Data) -> f32 {
     if d.nav_expanded && nacre_core::notch::state::nav_state(tab, d.lyrics_open, true) == NavState::Pill {
@@ -589,43 +611,53 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
     }
 }
 
-fn edge_chevrons(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
-    let hidden_nav = nacre_core::notch::state::nav_state(cur, d.lyrics_open, false) == NavState::Hidden;
-    let cy = if hidden_nav { f.h / 2.0 } else { (f.h - p.px(DOTS_STRIP_DP)) / 2.0 + p.px(4.0) };
-    let lx = f.x0 + p.px(15.0);
-    let rx = f.x0 + f.w - p.px(15.0);
-    let dia = p.px(26.0);
+fn edge_chevrons(p: &mut Painter, c: &ContainerVisual, f: Frame, _cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
+    // Strictly centered vertically on Visor (aligned with scrub bar, matching Nusa).
+    let cy = (f.h / 2.0).round();
+    let lx = f.x0 + p.px(12.0);
+    let rx = f.x0 + f.w - p.px(12.0);
+    let dia = p.px(24.0);
+    let hit_w = p.px(26.0);
+    let hit_h = p.px(44.0);
 
     if let Ok(wrap) = p.comp.CreateContainerVisual() {
         let base_op = if d.hovered { 0.48 } else { 0.0 };
         let _ = wrap.SetOpacity(base_op);
         let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
 
-        let n0 = kids(&wrap);
-        let bg_l = make_hover_circle(p, &wrap, lx, cy, dia);
-        p.sym(&wrap, Sym::ChevronLeft, lx, cy, 11.5, WHITE, 1.0);
-        regions.push(Region {
-            x: lx - dia / 2.0,
-            y: cy - dia / 2.0,
-            w: dia,
-            h: dia,
-            action: Action::PrevTab,
-            vis: group_since(&wrap, n0),
-            hover_bg: bg_l,
-        });
+        if let Ok(slide_l) = p.comp.CreateContainerVisual() {
+            let _ = wrap.Children().and_then(|k| k.InsertAtTop(&slide_l));
+            let n0 = kids(&slide_l);
+            let bg_l = make_hover_circle(p, &slide_l, lx, cy, dia);
+            p.sym(&slide_l, Sym::ChevronLeft, lx, cy, 11.5, WHITE, 1.0);
+            regions.push(Region {
+                x: lx - p.px(10.0),
+                y: cy - hit_h / 2.0,
+                w: hit_w,
+                h: hit_h,
+                action: Action::PrevTab,
+                vis: group_since(&slide_l, n0),
+                hover_bg: bg_l,
+            });
+            live.chev_left_slide = Some(slide_l);
+        }
 
-        let n1 = kids(&wrap);
-        let bg_r = make_hover_circle(p, &wrap, rx, cy, dia);
-        p.sym(&wrap, Sym::ChevronRight, rx, cy, 11.5, WHITE, 1.0);
-        regions.push(Region {
-            x: rx - dia / 2.0,
-            y: cy - dia / 2.0,
-            w: dia,
-            h: dia,
-            action: Action::NextTab,
-            vis: group_since(&wrap, n1),
-            hover_bg: bg_r,
-        });
+        if let Ok(slide_r) = p.comp.CreateContainerVisual() {
+            let _ = wrap.Children().and_then(|k| k.InsertAtTop(&slide_r));
+            let n1 = kids(&slide_r);
+            let bg_r = make_hover_circle(p, &slide_r, rx, cy, dia);
+            p.sym(&slide_r, Sym::ChevronRight, rx, cy, 11.5, WHITE, 1.0);
+            regions.push(Region {
+                x: rx - hit_w + p.px(10.0),
+                y: cy - hit_h / 2.0,
+                w: hit_w,
+                h: hit_h,
+                action: Action::NextTab,
+                vis: group_since(&slide_r, n1),
+                hover_bg: bg_r,
+            });
+            live.chev_right_slide = Some(slide_r);
+        }
         live.chevrons_vis = Some(wrap);
     }
 }
@@ -676,11 +708,21 @@ fn bottom_nav(p: &mut Painter, c: &ContainerVisual, bf: Frame, cur_h: f32, cur: 
         anchor.Children()?.InsertAtTop(&dots_group)?;
         let mut dx = (cx - dots_w / 2.0).round();
         let dy = (-dot_d / 2.0).round();
+        let tab_switched = d.prev_tab.is_some_and(|pt| pt != cur);
         for t in Tab::ALL {
             let on = t == cur;
+            let was = d.prev_tab == Some(t);
             let dw = if on { active_w } else { dot_d };
             let col = if on { white(245) } else { white(90) };
-            p.rect(&dots_group, dx, dy, dw, dot_d, dot_d / 2.0, col);
+            if let Some(dot_vis) = p.rect(&dots_group, dx, dy, dw, dot_d, dot_d / 2.0, col) {
+                if tab_switched && on {
+                    let _ = dot_vis.SetCenterPoint(Vector3 { X: dw / 2.0, Y: dot_d / 2.0, Z: 0.0 });
+                    let _ = crate::motion::scalar(&p.comp, &dot_vis, "Scale.X", 0.28, 1.0, 220);
+                } else if tab_switched && was {
+                    let _ = dot_vis.SetCenterPoint(Vector3 { X: dw / 2.0, Y: dot_d / 2.0, Z: 0.0 });
+                    let _ = crate::motion::scalar(&p.comp, &dot_vis, "Scale.X", 2.4, 1.0, 180);
+                }
+            }
             dx += dw + dot_gap;
         }
 
@@ -1214,45 +1256,61 @@ fn music_column(
     m: &MediaView,
     lyrics_open: bool,
     muted: bool,
+    scrub_hover: f32,
+    art_scale: f32,
     regions: &mut Vec<Region>,
     live: &mut Live,
 ) {
-    let art = p.px(52.0);
+    let art = p.px(50.0);
     let (ax, ay) = (x, y);
-    match m.art {
-        Some(s) => {
-            p.image(c, s, ax, ay, art, art, p.px(12.0));
+    if let Ok(art_wrap) = p.comp.CreateContainerVisual() {
+        let _ = art_wrap.SetCenterPoint(Vector3 { X: ax + art / 2.0, Y: ay + art / 2.0, Z: 0.0 });
+        let sc = art_scale.clamp(0.75, 1.15);
+        let _ = art_wrap.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
+        let art_op = (0.78 + 0.22 * ((sc - 0.90) / 0.10).clamp(0.0, 1.0)).clamp(0.76, 1.0);
+        let _ = art_wrap.SetOpacity(art_op);
+        let _ = c.Children().and_then(|k| k.InsertAtTop(&art_wrap));
+        match m.art {
+            Some(s) => {
+                p.image(&art_wrap, s, ax, ay, art, art, p.px(12.0));
+            }
+            None => {
+                p.rect(&art_wrap, ax, ay, art, art, p.px(12.0), white(24));
+                p.sym(&art_wrap, Sym::Note, ax + art / 2.0, ay + art / 2.0, 22.0, WHITE, 0.8);
+            }
         }
-        None => {
-            p.rect(c, ax, ay, art, art, p.px(12.0), white(24));
-            p.sym(c, Sym::Note, ax + art / 2.0, ay + art / 2.0, 22.0, WHITE, 0.8);
-        }
+        live.album_art = Some(art_wrap);
     }
-    let tx = ax + art + p.px(12.0);
+    let tx = ax + art + p.px(11.0);
     let tw = (x + w - tx - if lyrics_open { 0.0 } else { p.px(32.0) }).max(p.px(40.0));
-    let title = p.fit(m.title, 14.5, 700, tw);
-    p.text(c, &title, tx, ay + p.px(9.0), 14.5, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
-    let artist = p.fit(m.artist, 12.0, 500, tw);
-    p.text(c, &artist, tx, ay + p.px(30.0), 12.0, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
+    let title = p.fit(m.title, 14.0, 700, tw);
+    p.text(c, &title, tx, ay + p.px(8.0), 14.0, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
+    let artist = p.fit(m.artist, 11.5, 500, tw);
+    p.text(c, &artist, tx, ay + p.px(28.0), 11.5, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
 
-    // Inline Nusa scrub row: `03:13  [=====-----]  -00:40`
-    let sy = ay + art + p.px(18.0);
-    let left_time_w = p.px(38.0);
-    let right_time_w = p.px(44.0);
+    // Inline Nusa scrub row aligned near vertical midpoint: `02:55  [=====-----]  -01:28`
+    let sy = ay + art + p.px(16.0);
+    let left_time_w = p.px(37.0);
+    let right_time_w = p.px(43.0);
     let sx = x + left_time_w;
     let sw = (w - left_time_w - right_time_w).max(p.px(40.0));
-    let th = p.px(4.5);
+    let base_th = p.px(4.0);
     let frac = m.drag.unwrap_or(if m.dur_ms > 0 { m.pos_ms as f32 / m.dur_ms as f32 } else { 0.0 }).clamp(0.0, 1.0);
-    p.rect(c, sx, (sy - th / 2.0).round(), sw, th, th / 2.0, white(58));
 
     let pos = if let Some(fr) = m.drag { (m.dur_ms as f32 * fr) as i64 } else { m.pos_ms };
     let build_scrub = || -> windows_core::Result<ScrubLive> {
+        let track_geo = p.comp.CreateRoundedRectangleGeometry()?;
+        let track_clip = p.comp.CreateGeometricClip()?;
+        track_clip.SetGeometry(&track_geo)?;
+        let track = p.comp.CreateSpriteVisual()?;
+        track.SetBrush(&p.comp.CreateColorBrushWithColor(white(58))?)?;
+        track.SetClip(&track_clip)?;
+        c.Children()?.InsertAtTop(&track)?;
+
         let fill_geo = p.comp.CreateRoundedRectangleGeometry()?;
-        fill_geo.SetCornerRadius(Vector2 { X: th / 2.0, Y: th / 2.0 })?;
         let fill_clip = p.comp.CreateGeometricClip()?;
         fill_clip.SetGeometry(&fill_geo)?;
         let fill = p.comp.CreateSpriteVisual()?;
-        fill.SetOffset(Vector3 { X: sx, Y: (sy - th / 2.0).round(), Z: 0.0 })?;
         fill.SetBrush(&p.comp.CreateColorBrushWithColor(white(245))?)?;
         fill.SetClip(&fill_clip)?;
         c.Children()?.InsertAtTop(&fill)?;
@@ -1260,17 +1318,17 @@ fn music_column(
         let knob_geo = p.comp.CreateRoundedRectangleGeometry()?;
         let knob_clip = p.comp.CreateGeometricClip()?;
         knob_clip.SetGeometry(&knob_geo)?;
-        let knob_brush = p.comp.CreateColorBrushWithColor(white(240))?;
+        let knob_brush = p.comp.CreateColorBrushWithColor(white(248))?;
         let knob = p.comp.CreateSpriteVisual()?;
         knob.SetBrush(&knob_brush)?;
         knob.SetClip(&knob_clip)?;
         c.Children()?.InsertAtTop(&knob)?;
 
         let pos_vis = p.comp.CreateSpriteVisual()?;
-        pos_vis.SetOpacity(0.86)?;
+        pos_vis.SetOpacity(0.88)?;
         c.Children()?.InsertAtTop(&pos_vis)?;
         let rem_vis = p.comp.CreateSpriteVisual()?;
-        rem_vis.SetOpacity(0.86)?;
+        rem_vis.SetOpacity(0.88)?;
         c.Children()?.InsertAtTop(&rem_vis)?;
 
         Ok(ScrubLive {
@@ -1279,8 +1337,10 @@ fn music_column(
             sx,
             sw,
             sy,
-            th,
+            base_th,
             dur_ms: m.dur_ms,
+            track,
+            track_geo,
             fill,
             fill_geo,
             knob,
@@ -1292,7 +1352,7 @@ fn music_column(
         })
     };
     if let Ok(mut sl) = build_scrub() {
-        sl.update(p, frac, m.drag.is_some(), pos);
+        sl.update(p, frac, scrub_hover, m.drag.is_some(), pos);
         live.scrub = Some(sl);
     }
 
@@ -1300,34 +1360,34 @@ fn music_column(
         regions.push(Region { x: sx - p.px(6.0), y: sy - p.px(12.0), w: sw + p.px(12.0), h: p.px(24.0), action: Action::Seek(sx, sw), vis: None, hover_bg: None });
     }
 
-    // Playback controls row with larger 20-21dp Quote icon + symmetrical Speaker/Mute toggle.
-    let cy = (y + h - p.px(15.0)).max(sy + p.px(24.0));
+    // Chunky, tactile Nusa-proportioned transport controls (22-26 dp) + Quote & Speaker.
+    let cy = (y + h - p.px(15.0)).max(sy + p.px(26.0));
     let cx = x + w / 2.0;
     let vol_sym = if muted { Sym::SpeakerMute } else { Sym::SpeakerMid };
     let vol_op = if muted { 0.48 } else { 0.92 };
     let controls = if lyrics_open {
-        let step = p.px(38.0);
+        let step = p.px(40.0);
         [
-            (Sym::Quote, cx - 2.0 * step, 20.0, Action::ToggleLyrics, 1.0),
-            (Sym::Backward, cx - step, 16.5, Action::Prev, 0.96),
-            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 21.0, Action::PlayPause, 1.0),
-            (Sym::Forward, cx + step, 16.5, Action::Next, 0.96),
-            (vol_sym, cx + 2.0 * step, 15.5, Action::ToggleMute, vol_op),
+            (Sym::Quote, cx - 2.0 * step, 20.5, Action::ToggleLyrics, 1.0),
+            (Sym::Backward, cx - step, 21.0, Action::Prev, 0.96),
+            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 24.5, Action::PlayPause, 1.0),
+            (Sym::Forward, cx + step, 21.0, Action::Next, 0.96),
+            (vol_sym, cx + 2.0 * step, 16.5, Action::ToggleMute, vol_op),
         ]
     } else {
-        let step = p.px(42.0);
+        let step = p.px(44.0);
         [
-            (Sym::Quote, x + p.px(22.0), 21.5, Action::ToggleLyrics, 0.56),
-            (Sym::Backward, cx - step, 17.5, Action::Prev, 0.96),
-            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 22.0, Action::PlayPause, 1.0),
-            (Sym::Forward, cx + step, 17.5, Action::Next, 0.96),
-            (vol_sym, x + w - p.px(22.0), 16.5, Action::ToggleMute, vol_op),
+            (Sym::Quote, x + p.px(20.0), 21.5, Action::ToggleLyrics, 0.56),
+            (Sym::Backward, cx - step, 22.5, Action::Prev, 0.98),
+            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 26.0, Action::PlayPause, 1.0),
+            (Sym::Forward, cx + step, 22.5, Action::Next, 0.98),
+            (vol_sym, x + w - p.px(20.0), 18.0, Action::ToggleMute, vol_op),
         ]
     };
     for (s, bx, size, a, op) in controls {
         let n0 = kids(c);
         p.sym(c, s, bx, cy, size, WHITE, op);
-        regions.push(Region { x: bx - p.px(18.0), y: cy - p.px(15.0), w: p.px(36.0), h: p.px(30.0), action: a, vis: group_since(c, n0), hover_bg: None });
+        regions.push(Region { x: bx - p.px(18.0), y: cy - p.px(16.0), w: p.px(36.0), h: p.px(32.0), action: a, vis: group_since(c, n0), hover_bg: None });
     }
 }
 
@@ -1431,12 +1491,10 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
     let bot = f.h - p.px(DOTS_STRIP_DP + 4.0);
     let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
 
-    // Compact Nusa TodoList layout (410 x 168 dp):
-    // Left column: "TodoList", big "0/1" + Google sync calendar circle with blue dot, "Task Done Today", [+ Add Task] [Edit Task].
-    // Right column: rounded #141416 checklist container with crisp rings / inline TextInput when adding.
-    let lw = p.px(162.0);
-    let rx = x0 + lw + p.px(10.0);
-    let rw = (x0 + w - rx).max(p.px(120.0));
+    // Compact Nusa TodoList layout (385 x 166 dp):
+    let lw = p.px(154.0);
+    let rx = x0 + lw + p.px(8.0);
+    let rw = (x0 + w - rx).max(p.px(110.0));
 
     // Two-tone "TodoList" title matching Nusa reference.
     let todo_w = p.text(c, "Todo", x0 + p.px(2.0), top, 14.5, 700, WHITE, 0.98, Anchor::Left, p.px(64.0));
@@ -1699,21 +1757,21 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
     if d.lyrics_open {
         let bot = bf.h - p.px(12.0);
         let h = (bot - top).max(p.px(80.0));
-        let mx = bf.x0 + pad;
-        let mw = p.px(236.0).min((bf.w - 2.0 * pad) * 0.48);
+        let mx = bf.x0 + pad + p.px(4.0);
+        let mw = p.px(224.0).min((bf.w - 2.0 * pad) * 0.47);
         let div_x = mx + mw + p.px(14.0);
-        let lx = div_x + p.px(16.0);
+        let lx = div_x + p.px(15.0);
         let lw = (bf.x0 + bf.w - pad - lx).max(p.px(80.0));
 
         match &d.media {
-            Some(m) => music_column(p, c, mx, top, mw, h, m, true, d.muted, regions, live),
+            Some(m) => music_column(p, c, mx, top, mw, h, m, true, d.muted, d.scrub_hover, d.art_scale, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
                 p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
                 let qx = mx + mw / 2.0;
                 let qy = top + h - p.px(14.0);
                 let n0 = kids(c);
-                p.sym(c, Sym::Quote, qx, qy, 20.0, WHITE, 0.78);
+                p.sym(c, Sym::Quote, qx, qy, 20.5, WHITE, 0.78);
                 regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
             }
         }
@@ -1722,17 +1780,17 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
     } else {
         let bot = bf.h - p.px(DOTS_STRIP_DP + 2.0);
         let h = (bot - top).max(p.px(80.0));
-        let mx = bf.x0 + pad;
-        let mw = (bf.w - 2.0 * pad).max(p.px(180.0));
+        let mx = bf.x0 + pad + p.px(4.0);
+        let mw = (bf.w - 2.0 * pad - p.px(8.0)).max(p.px(180.0));
         match &d.media {
-            Some(m) => music_column(p, c, mx, top, mw, h, m, false, d.muted, regions, live),
+            Some(m) => music_column(p, c, mx, top, mw, h, m, false, d.muted, d.scrub_hover, d.art_scale, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
                 p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
                 let qx = mx + mw / 2.0;
                 let qy = top + h - p.px(14.0);
                 let n0 = kids(c);
-                p.sym(c, Sym::Quote, qx, qy, 20.0, WHITE, 0.48);
+                p.sym(c, Sym::Quote, qx, qy, 21.0, WHITE, 0.48);
                 regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
             }
         }

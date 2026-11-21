@@ -23,15 +23,19 @@ impl SpringParams {
     }
 
     pub fn open() -> Self {
-        Self::from_response(0.38, 0.78)
+        Self::from_response(0.34, 0.80)
     }
 
     pub fn close() -> Self {
-        Self::from_response(0.28, 0.94)
+        Self::from_response(0.26, 0.94)
     }
 
     pub fn swap() -> Self {
-        Self::from_response(0.32, 0.84)
+        Self::from_response(0.30, 0.84)
+    }
+
+    pub fn tactile() -> Self {
+        Self::from_response(0.20, 0.76)
     }
 
     pub fn stage_show() -> Self {

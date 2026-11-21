@@ -1,16 +1,34 @@
 use nacre_core::settings::Material;
 use nacre_platform::log;
 use nacre_ui::glass::{GlassParams, Tier};
+use nacre_ui::host::{Host, Surface};
+use windows::core::w;
 use windows::UI::Color;
 use windows::UI::Composition::{
     CompositionBrush, CompositionColorBrush, CompositionGeometricClip, CompositionPathGeometry,
     CompositionSpriteShape, CompositionVisualSurface, Compositor, ContainerVisual, DropShadow,
     ShapeVisual, SpriteVisual,
 };
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow,
+    HTTRANSPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
+    WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+};
 use windows_core::Interface;
 use windows_numerics::{Vector2, Vector3};
 
+unsafe extern "system" fn shadow_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_NCHITTEST {
+        return LRESULT(HTTRANSPARENT as isize);
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
 pub const ONYX: (u8, u8, u8) = (0, 0, 0);
+const INNER_RIM_BLACK: Color = Color { A: 20, R: 255, G: 255, B: 255 }; // rgba(255,255,255,0.08)
 
 pub fn glass_params(radius: f32) -> GlassParams {
     let look = crate::prefs::look(crate::prefs::Role::Notch);
@@ -22,7 +40,7 @@ pub fn glass_params(radius: f32) -> GlassParams {
         g.tint.A = g.tint.A.max(96);
     }
     g.rim = if is_black() {
-        Color { A: 0, R: 255, G: 255, B: 255 }
+        INNER_RIM_BLACK
     } else {
         Color { A: 48, R: 255, G: 255, B: 255 }
     };
@@ -36,6 +54,9 @@ pub fn is_black() -> bool {
 
 pub struct Shell {
     comp: Compositor,
+    sh_hwnd: HWND,
+    _sh_surface: Surface,
+    sh_stage: ContainerVisual,
     pub stage: ContainerVisual,
     shadow_host: SpriteVisual,
     drop_shadow: DropShadow,
@@ -53,20 +74,77 @@ pub struct Shell {
     tier: Tier,
 }
 
+impl Drop for Shell {
+    fn drop(&mut self) {
+        if !self.sh_hwnd.is_invalid() {
+            unsafe {
+                let _ = DestroyWindow(self.sh_hwnd);
+            }
+        }
+    }
+}
+
 impl Shell {
-    pub fn new(comp: &Compositor, root: &ContainerVisual, canvas: (i32, i32), tier: Tier) -> windows_core::Result<Shell> {
+    pub fn new(
+        host: &Host,
+        owner_hwnd: HWND,
+        root: &ContainerVisual,
+        canvas: (i32, i32),
+        wx: i32,
+        tier: Tier,
+    ) -> windows_core::Result<Shell> {
+        let comp = &host.compositor;
         let sz = Vector2 { X: canvas.0 as f32, Y: canvas.1 as f32 };
+
+        // Click-through GPU shadow HWND sharing the exact same Compositor and CompositionPathGeometry
+        // so the 32dp ambient DropShadow renders completely unclipped while clicks anywhere outside
+        // the interactive Visor capsule pass straight through to other processes (Chrome, VS Code, etc.).
+        let sh_hwnd = unsafe {
+            let hi: HINSTANCE = GetModuleHandleW(None)?.into();
+            let class = w!("AbraNotchShadow");
+            RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(shadow_proc),
+                hInstance: hi,
+                lpszClassName: class,
+                ..Default::default()
+            });
+            let h = CreateWindowExW(
+                WS_EX_NOREDIRECTIONBITMAP
+                    | WS_EX_TOPMOST
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_LAYERED,
+                class,
+                w!("abra-notch-shadow"),
+                WS_POPUP,
+                wx,
+                0,
+                canvas.0,
+                canvas.1,
+                None,
+                None,
+                Some(hi),
+                None,
+            )?;
+            let _ = SetWindowPos(h, Some(owner_hwnd), wx, 0, canvas.0, canvas.1, SWP_NOACTIVATE);
+            h
+        };
+        let sh_surface = host.attach(sh_hwnd, (sz.X, sz.Y))?;
+
+        let sh_stage = comp.CreateContainerVisual()?;
+        sh_stage.SetSize(sz)?;
+        sh_surface.root.Children()?.InsertAtTop(&sh_stage)?;
+
         let stage = comp.CreateContainerVisual()?;
         stage.SetSize(sz)?;
         root.Children()?.InsertAtTop(&stage)?;
 
-        // Shared single CompositionPathGeometry for clip, rim, and DropShadow mask.
+        // Shared single CompositionPathGeometry for clip, inner rim, and GPU DropShadow mask.
         let path_geo = comp.CreatePathGeometry()?;
         let shell_clip: CompositionGeometricClip = comp.CreateGeometricClip()?;
         shell_clip.SetGeometry(&path_geo)?;
 
-        // Off-tree mask visual rendered into a CompositionVisualSurface so DropShadow matches the
-        // exact Visor concave-ear or Capsule silhouette on this single HWND.
         let mask_shape: CompositionSpriteShape = comp.CreateSpriteShapeWithGeometry(&path_geo)?;
         mask_shape.SetFillBrush(&comp.CreateColorBrushWithColor(Color { A: 255, R: 255, G: 255, B: 255 })?)?;
         let mask_vis = comp.CreateShapeVisual()?;
@@ -80,15 +158,15 @@ impl Shell {
 
         let drop_shadow = comp.CreateDropShadow()?;
         drop_shadow.SetColor(Color { A: 255, R: 0, G: 0, B: 0 })?;
-        drop_shadow.SetBlurRadius(18.0)?;
+        drop_shadow.SetBlurRadius(14.0)?;
         drop_shadow.SetOffset(Vector3 { X: 0.0, Y: 4.0, Z: 0.0 })?;
-        drop_shadow.SetOpacity(0.24)?;
+        drop_shadow.SetOpacity(0.38)?;
         drop_shadow.SetMask(&mask_brush)?;
 
         let shadow_host = comp.CreateSpriteVisual()?;
         shadow_host.SetSize(sz)?;
         shadow_host.SetShadow(&drop_shadow)?;
-        stage.Children()?.InsertAtTop(&shadow_host)?;
+        sh_stage.Children()?.InsertAtTop(&shadow_host)?;
 
         let shell_root = comp.CreateContainerVisual()?;
         shell_root.SetSize(sz)?;
@@ -113,10 +191,11 @@ impl Shell {
         content.SetSize(sz)?;
         shell_root.Children()?.InsertAtTop(&content)?;
 
+        // Subtle inner edge rim (~1px visible after shell_root geometric clip).
         let rim_shape = comp.CreateSpriteShapeWithGeometry(&path_geo)?;
-        let rim_brush = comp.CreateColorBrushWithColor(Color { A: 0, R: 255, G: 255, B: 255 })?;
+        let rim_brush = comp.CreateColorBrushWithColor(INNER_RIM_BLACK)?;
         rim_shape.SetStrokeBrush(&rim_brush)?;
-        rim_shape.SetStrokeThickness(1.25)?;
+        rim_shape.SetStrokeThickness(1.6)?;
         let rim = comp.CreateShapeVisual()?;
         rim.SetSize(sz)?;
         rim.Shapes()?.Append(&rim_shape)?;
@@ -124,6 +203,9 @@ impl Shell {
 
         let mut shell = Shell {
             comp: comp.clone(),
+            sh_hwnd,
+            _sh_surface: sh_surface,
+            sh_stage,
             stage,
             shadow_host,
             drop_shadow,
@@ -144,8 +226,13 @@ impl Shell {
         Ok(shell)
     }
 
-    pub fn resize(&self, canvas: (i32, i32)) {
+    pub fn place(&self, owner_hwnd: HWND, wx: i32, canvas: (i32, i32)) {
         let sz = Vector2 { X: canvas.0 as f32, Y: canvas.1 as f32 };
+        unsafe {
+            let _ = SetWindowPos(self.sh_hwnd, Some(owner_hwnd), wx, 0, canvas.0, canvas.1, SWP_NOACTIVATE);
+        }
+        let _ = self._sh_surface.root.SetSize(sz);
+        let _ = self.sh_stage.SetSize(sz);
         let _ = self.stage.SetSize(sz);
         let _ = self.shadow_host.SetSize(sz);
         let _ = self.mask_vis.SetSize(sz);
@@ -158,6 +245,23 @@ impl Shell {
         let _ = self.rim.SetSize(sz);
     }
 
+    pub fn raise_behind(&self, owner_hwnd: HWND) {
+        unsafe {
+            let _ = SetWindowPos(self.sh_hwnd, Some(owner_hwnd), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
+    pub fn set_visible(&self, show: bool, owner_hwnd: HWND) {
+        unsafe {
+            if show {
+                let _ = ShowWindow(self.sh_hwnd, SW_SHOWNOACTIVATE);
+                self.raise_behind(owner_hwnd);
+            } else {
+                let _ = ShowWindow(self.sh_hwnd, SW_HIDE);
+            }
+        }
+    }
+
     pub fn apply_material(&mut self, tier: Tier) {
         self.tier = tier;
         let g = glass_params(15.0);
@@ -166,7 +270,7 @@ impl Shell {
                 let b: CompositionBrush = self.comp.CreateColorBrushWithColor(g.solid)?.cast()?;
                 self.backdrop.SetBrush(&b)?;
                 self.tint.SetOpacity(0.0)?;
-                self.rim_brush.SetColor(Color { A: 0, R: 255, G: 255, B: 255 })?;
+                self.rim_brush.SetColor(INNER_RIM_BLACK)?;
                 return Ok(());
             }
             let base: CompositionBrush = match tier {
@@ -198,12 +302,14 @@ impl Shell {
     }
 
     pub fn set_shadow(&self, blur_px: f32, dy_px: f32, opacity: f32) {
-        let _ = self.drop_shadow.SetBlurRadius(blur_px.clamp(0.0, 72.0));
+        let _ = self.drop_shadow.SetBlurRadius(blur_px.clamp(0.0, 96.0));
         let _ = self.drop_shadow.SetOffset(Vector3 { X: 0.0, Y: dy_px, Z: 0.0 });
         let _ = self.drop_shadow.SetOpacity(opacity.clamp(0.0, 1.0));
     }
 
     pub fn set_stage_y(&self, y: f32) {
-        let _ = self.stage.SetOffset(Vector3 { X: 0.0, Y: y, Z: 0.0 });
+        let off = Vector3 { X: 0.0, Y: y, Z: 0.0 };
+        let _ = self.stage.SetOffset(off);
+        let _ = self.sh_stage.SetOffset(off);
     }
 }

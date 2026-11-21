@@ -112,9 +112,10 @@ struct SendSess {
     done_at: Option<Instant>,
 }
 
-const WIN_W: f32 = 660.0;
-const WIN_H: f32 = 276.0;
-const SHADOW_PAD: f32 = 36.0;
+const WIN_W: f32 = 640.0;
+const WIN_H: f32 = 250.0;
+const SHADOW_PAD_X: f32 = 36.0;
+const SHADOW_PAD_B: f32 = 44.0;
 const EAR_DP: f32 = 13.0;
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -305,9 +306,10 @@ fn ear_px(dpi: f32) -> f32 {
 }
 
 fn win_size(dpi: f32, screen_w: i32) -> (i32, i32) {
-    let pad = (SHADOW_PAD * dpi).round() as i32;
-    let w = ((WIN_W * dpi).round() as i32 + 2 * pad).min(screen_w);
-    let h = (WIN_H * dpi + island_gap(dpi)).ceil() as i32 + pad;
+    let pad_x = (SHADOW_PAD_X * dpi).round() as i32;
+    let pad_b = (SHADOW_PAD_B * dpi).round() as i32;
+    let w = ((WIN_W * dpi).round() as i32 + 2 * pad_x).min(screen_w);
+    let h = (WIN_H * dpi + island_gap(dpi)).ceil() as i32 + pad_b;
     (w, h)
 }
 
@@ -338,10 +340,21 @@ pub struct Notch {
     sp_r: Spring,
     sp_ear: Spring,
     sp_y: Spring,
+    sp_sh_blur: Spring,
+    sp_sh_dy: Spring,
     sp_sh_op: Spring,
     sp_nav: Spring,
+    sp_chev_l: Spring,
+    sp_chev_r: Spring,
+    sp_scrub_hover: Spring,
+    sp_art_scale: Spring,
     nav_expanded: bool,
     nav_collapse_armed: bool,
+    scrub_hovered: bool,
+    pressed_act: Option<Action>,
+    prev_tab: Option<Tab>,
+    art_pop_pending: bool,
+    todo_input_fade: bool,
     muted: bool,
     frame_active: bool,
     frame_last: Instant,
@@ -473,12 +486,13 @@ impl Notch {
             let dpi = GetDpiForWindow(hwnd).max(96) as f32 / 96.0 * crate::prefs::ui_scale();
             let screen_w = sys::screen_size().0;
             let win = win_size(dpi, screen_w);
-            let _ = SetWindowPos(hwnd, None, (screen_w - win.0) / 2, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
+            let wx = (screen_w - win.0) / 2;
+            let _ = SetWindowPos(hwnd, None, wx, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
             let comp = host.compositor.clone();
             let surface = host.attach(hwnd, (win.0 as f32, win.1 as f32))?;
             let tier = auto_tier(opts.glass);
             let gfx = Gfx::shared(&comp)?;
-            let shell = Shell::new(&comp, &surface.root, win, tier)?;
+            let shell = Shell::new(host, hwnd, &surface.root, win, wx, tier)?;
             let rest = state::look(Mode::Rest, None);
             let init_size = state::size(rest, dpi);
             let init_ear = ear_px(dpi);
@@ -486,7 +500,8 @@ impl Notch {
             let off = !crate::prefs::get().notch_enabled;
             let start_hidden = off || opts.mode == Vis::OnDemand;
             let init_y = if start_hidden { -(init_size.h + 12.0 * dpi) } else { init_gap };
-            let init_sh_op = if start_hidden { 0.0 } else { state::shadow(rest).2 };
+            let (init_sh_blur, init_sh_dy, rest_sh_op) = state::shadow(rest);
+            let init_sh_op = if start_hidden { 0.0 } else { rest_sh_op };
             let frame_ms = frame_interval_ms();
             let hw = hwnd.0 as isize;
             let privacy_mon = Some(privacy::spawn(move || post(hw, WM_PRIVACY)));
@@ -516,10 +531,21 @@ impl Notch {
                 sp_r: Spring::new(init_size.radius, SpringParams::swap()),
                 sp_ear: Spring::new(init_ear, SpringParams::swap()),
                 sp_y: Spring::new(init_y, SpringParams::stage_show()),
+                sp_sh_blur: Spring::new(init_sh_blur, SpringParams::swap()),
+                sp_sh_dy: Spring::new(init_sh_dy, SpringParams::swap()),
                 sp_sh_op: Spring::new(init_sh_op, SpringParams::swap()),
                 sp_nav: Spring::new(0.0, SpringParams::swap()),
+                sp_chev_l: Spring::new(0.0, SpringParams::tactile()),
+                sp_chev_r: Spring::new(0.0, SpringParams::tactile()),
+                sp_scrub_hover: Spring::new(0.0, SpringParams::tactile()),
+                sp_art_scale: Spring::new(1.0, SpringParams::open()),
                 nav_expanded: false,
                 nav_collapse_armed: false,
+                scrub_hovered: false,
+                pressed_act: None,
+                prev_tab: None,
+                art_pop_pending: false,
+                todo_input_fade: false,
                 muted: nacre_platform::audio::latest().muted,
                 frame_active: false,
                 frame_last: Instant::now(),
@@ -641,6 +667,7 @@ impl Notch {
             tracker::install(on_windows_changed);
             if !start_hidden {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                with(hwnd, |d| d.shell.set_visible(true, hwnd));
                 timer(hwnd, T_START, 1600);
             }
             timer(hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
@@ -705,7 +732,7 @@ impl Notch {
         self.shell.set_geometry(x0, w, h, r, ear);
         self.shell.set_stage_y(y);
         STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
-        self.shell.set_shadow(18.0 * self.dpi, 4.0 * self.dpi, self.sp_sh_op.pos);
+        self.shell.set_shadow(self.sp_sh_blur.pos * self.dpi, self.sp_sh_dy.pos * self.dpi, self.sp_sh_op.pos);
 
         // Keep compact left/right chrome and bottom ambient glow glued to the animated pill edges.
         if let Some(left_c) = &self.live_vis.compact_left {
@@ -726,6 +753,7 @@ impl Notch {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
+            self.shell.set_visible(false, self.hwnd);
             self.rgn_rect = (0, 0, 0, 0);
             return;
         }
@@ -755,6 +783,8 @@ impl Notch {
         springs_moving |= self.sp_r.step(dt);
         springs_moving |= self.sp_ear.step(dt);
         springs_moving |= self.sp_y.step(dt);
+        springs_moving |= self.sp_sh_blur.step(dt);
+        springs_moving |= self.sp_sh_dy.step(dt);
         springs_moving |= self.sp_sh_op.step(dt);
 
         if springs_moving {
@@ -771,6 +801,39 @@ impl Notch {
             if nav_moving {
                 springs_moving = true;
             }
+        }
+
+        // Magnetic inward slide springs on left (<) and right (>) edge chevrons.
+        let chev_l_moving = self.sp_chev_l.step(dt);
+        let chev_r_moving = self.sp_chev_r.step(dt);
+        if chev_l_moving {
+            if let Some(v) = &self.live_vis.chev_left_slide {
+                let _ = v.SetOffset(Vector3 { X: (5.0 * self.dpi * self.sp_chev_l.pos).round(), Y: 0.0, Z: 0.0 });
+            }
+            springs_moving = true;
+        }
+        if chev_r_moving {
+            if let Some(v) = &self.live_vis.chev_right_slide {
+                let _ = v.SetOffset(Vector3 { X: -(5.0 * self.dpi * self.sp_chev_r.pos).round(), Y: 0.0, Z: 0.0 });
+            }
+            springs_moving = true;
+        }
+
+        // Smooth scrub-bar hover bloom (track thicken + thumb expand).
+        if self.sp_scrub_hover.step(dt) {
+            self.update_scrub_in_place();
+            springs_moving = true;
+        }
+
+        // Album art Play/Pause continuity scale + subtle opacity breath.
+        if self.sp_art_scale.step(dt) {
+            if let Some(art) = &self.live_vis.album_art {
+                let sc = self.sp_art_scale.pos.clamp(0.75, 1.15);
+                let _ = art.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
+                let op = (0.78 + 0.22 * ((sc - 0.90) / 0.10).clamp(0.0, 1.0)).clamp(0.76, 1.0);
+                let _ = art.SetOpacity(op);
+            }
+            springs_moving = true;
         }
 
         // Smooth audio visualizer bar interpolation at monitor refresh rate.
@@ -1447,7 +1510,7 @@ impl Notch {
     }
 
     fn max_safe_compact_w(&self) -> f32 {
-        let max_win = (self.win.0 as f32 - 2.0 * SHADOW_PAD * self.dpi).max(200.0 * self.dpi);
+        let max_win = (self.win.0 as f32 - 2.0 * SHADOW_PAD_X * self.dpi).max(200.0 * self.dpi);
         let cap = (state::COMPACT_MAX_W_DP * self.dpi).min(max_win);
         let min_safe = (state::COMPACT_MIN_W_DP * self.dpi).min(cap);
         if !crate::prefs::get().menubar {
@@ -1561,12 +1624,32 @@ impl Notch {
         }
     }
 
+    fn tab_direction(from: View, to: View) -> i32 {
+        let (View::Open(a), View::Open(b)) = (from, to) else { return 0 };
+        if a == b {
+            return 0;
+        }
+        let n = Tab::ALL.len() as i32;
+        let ia = Tab::ALL.iter().position(|t| *t == a).unwrap_or(0) as i32;
+        let ib = Tab::ALL.iter().position(|t| *t == b).unwrap_or(0) as i32;
+        let diff = (ib - ia).rem_euclid(n);
+        if diff <= n / 2 { 1 } else { -1 }
+    }
+
     fn transition(&mut self, new: Look) {
         let old = self.look;
         let first = self.first;
         self.first = false;
         self.look = new;
         let view_changed = old.view != new.view || first;
+        let tab_dir = if first { 0 } else { Self::tab_direction(old.view, new.view) };
+        if let (View::Open(a), View::Open(b)) = (old.view, new.view) {
+            if a != b {
+                self.prev_tab = Some(a);
+            }
+        } else {
+            self.prev_tab = None;
+        }
         if view_changed && self.focus.is_active() {
             self.blur_inputs(false);
         }
@@ -1580,6 +1663,10 @@ impl Notch {
             self.cal_sel = 0;
             self.todo_adding = false;
             self.todo_editing = false;
+            self.scrub_hovered = false;
+            self.sp_scrub_hover.snap(0.0);
+            self.sp_chev_l.snap(0.0);
+            self.sp_chev_r.snap(0.0);
         } else if new.view != View::Open(Tab::Todo) {
             self.todo_adding = false;
             self.todo_editing = false;
@@ -1587,14 +1674,15 @@ impl Notch {
         let sp = (!first).then(|| Self::spring_for(old, new));
         if view_changed && !first {
             let closing = matches!(old.view, View::Open(_) | View::Drop) && !matches!(new.view, View::Open(_) | View::Drop);
-            self.retire_content(if closing { motion::CLOSE_FADE_MS } else { motion::SWAP_FADE_MS });
+            self.retire_content_dir(if closing { motion::CLOSE_FADE_MS } else { motion::SWAP_FADE_MS }, tab_dir, closing);
         }
         self.apply_size(sp);
         self.publish_notch();
         self.render();
         self.sync_glance();
         if view_changed && !first {
-            self.intro(matches!(new.view, View::Open(_) | View::Drop) && !matches!(old.view, View::Open(_) | View::Drop));
+            let opening = matches!(new.view, View::Open(_) | View::Drop) && !matches!(old.view, View::Open(_) | View::Drop);
+            self.intro(opening, tab_dir);
         }
     }
 
@@ -1604,7 +1692,8 @@ impl Notch {
         let gap = island_gap(self.dpi);
         let target_ear = ear_px(self.dpi);
         let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
-        let target_sh_op = if self.shown { state::shadow(self.look).2 } else { 0.0 };
+        let (target_sh_blur, target_sh_dy, sh_op) = state::shadow(self.look);
+        let target_sh_op = if self.shown { sh_op } else { 0.0 };
 
         match sp {
             None => {
@@ -1613,6 +1702,8 @@ impl Notch {
                 self.sp_r.snap(z.radius);
                 self.sp_ear.snap(target_ear);
                 self.sp_y.snap(target_y);
+                self.sp_sh_blur.snap(target_sh_blur);
+                self.sp_sh_dy.snap(target_sh_dy);
                 self.sp_sh_op.snap(target_sh_op);
                 self.stop_frame();
                 self.apply_springs_to_shell();
@@ -1623,6 +1714,8 @@ impl Notch {
                 self.sp_r.set_target(z.radius, p);
                 self.sp_ear.set_target(target_ear, p);
                 self.sp_y.set_target(target_y, if self.shown { SpringParams::stage_show() } else { SpringParams::stage_hide() });
+                self.sp_sh_blur.set_target(target_sh_blur, p);
+                self.sp_sh_dy.set_target(target_sh_dy, p);
                 self.sp_sh_op.set_target(target_sh_op, p);
                 self.start_frame();
             }
@@ -1725,6 +1818,9 @@ impl Notch {
             hovered: self.tracking,
             nav_expanded: self.nav_expanded,
             nav_progress: self.sp_nav.pos,
+            prev_tab: self.prev_tab.take(),
+            scrub_hover: self.sp_scrub_hover.pos,
+            art_scale: self.sp_art_scale.pos,
             shelf,
             drop_zone: self.drop_zone,
             drop_count,
@@ -1759,10 +1855,29 @@ impl Notch {
         if let Some(nav) = self.live_vis.nav.as_mut() {
             nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
         }
+        if let Some(v) = &self.live_vis.chev_left_slide {
+            let _ = v.SetOffset(Vector3 { X: (5.0 * self.dpi * self.sp_chev_l.pos).round(), Y: 0.0, Z: 0.0 });
+        }
+        if let Some(v) = &self.live_vis.chev_right_slide {
+            let _ = v.SetOffset(Vector3 { X: -(5.0 * self.dpi * self.sp_chev_r.pos).round(), Y: 0.0, Z: 0.0 });
+        }
+        if self.art_pop_pending {
+            if let Some(art) = &self.live_vis.album_art {
+                self.art_pop_pending = false;
+                let tgt = self.sp_art_scale.target.clamp(0.85, 1.0);
+                let _ = crate::motion::scalar(&self.paint.comp, art, "Scale.X", 0.86, tgt, 240);
+                let _ = crate::motion::scalar(&self.paint.comp, art, "Scale.Y", 0.86, tgt, 240);
+                let _ = crate::motion::scalar(&self.paint.comp, art, "Opacity", 0.45, 1.0, 220);
+            }
+        }
         if let Some((ix, iy, iw, ih)) = self.live_vis.todo_input_box {
             if let Ok(mut ti) = TextInput::new(&self.paint.comp, &c, ix, iy, iw, ih, self.dpi, crate::prefs::tr("Tambah tugas…"), 180) {
                 ti.buf.set(&self.todo_draft);
                 ti.set_focused(self.active_input == Some(ActiveInput::Todo), &mut self.paint);
+                if self.todo_input_fade {
+                    self.todo_input_fade = false;
+                    ti.fade_in(&self.paint.comp);
+                }
                 self.todo_input = Some(ti);
             }
         }
@@ -1788,39 +1903,63 @@ impl Notch {
     }
 
     fn retire_content(&mut self, ms: u32) {
+        self.retire_content_dir(ms, 0, false);
+    }
+
+    fn retire_content_dir(&mut self, ms: u32, dir: i32, closing: bool) {
         let go = || -> windows_core::Result<()> {
             let kids = self.shell.content.Children()?;
             let old: Vec<Visual> = kids.clone().into_iter().collect();
             let ghost = self.shell.ghost.Children()?;
             ghost.RemoveAll()?;
+            let cx = self.x0() + self.size.w / 2.0;
+            self.shell.ghost.SetCenterPoint(Vector3 { X: cx, Y: 0.0, Z: 0.0 })?;
+            self.shell.ghost.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
             self.shell.ghost.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
             for v in &old {
                 kids.Remove(v)?;
                 ghost.InsertAtTop(v)?;
             }
             let g: CompositionObject = self.shell.ghost.cast()?;
-            keyframes(&self.paint.comp, &g, "Opacity", 1.0, 0.0, ms, 0)
+            let comp = &self.paint.comp;
+            keyframes(comp, &g, "Opacity", 1.0, 0.0, ms, 0)?;
+            if dir != 0 {
+                let shift = -(dir as f32) * 14.0 * self.dpi;
+                keyframes(comp, &g, "Offset.X", 0.0, shift, ms + 30, 0)?;
+            } else if closing {
+                keyframes(comp, &g, "Scale.X", 1.0, 0.94, ms + 20, 0)?;
+                keyframes(comp, &g, "Scale.Y", 1.0, 0.94, ms + 20, 0)?;
+                keyframes(comp, &g, "Offset.Y", 0.0, -6.0 * self.dpi, ms + 20, 0)?;
+            }
+            Ok(())
         };
         let _ = go();
         timer(self.hwnd, T_GHOST, 260);
     }
 
-    fn intro(&self, opening: bool) {
+    fn intro(&self, opening: bool, dir: i32) {
         let go = || -> windows_core::Result<()> {
             let c: CompositionObject = self.shell.content.cast()?;
             let comp = &self.paint.comp;
             if opening {
                 let cx = self.x0() + self.size.w / 2.0;
                 self.shell.content.SetCenterPoint(Vector3 { X: cx, Y: 0.0, Z: 0.0 })?;
-                let (d, ms) = (motion::CONTENT_DELAY_MS, motion::CONTENT_FADE_MS);
+                self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+                let (d, ms) = (35, 195);
                 keyframes(comp, &c, "Opacity", 0.0, 1.0, ms, d)?;
-                keyframes(comp, &c, "Scale.X", motion::CONTENT_SCALE_FROM, 1.0, ms + 60, d)?;
-                keyframes(comp, &c, "Scale.Y", motion::CONTENT_SCALE_FROM, 1.0, ms + 60, d)?;
-                keyframes(comp, &c, "Offset.Y", -motion::CONTENT_RISE_DP * self.dpi, 0.0, ms + 60, d)
+                keyframes(comp, &c, "Scale.X", 0.94, 1.0, ms + 45, d)?;
+                keyframes(comp, &c, "Scale.Y", 0.94, 1.0, ms + 45, d)?;
+                keyframes(comp, &c, "Offset.Y", -5.0 * self.dpi, 0.0, ms + 45, d)
+            } else if dir != 0 {
+                self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+                self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+                let shift = (dir as f32) * 14.0 * self.dpi;
+                keyframes(comp, &c, "Opacity", 0.0, 1.0, 180, 20)?;
+                keyframes(comp, &c, "Offset.X", shift, 0.0, 210, 10)
             } else {
                 self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
                 self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
-                keyframes(comp, &c, "Opacity", 0.0, 1.0, 150, 50)
+                keyframes(comp, &c, "Opacity", 0.0, 1.0, 150, 40)
             }
         };
         let _ = go();
@@ -1837,6 +1976,7 @@ impl Notch {
     }
 
     fn on_media(&mut self) {
+        let was_playing = self.playing;
         let mut changed = false;
         while let Ok(s) = self.media.snapshots.try_recv() {
             changed = true;
@@ -1867,7 +2007,12 @@ impl Notch {
             if track != self.lyr_track {
                 self.lyr_track = track;
                 self.marquee_t = 0.0;
+                self.art_pop_pending = self.has_media;
                 self.request_lyrics();
+            }
+            if self.playing != was_playing {
+                self.sp_art_scale.set_target(if self.playing { 1.0 } else { 0.90 }, SpringParams::open());
+                self.start_frame();
             }
             self.refresh();
             self.schedule_lyric();
@@ -2023,8 +2168,22 @@ impl Notch {
                 (fr, false, pos)
             }
         };
+        let hover_t = self.sp_scrub_hover.pos;
         if let Some(scrub) = self.live_vis.scrub.as_mut() {
-            scrub.update(&mut self.paint, frac, dragging, pos_ms);
+            scrub.update(&mut self.paint, frac, hover_t, dragging, pos_ms);
+        }
+    }
+
+    fn release_press(&mut self) {
+        if let Some(a) = self.pressed_act.take() {
+            if let Some(r) = self.find_hover_region(a) {
+                if let Some(v) = &r.vis {
+                    if let Ok(comp) = v.Compositor() {
+                        let to = if self.hover_act == Some(a) { hover_scale(a) } else { 1.0 };
+                        let _ = crate::motion::hover_pop(&comp, v, Vector3 { X: r.x + r.w / 2.0, Y: r.y + r.h / 2.0, Z: 0.0 }, to);
+                    }
+                }
+            }
         }
     }
 
@@ -2032,7 +2191,13 @@ impl Notch {
         if !matches!(self.mode, Mode::Open(_)) {
             return false;
         }
-        match self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action) {
+        let nav_hit = if self.nav_expanded || self.sp_nav.pos > 0.35 {
+            self.live_vis.nav.as_ref().and_then(|n| n.hit_region(x, y))
+        } else {
+            None
+        };
+        let hit = nav_hit.or_else(|| self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action));
+        match hit {
             Some(Action::Seek(sx, sw)) => {
                 self.seek_drag = Some((sx, sw, ((x - sx) / sw).clamp(0.0, 1.0)));
                 self.update_scrub_in_place();
@@ -2040,9 +2205,32 @@ impl Notch {
             }
             Some(Action::ShelfItem(i)) => {
                 self.shelf_press = Some((i, x, y));
+                self.press_visual(Action::ShelfItem(i));
                 false
             }
-            _ => false,
+            Some(a) => {
+                self.press_visual(a);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn press_visual(&mut self, a: Action) {
+        self.release_press();
+        if let Some(r) = self.find_hover_region(a) {
+            if let Some(v) = &r.vis {
+                let _ = v.SetCenterPoint(Vector3 { X: r.x + r.w / 2.0, Y: r.y + r.h / 2.0, Z: 0.0 });
+                let _ = crate::motion::vec3(
+                    &self.paint.comp,
+                    v,
+                    "Scale",
+                    v.Scale().unwrap_or(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }),
+                    Vector3 { X: 0.90, Y: 0.90, Z: 1.0 },
+                    85,
+                );
+                self.pressed_act = Some(a);
+            }
         }
     }
 
@@ -2071,6 +2259,7 @@ impl Notch {
 
     fn on_capture_changed(&mut self) {
         self.shelf_press = None;
+        self.release_press();
         if self.seek_drag.take().is_some() {
             self.update_scrub_in_place();
             self.sync_progress();
@@ -2079,6 +2268,7 @@ impl Notch {
 
     fn on_up(&mut self) -> bool {
         self.shelf_press = None;
+        self.release_press();
         let Some((_, _, fr)) = self.seek_drag.take() else { return false };
         if self.dur_ms > 0 {
             let ms = (self.dur_ms as f32 * fr) as i64;
@@ -2337,6 +2527,15 @@ impl Notch {
 
     fn on_hover(&mut self, x: f32, y: f32) {
         self.update_nav_hover(x, y);
+
+        // Scrub bar hover bloom (independent of Region::vis since Seek has no scale vis).
+        let on_scrub = self.regions.iter().any(|r| matches!(r.action, Action::Seek(..)) && r.hit(x, y));
+        if on_scrub != self.scrub_hovered {
+            self.scrub_hovered = on_scrub;
+            self.sp_scrub_hover.set_target(if on_scrub { 1.0 } else { 0.0 }, SpringParams::tactile());
+            self.start_frame();
+        }
+
         let nav_hit = if self.nav_expanded {
             self.live_vis.nav.as_ref().and_then(|n| n.hit_region(x, y))
         } else {
@@ -2348,6 +2547,19 @@ impl Notch {
         }
         let prev = self.hover_act;
         self.hover_act = hit;
+
+        // Magnetic inward slide springs for left (<) and right (>) edge chevrons.
+        let want_l = if hit == Some(Action::PrevTab) { 1.0 } else { 0.0 };
+        if (self.sp_chev_l.target - want_l).abs() > 0.01 {
+            self.sp_chev_l.set_target(want_l, SpringParams::tactile());
+            self.start_frame();
+        }
+        let want_r = if hit == Some(Action::NextTab) { 1.0 } else { 0.0 };
+        if (self.sp_chev_r.target - want_r).abs() > 0.01 {
+            self.sp_chev_r.set_target(want_r, SpringParams::tactile());
+            self.start_frame();
+        }
+
         for (a, on) in [(prev, false), (hit, true)] {
             let Some(r) = a.and_then(|a| self.find_hover_region(a)) else { continue };
             let Some(v) = &r.vis else { continue };
@@ -2385,6 +2597,7 @@ impl Notch {
     }
 
     fn on_leave(&mut self) {
+        self.release_press();
         self.on_hover(-1.0, -1.0);
         self.tracking = false;
         self.sync_hover_chrome();
@@ -2466,7 +2679,7 @@ impl Notch {
                 self.apply_size(Some(SpringParams::swap()));
                 self.publish_notch();
                 self.render();
-                self.intro(false);
+                self.intro(false, 0);
             }
             Action::ToggleMute => {
                 crate::services::toggle_mute();
@@ -2570,6 +2783,7 @@ impl Notch {
             }
             Action::TodoAddOpen => {
                 self.todo_adding = true;
+                self.todo_input_fade = true;
                 self.render();
                 self.focus_input(ActiveInput::Todo);
             }
@@ -2846,9 +3060,13 @@ impl Notch {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
+            self.shell.set_visible(true, self.hwnd);
             crate::topmost::request_raise();
+            let (sh_blur, sh_dy, sh_op) = state::shadow(self.look);
             self.sp_y.set_target(island_gap(self.dpi), SpringParams::stage_show());
-            self.sp_sh_op.set_target(state::shadow(self.look).2, SpringParams::stage_show());
+            self.sp_sh_blur.set_target(sh_blur, SpringParams::stage_show());
+            self.sp_sh_dy.set_target(sh_dy, SpringParams::stage_show());
+            self.sp_sh_op.set_target(sh_op, SpringParams::stage_show());
             self.start_frame();
             self.publish_notch();
             self.sync_visualizer();
@@ -2940,11 +3158,12 @@ impl Notch {
             self.dpi = dpi;
             self.win = win;
             self.rgn_rect = (-1, -1, -1, -1);
+            let wx = (screen_w - win.0) / 2;
             unsafe {
-                let _ = SetWindowPos(self.hwnd, None, (screen_w - win.0) / 2, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
+                let _ = SetWindowPos(self.hwnd, None, wx, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
             }
             let _ = self._surface.root.SetSize(Vector2 { X: win.0 as f32, Y: win.1 as f32 });
-            self.shell.resize(win);
+            self.shell.place(self.hwnd, wx, win);
             self.paint.reset(dpi);
             self.menu = None;
         }
@@ -3197,6 +3416,24 @@ fn xy(lp: LPARAM) -> (f32, f32) {
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_NCHITTEST => {
+            let mut pt = windows::Win32::Foundation::POINT {
+                x: (lp.0 as i16) as i32,
+                y: ((lp.0 >> 16) as i16) as i32,
+            };
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt);
+            let inside = with(hwnd, |d| {
+                let w = d.sp_w.pos.max(8.0);
+                let h = d.sp_h.pos.max(8.0);
+                let ear = d.sp_ear.pos.max(0.0);
+                let x0 = d.x0_for(w);
+                let cx = pt.x as f32;
+                let cy = pt.y as f32 - d.sp_y.pos;
+                d.shown && cx >= x0 - ear && cx <= x0 + w + ear && cy >= 0.0 && cy <= h
+            })
+            .unwrap_or(false);
+            LRESULT(if inside { HTCLIENT as isize } else { HTTRANSPARENT as isize })
+        }
         WM_MOUSEACTIVATE => {
             let active = with(hwnd, |d| d.focus.is_active()).unwrap_or(false);
             LRESULT(if active { MA_ACTIVATE } else { MA_NOACTIVATE } as isize)
@@ -3431,6 +3668,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_TOPMOST => {
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             with(hwnd, |d| {
+                d.shell.raise_behind(hwnd);
                 if let Some(s) = &d.strip {
                     s.to_top();
                 }

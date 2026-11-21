@@ -163,6 +163,10 @@ impl TextInput {
         self.sync_visual(paint);
     }
 
+    pub fn fade_in(&self, comp: &Compositor) {
+        let _ = crate::motion::scalar(comp, &self.root, "Opacity", 0.0, 1.0, 160);
+    }
+
     pub fn blink_caret(&mut self) {
         if !self.focused {
             let _ = self.caret.SetOpacity(0.0);
