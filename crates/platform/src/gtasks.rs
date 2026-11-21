@@ -5,7 +5,18 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static TOKEN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Returns a valid Google OAuth Bearer access token (refreshing if expired) shared across
+/// Google Tasks and Google Calendar read-only sync.
+pub fn access_token() -> Option<String> {
+    let _g = TOKEN_LOCK.lock().ok()?;
+    let mut t = load_tokens()?;
+    ensure_access_token(&mut t).ok()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -226,7 +237,7 @@ fn oauth_connect(cid: &str, csec: &str) -> Result<Tokens, String> {
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
         url_enc(cid),
         url_enc(&redirect),
-        url_enc("https://www.googleapis.com/auth/tasks"),
+        url_enc("https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/calendar.readonly"),
         url_enc(&challenge),
         url_enc(&state),
     );
@@ -257,7 +268,7 @@ fn oauth_connect(cid: &str, csec: &str) -> Result<Tokens, String> {
                 }
                 let ok = got_code.is_some() && got_state.as_deref() == Some(state.as_str());
                 let html = if ok {
-                    "<html><body style='font-family:Segoe UI,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh'><div><h2>ABRA terhubung ke Google Tasks</h2><p>Anda dapat menutup tab ini sekarang.</p></div></body></html>"
+                    "<html><body style='font-family:Segoe UI,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh'><div><h2>ABRA terhubung ke Google Tasks &amp; Calendar</h2><p>Anda dapat menutup tab ini sekarang.</p></div></body></html>"
                 } else {
                     "<html><body style='font-family:Segoe UI,sans-serif;background:#111;color:#f66;display:flex;align-items:center;justify-content:center;height:100vh'><div><h2>Otorisasi dibatalkan / gagal</h2></div></body></html>"
                 };

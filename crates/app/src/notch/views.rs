@@ -20,8 +20,6 @@ pub enum Action {
     ToggleMute,
     Seek(f32, f32),
     Tab(Tab),
-    PrevTab,
-    NextTab,
     ShelfItem(usize),
     ShelfClear,
     Zone(usize),
@@ -107,6 +105,7 @@ pub struct Data<'a> {
     pub media: Option<MediaView<'a>>,
     pub lyrics: LyricsView<'a>,
     pub lyrics_open: bool,
+    pub lyrics_progress: f32,
     pub muted: bool,
     pub hovered: bool,
     pub nav_expanded: bool,
@@ -141,7 +140,7 @@ pub struct Data<'a> {
     pub gemini_error: &'a str,
     pub gemini_has_key: bool,
     pub gemini_scroll: usize,
-    pub gemini_model_label: &'static str,
+    pub gemini_model_label: &'a str,
     pub gemini_copied: bool,
 }
 
@@ -426,9 +425,8 @@ pub struct Live {
     pub compact_glow: Option<SpriteVisual>,
     pub nav: Option<NavLive>,
     pub pin_vis: Option<ContainerVisual>,
-    pub chevrons_vis: Option<ContainerVisual>,
-    pub chev_left_slide: Option<ContainerVisual>,
-    pub chev_right_slide: Option<ContainerVisual>,
+    pub lyrics_panel: Option<ContainerVisual>,
+    pub lyrics_glow: Option<SpriteVisual>,
     pub album_art: Option<ContainerVisual>,
 }
 
@@ -477,7 +475,6 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
                 Tab::Gemini => gemini_tab(p, c, bf, d, regions, live),
                 Tab::Timer => timer(p, c, bf, d, regions),
             }
-            edge_chevrons(p, c, bf, tab, d, regions, live);
             top_utilities(p, c, bf, tab, d, regions, live);
             if nacre_core::notch::state::nav_state(tab, d.lyrics_open, false) != NavState::Hidden {
                 bottom_nav(p, c, bf, f.h, tab, d, live);
@@ -615,57 +612,6 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
     }
 }
 
-fn edge_chevrons(p: &mut Painter, c: &ContainerVisual, f: Frame, _cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
-    // Strictly centered vertically on Visor (aligned with scrub bar, matching Nusa).
-    let cy = (f.h / 2.0).round();
-    let lx = f.x0 + p.px(12.0);
-    let rx = f.x0 + f.w - p.px(12.0);
-    let dia = p.px(24.0);
-    let hit_w = p.px(26.0);
-    let hit_h = p.px(44.0);
-
-    if let Ok(wrap) = p.comp.CreateContainerVisual() {
-        let base_op = if d.hovered { 0.48 } else { 0.0 };
-        let _ = wrap.SetOpacity(base_op);
-        let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
-
-        if let Ok(slide_l) = p.comp.CreateContainerVisual() {
-            let _ = wrap.Children().and_then(|k| k.InsertAtTop(&slide_l));
-            let n0 = kids(&slide_l);
-            let bg_l = make_hover_circle(p, &slide_l, lx, cy, dia);
-            p.sym(&slide_l, Sym::ChevronLeft, lx, cy, 11.5, WHITE, 1.0);
-            regions.push(Region {
-                x: lx - p.px(10.0),
-                y: cy - hit_h / 2.0,
-                w: hit_w,
-                h: hit_h,
-                action: Action::PrevTab,
-                vis: group_since(&slide_l, n0),
-                hover_bg: bg_l,
-            });
-            live.chev_left_slide = Some(slide_l);
-        }
-
-        if let Ok(slide_r) = p.comp.CreateContainerVisual() {
-            let _ = wrap.Children().and_then(|k| k.InsertAtTop(&slide_r));
-            let n1 = kids(&slide_r);
-            let bg_r = make_hover_circle(p, &slide_r, rx, cy, dia);
-            p.sym(&slide_r, Sym::ChevronRight, rx, cy, 11.5, WHITE, 1.0);
-            regions.push(Region {
-                x: rx - hit_w + p.px(10.0),
-                y: cy - hit_h / 2.0,
-                w: hit_w,
-                h: hit_h,
-                action: Action::NextTab,
-                vis: group_since(&slide_r, n1),
-                hover_bg: bg_r,
-            });
-            live.chev_right_slide = Some(slide_r);
-        }
-        live.chevrons_vis = Some(wrap);
-    }
-}
-
 fn bottom_nav(p: &mut Painter, c: &ContainerVisual, bf: Frame, cur_h: f32, cur: Tab, d: &Data, live: &mut Live) {
     let items: [(Option<Tab>, Sym); 7] = [
         (Some(Tab::Play), Sym::Note),
@@ -721,10 +667,10 @@ fn bottom_nav(p: &mut Painter, c: &ContainerVisual, bf: Frame, cur_h: f32, cur: 
             if let Some(dot_vis) = p.rect(&dots_group, dx, dy, dw, dot_d, dot_d / 2.0, col) {
                 if tab_switched && on {
                     let _ = dot_vis.SetCenterPoint(Vector3 { X: dw / 2.0, Y: dot_d / 2.0, Z: 0.0 });
-                    let _ = crate::motion::scalar(&p.comp, &dot_vis, "Scale.X", 0.28, 1.0, 220);
+                    let _ = crate::motion::scalar(&p.comp, &dot_vis, "Scale.X", 0.28, 1.0, 360);
                 } else if tab_switched && was {
                     let _ = dot_vis.SetCenterPoint(Vector3 { X: dw / 2.0, Y: dot_d / 2.0, Z: 0.0 });
-                    let _ = crate::motion::scalar(&p.comp, &dot_vis, "Scale.X", 2.4, 1.0, 180);
+                    let _ = crate::motion::scalar(&p.comp, &dot_vis, "Scale.X", 2.4, 1.0, 320);
                 }
             }
             dx += dw + dot_gap;
@@ -864,8 +810,8 @@ fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
         p.sym(c, Sym::Bell, cx, cy - p.px(18.0), 20.0, WHITE, 0.34);
         p.text(c, tr("Belum ada notifikasi"), cx, cy + p.px(4.0), 12.5, 600, WHITE, 0.88, Anchor::Center, w - p.px(8.0));
         let sub = match d.notif_status {
-            Status::NeedsIdentity => tr("Jalankan packaging\\register-sparse.ps1 untuk membaca notifikasi Windows."),
             Status::Denied => tr("Aktifkan izin notifikasi untuk ABRA di Pengaturan Privasi Windows."),
+            Status::Unsupported => tr("Listener notifikasi tidak tersedia pada sesi Windows ini."),
             _ => tr("Notifikasi baru dari aplikasi Windows akan muncul di sini."),
         };
         p.text(c, &p.fit(sub, 10.5, 400, w - p.px(8.0)), cx, cy + p.px(22.0), 10.5, 400, WHITE, 0.46, Anchor::Center, w);
@@ -1747,18 +1693,24 @@ fn draw_gemini_response(
 }
 
 fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
-    // Contextual ambient glow: ONLY when lyrics panel is open (pure #000000 in compact Player mode).
-    if d.lyrics_open {
+    let lp = d.lyrics_progress.clamp(0.0, 1.0);
+    let show_lyrics_layer = d.lyrics_open || lp > 0.01;
+
+    // Contextual ambient glow: smoothly fades in/out in lockstep with `sp_lyrics`.
+    if show_lyrics_layer {
         if let Some(m) = &d.media {
             let glow = accent_or(m.tint);
-            p.ambient_glow(c, bf.x0, 0.0, bf.w, full_h, 0.0, glow, false);
+            if let Some(gv) = p.ambient_glow(c, bf.x0, 0.0, bf.w, full_h, 0.0, glow, false) {
+                let _ = gv.SetOpacity(lp);
+                live.lyrics_glow = Some(gv);
+            }
         }
     }
 
     let pad = p.px(EDGE_PAD_DP);
     let top = p.px(14.0);
 
-    if d.lyrics_open {
+    if show_lyrics_layer {
         let bot = bf.h - p.px(12.0);
         let h = (bot - top).max(p.px(80.0));
         let mx = bf.x0 + pad + p.px(4.0);
@@ -1768,19 +1720,31 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
         let lw = (bf.x0 + bf.w - pad - lx).max(p.px(80.0));
 
         match &d.media {
-            Some(m) => music_column(p, c, mx, top, mw, h, m, true, d.muted, d.scrub_hover, d.art_scale, regions, live),
+            Some(m) => music_column(p, c, mx, top, mw, h, m, d.lyrics_open, d.muted, d.scrub_hover, d.art_scale, regions, live),
             None => {
                 p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
                 p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
                 let qx = mx + mw / 2.0;
                 let qy = top + h - p.px(14.0);
                 let n0 = kids(c);
-                p.sym(c, Sym::Quote, qx, qy, 20.5, WHITE, 0.78);
+                p.sym(c, Sym::Quote, qx, qy, 20.5, WHITE, if d.lyrics_open { 0.95 } else { 0.52 });
                 regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
             }
         }
-        p.divider_v(c, div_x, top + p.px(4.0), h - p.px(8.0));
-        lyrics_slot(p, c, lx, top, lw, h, d, live, false);
+        // Gliding lyrics panel container: slides out from behind the music player (`-12 dp -> 0`) + opacity sync.
+        if let Ok(panel) = p.comp.CreateContainerVisual() {
+            let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
+            let slide_x = -(1.0 - lp) * p.px(12.0);
+            let _ = panel.SetOpacity(panel_op);
+            let _ = panel.SetOffset(Vector3 { X: slide_x, Y: 0.0, Z: 0.0 });
+            let _ = c.Children().and_then(|k| k.InsertAtTop(&panel));
+            p.divider_v(&panel, div_x, top + p.px(4.0), h - p.px(8.0));
+            lyrics_slot(p, &panel, lx, top, lw, h, d, live, false);
+            live.lyrics_panel = Some(panel);
+        } else {
+            p.divider_v(c, div_x, top + p.px(4.0), h - p.px(8.0));
+            lyrics_slot(p, c, lx, top, lw, h, d, live, false);
+        }
     } else {
         let bot = bf.h - p.px(DOTS_STRIP_DP + 2.0);
         let h = (bot - top).max(p.px(80.0));

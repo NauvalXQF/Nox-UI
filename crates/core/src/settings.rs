@@ -313,6 +313,7 @@ pub struct Settings {
     pub notch_notif_peek: bool,
     pub notch_notifs: bool,
     pub gemini_model: u8,
+    pub gemini_custom_model: ShortText,
     pub widget_style: u8,
     pub battery_pct: u8,
 }
@@ -375,6 +376,7 @@ impl Default for Settings {
             notch_notif_peek: true,
             notch_notifs: true,
             gemini_model: 0,
+            gemini_custom_model: ShortText::EMPTY,
             widget_style: 0,
             battery_pct: 2,
         }
@@ -561,7 +563,8 @@ impl Settings {
                         s.notch_notifs = b;
                     }
                 }
-                "gemini_model" => s.gemini_model = v.parse::<u8>().map(|n| n.min(1)).unwrap_or(s.gemini_model),
+                "gemini_model" => s.gemini_model = v.parse::<u8>().map(|n| n.min(3)).unwrap_or(s.gemini_model),
+                "gemini_custom_model" => s.gemini_custom_model = ShortText::new(v),
                 "widget_style" => s.widget_style = v.parse::<u8>().map(|n| n.min(1)).unwrap_or(s.widget_style),
                 "battery_pct" => s.battery_pct = v.parse::<u8>().map(|n| n.min(2)).unwrap_or(s.battery_pct),
                 "autostart" => {
@@ -580,7 +583,7 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "# ABRA settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\nstyle={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\ngemini_model={}\nwidget_style={}\nbattery_pct={}\n",
+            "# ABRA settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\nstyle={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -639,6 +642,7 @@ impl Settings {
             self.notch_notif_peek,
             self.notch_notifs,
             self.gemini_model,
+            self.gemini_custom_model.as_str(),
             self.widget_style,
             self.battery_pct
         )

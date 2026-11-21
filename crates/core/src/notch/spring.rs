@@ -34,6 +34,16 @@ impl SpringParams {
         Self::from_response(0.30, 0.84)
     }
 
+    /// Satisfying slow-mo critically-damped glide for tab switching (~360-400ms settle).
+    pub fn tab_glide() -> Self {
+        Self::from_response(0.42, 0.96)
+    }
+
+    /// Silky horizontal glide for toggling the lyrics panel (395 <-> 530 dp, ~380-420ms).
+    pub fn lyrics_glide() -> Self {
+        Self::from_response(0.46, 0.95)
+    }
+
     pub fn tactile() -> Self {
         Self::from_response(0.20, 0.76)
     }

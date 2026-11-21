@@ -37,6 +37,30 @@ fn api_key() -> Option<String> {
         .or_else(|| std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.trim().is_empty()))
 }
 
+/// Fetches active Gemini models supporting `generateContent` from `v1beta/models`.
+pub fn fetch_models() -> Result<Vec<String>, String> {
+    let Some(key) = api_key() else {
+        return Err("Gemini API Key belum diatur.".into());
+    };
+    let (status, body) = http::request(
+        "GET",
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100",
+        &[("x-goog-api-key", key.as_str())],
+        None,
+    )?;
+    if status >= 400 {
+        let msg = nacre_core::notch::json::parse(&body)
+            .and_then(|j| j.get("error")?.get("message")?.as_str().map(String::from))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(msg);
+    }
+    let models = nacre_core::notch::gemini::parse_models_list(&body);
+    if models.is_empty() {
+        return Err("Tidak ada model Gemini aktif ditemukan.".into());
+    }
+    Ok(models)
+}
+
 pub fn spawn(notify: impl Fn() + Send + 'static) -> Gemini {
     let (cmd_tx, cmd_rx) = channel::<Cmd>();
     let (ev_tx, ev_rx) = channel::<Event>();

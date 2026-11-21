@@ -201,6 +201,22 @@ fn keyframes(comp: &Compositor, obj: &CompositionObject, prop: &str, from: f32, 
     obj.StartAnimation(&HSTRING::from(prop), &a)
 }
 
+/// Velvety slow-mo glide easing (`cubic-bezier(0.22, 1.0, 0.36, 1.0)`) for satisfying tab transitions.
+fn keyframes_glide(comp: &Compositor, obj: &CompositionObject, prop: &str, from: f32, to: f32, ms: u32, delay: u32) -> windows_core::Result<()> {
+    let e: windows::UI::Composition::CompositionEasingFunction = comp
+        .CreateCubicBezierEasingFunction(Vector2 { X: 0.22, Y: 1.0 }, Vector2 { X: 0.36, Y: 1.0 })?
+        .cast()?;
+    let a = comp.CreateScalarKeyFrameAnimation()?;
+    a.InsertKeyFrame(0.0, from)?;
+    a.InsertKeyFrameWithEasingFunction(1.0, to, &e)?;
+    a.SetDuration(ts(ms))?;
+    if delay > 0 {
+        a.SetDelayTime(ts(delay))?;
+        a.SetDelayBehavior(AnimationDelayBehavior::SetInitialValueBeforeDelay)?;
+    }
+    obj.StartAnimation(&HSTRING::from(prop), &a)
+}
+
 fn with<R>(hwnd: HWND, f: impl FnOnce(&mut Notch) -> R) -> Option<R> {
     let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Notch;
     if p.is_null() || BUSY.swap(true, Ordering::Acquire) {
@@ -344,8 +360,7 @@ pub struct Notch {
     sp_sh_dy: Spring,
     sp_sh_op: Spring,
     sp_nav: Spring,
-    sp_chev_l: Spring,
-    sp_chev_r: Spring,
+    sp_lyrics: Spring,
     sp_scrub_hover: Spring,
     sp_art_scale: Spring,
     nav_expanded: bool,
@@ -535,8 +550,7 @@ impl Notch {
                 sp_sh_dy: Spring::new(init_sh_dy, SpringParams::swap()),
                 sp_sh_op: Spring::new(init_sh_op, SpringParams::swap()),
                 sp_nav: Spring::new(0.0, SpringParams::swap()),
-                sp_chev_l: Spring::new(0.0, SpringParams::tactile()),
-                sp_chev_r: Spring::new(0.0, SpringParams::tactile()),
+                sp_lyrics: Spring::new(1.0, SpringParams::lyrics_glide()),
                 sp_scrub_hover: Spring::new(0.0, SpringParams::tactile()),
                 sp_art_scale: Spring::new(1.0, SpringParams::open()),
                 nav_expanded: false,
@@ -803,20 +817,29 @@ impl Notch {
             }
         }
 
-        // Magnetic inward slide springs on left (<) and right (>) edge chevrons.
-        let chev_l_moving = self.sp_chev_l.step(dt);
-        let chev_r_moving = self.sp_chev_r.step(dt);
-        if chev_l_moving {
-            if let Some(v) = &self.live_vis.chev_left_slide {
-                let _ = v.SetOffset(Vector3 { X: (5.0 * self.dpi * self.sp_chev_l.pos).round(), Y: 0.0, Z: 0.0 });
+        // Smooth gliding reveal/hide for Tab::Play lyrics panel, vertical divider & ambient glow.
+        let lyrics_moving = self.sp_lyrics.step(dt);
+        if lyrics_moving || (springs_moving && self.live_vis.lyrics_glow.is_some()) {
+            let lp = self.sp_lyrics.pos.clamp(0.0, 1.0);
+            if let Some(gv) = &self.live_vis.lyrics_glow {
+                let _ = gv.SetOpacity(lp);
+                let gx = ((self.win.0 as f32 - self.sp_w.pos) / 2.0).round();
+                let _ = gv.SetOffset(Vector3 { X: gx, Y: 0.0, Z: 0.0 });
+                let _ = gv.SetSize(Vector2 { X: self.sp_w.pos, Y: self.sp_h.pos });
             }
-            springs_moving = true;
+            if let Some(panel) = &self.live_vis.lyrics_panel {
+                let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
+                let slide_x = -(1.0 - lp) * 12.0 * self.dpi;
+                let _ = panel.SetOpacity(panel_op);
+                let _ = panel.SetOffset(Vector3 { X: slide_x, Y: 0.0, Z: 0.0 });
+            }
+            if lyrics_moving {
+                springs_moving = true;
+            }
         }
-        if chev_r_moving {
-            if let Some(v) = &self.live_vis.chev_right_slide {
-                let _ = v.SetOffset(Vector3 { X: -(5.0 * self.dpi * self.sp_chev_r.pos).round(), Y: 0.0, Z: 0.0 });
-            }
-            springs_moving = true;
+        if !lyrics_moving && !self.lyrics_open && self.mode == Mode::Open(Tab::Play) && self.live_vis.lyrics_panel.is_some() {
+            // Closing glide completed: switch cleanly to full-width non-lyrics player + bottom dots.
+            self.render();
         }
 
         // Smooth scrub-bar hover bloom (track thicken + thumb expand).
@@ -1206,7 +1229,8 @@ impl Notch {
         if let Some(gi) = self.gemini_input.as_mut() {
             gi.buf.clear();
         }
-        let model = nacre_core::notch::gemini::model_id(crate::prefs::get().gemini_model).to_string();
+        let s = crate::prefs::get();
+        let model = nacre_core::notch::gemini::active_model_id(s.gemini_model, s.gemini_custom_model.as_str()).to_string();
         let _ = self.gemini.commands.send(nacre_platform::gemini::Cmd::Ask {
             id,
             prompt: trimmed.to_string(),
@@ -1264,8 +1288,15 @@ impl Notch {
         while let Ok(ev) = self.gtasks.events.try_recv() {
             match ev {
                 nacre_platform::gtasks::Event::Status(st) => {
+                    let newly_synced = st == nacre_platform::gtasks::SyncStatus::Synced
+                        && self.todo_status != nacre_platform::gtasks::SyncStatus::Synced;
                     self.todo_status = st;
                     changed = true;
+                    if newly_synced {
+                        // Refresh Google Calendar agendas right after unified Google OAuth syncs.
+                        self.cal_events = None;
+                        self.ensure_events();
+                    }
                 }
                 nacre_platform::gtasks::Event::Synced(list) => {
                     self.todos.merge_remote(list, now);
@@ -1619,6 +1650,8 @@ impl Notch {
             SpringParams::close()
         } else if old.view == new.view {
             SpringParams::peek()
+        } else if matches!((old.view, new.view), (View::Open(_), View::Open(_))) {
+            SpringParams::tab_glide()
         } else {
             SpringParams::swap()
         }
@@ -1665,11 +1698,15 @@ impl Notch {
             self.todo_editing = false;
             self.scrub_hovered = false;
             self.sp_scrub_hover.snap(0.0);
-            self.sp_chev_l.snap(0.0);
-            self.sp_chev_r.snap(0.0);
-        } else if new.view != View::Open(Tab::Todo) {
-            self.todo_adding = false;
-            self.todo_editing = false;
+            self.sp_lyrics.snap(if self.lyrics_open { 1.0 } else { 0.0 });
+        } else {
+            if new.view != View::Open(Tab::Todo) {
+                self.todo_adding = false;
+                self.todo_editing = false;
+            }
+            if new.view == View::Open(Tab::Play) && old.view != View::Open(Tab::Play) {
+                self.sp_lyrics.snap(if self.lyrics_open { 1.0 } else { 0.0 });
+            }
         }
         let sp = (!first).then(|| Self::spring_for(old, new));
         if view_changed && !first {
@@ -1807,7 +1844,11 @@ impl Notch {
         let todos = self.todos.visible();
         let todo_total = todos.len();
         let todo_done = todos.iter().filter(|t| t.completed).count();
-        let gemini_model_label = nacre_core::notch::gemini::model_label(crate::prefs::get().gemini_model);
+        let s_prefs = crate::prefs::get();
+        let gemini_model_label = nacre_core::notch::gemini::display_model_name(
+            s_prefs.gemini_model,
+            s_prefs.gemini_custom_model.as_str(),
+        );
         let gemini_has_key = nacre_platform::gemini::has_api_key();
         let d = Data {
             battery: self.battery,
@@ -1817,6 +1858,7 @@ impl Notch {
             media,
             lyrics,
             lyrics_open: self.lyrics_open,
+            lyrics_progress: self.sp_lyrics.pos,
             muted: self.muted,
             hovered: self.tracking,
             nav_expanded: self.nav_expanded,
@@ -1851,18 +1893,12 @@ impl Notch {
             gemini_error: &self.gemini_err,
             gemini_has_key,
             gemini_scroll: self.gemini_scroll,
-            gemini_model_label,
+            gemini_model_label: &gemini_model_label,
             gemini_copied: self.gemini_copied,
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
         if let Some(nav) = self.live_vis.nav.as_mut() {
             nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
-        }
-        if let Some(v) = &self.live_vis.chev_left_slide {
-            let _ = v.SetOffset(Vector3 { X: (5.0 * self.dpi * self.sp_chev_l.pos).round(), Y: 0.0, Z: 0.0 });
-        }
-        if let Some(v) = &self.live_vis.chev_right_slide {
-            let _ = v.SetOffset(Vector3 { X: -(5.0 * self.dpi * self.sp_chev_r.pos).round(), Y: 0.0, Z: 0.0 });
         }
         if self.art_pop_pending {
             if let Some(art) = &self.live_vis.album_art {
@@ -1925,19 +1961,23 @@ impl Notch {
             }
             let g: CompositionObject = self.shell.ghost.cast()?;
             let comp = &self.paint.comp;
-            keyframes(comp, &g, "Opacity", 1.0, 0.0, ms, 0)?;
             if dir != 0 {
-                let shift = -(dir as f32) * 14.0 * self.dpi;
-                keyframes(comp, &g, "Offset.X", 0.0, shift, ms + 30, 0)?;
-            } else if closing {
-                keyframes(comp, &g, "Scale.X", 1.0, 0.94, ms + 20, 0)?;
-                keyframes(comp, &g, "Scale.Y", 1.0, 0.94, ms + 20, 0)?;
-                keyframes(comp, &g, "Offset.Y", 0.0, -6.0 * self.dpi, ms + 20, 0)?;
+                // Slow-mo glide outgoing tab: smooth crossfade + 18 dp lateral drift.
+                let shift = -(dir as f32) * 18.0 * self.dpi;
+                keyframes_glide(comp, &g, "Opacity", 1.0, 0.0, 240, 0)?;
+                keyframes_glide(comp, &g, "Offset.X", 0.0, shift, 350, 0)?;
+            } else {
+                keyframes(comp, &g, "Opacity", 1.0, 0.0, ms, 0)?;
+                if closing {
+                    keyframes(comp, &g, "Scale.X", 1.0, 0.94, ms + 20, 0)?;
+                    keyframes(comp, &g, "Scale.Y", 1.0, 0.94, ms + 20, 0)?;
+                    keyframes(comp, &g, "Offset.Y", 0.0, -6.0 * self.dpi, ms + 20, 0)?;
+                }
             }
             Ok(())
         };
         let _ = go();
-        timer(self.hwnd, T_GHOST, 260);
+        timer(self.hwnd, T_GHOST, if dir != 0 { 420 } else { 260 });
     }
 
     fn intro(&self, opening: bool, dir: i32) {
@@ -1954,11 +1994,12 @@ impl Notch {
                 keyframes(comp, &c, "Scale.Y", 0.94, 1.0, ms + 45, d)?;
                 keyframes(comp, &c, "Offset.Y", -5.0 * self.dpi, 0.0, ms + 45, d)
             } else if dir != 0 {
+                // Slow-mo glide incoming tab (~380 ms velvety deceleration, ±18 dp).
                 self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
                 self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
-                let shift = (dir as f32) * 14.0 * self.dpi;
-                keyframes(comp, &c, "Opacity", 0.0, 1.0, 180, 20)?;
-                keyframes(comp, &c, "Offset.X", shift, 0.0, 210, 10)
+                let shift = (dir as f32) * 18.0 * self.dpi;
+                keyframes_glide(comp, &c, "Opacity", 0.0, 1.0, 320, 30)?;
+                keyframes_glide(comp, &c, "Offset.X", shift, 0.0, 380, 0)
             } else {
                 self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
                 self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
@@ -2452,15 +2493,6 @@ impl Notch {
                 }
             }
         }
-        if let Some(ch) = &self.live_vis.chevrons_vis {
-            let to = if self.tracking { 0.48 } else { 0.0 };
-            let from = ch.Opacity().unwrap_or(to);
-            if (from - to).abs() > 0.01 {
-                if let Ok(o) = ch.cast::<CompositionObject>() {
-                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, to, 140, 0);
-                }
-            }
-        }
     }
 
     fn set_nav_expanded(&mut self, on: bool) {
@@ -2551,18 +2583,6 @@ impl Notch {
         let prev = self.hover_act;
         self.hover_act = hit;
 
-        // Magnetic inward slide springs for left (<) and right (>) edge chevrons.
-        let want_l = if hit == Some(Action::PrevTab) { 1.0 } else { 0.0 };
-        if (self.sp_chev_l.target - want_l).abs() > 0.01 {
-            self.sp_chev_l.set_target(want_l, SpringParams::tactile());
-            self.start_frame();
-        }
-        let want_r = if hit == Some(Action::NextTab) { 1.0 } else { 0.0 };
-        if (self.sp_chev_r.target - want_r).abs() > 0.01 {
-            self.sp_chev_r.set_target(want_r, SpringParams::tactile());
-            self.start_frame();
-        }
-
         for (a, on) in [(prev, false), (hit, true)] {
             let Some(r) = a.and_then(|a| self.find_hover_region(a)) else { continue };
             let Some(v) = &r.vis else { continue };
@@ -2573,17 +2593,6 @@ impl Notch {
                 if let Ok(o) = bg.cast::<CompositionObject>() {
                     let from = bg.Opacity().unwrap_or(if on { 0.0 } else { 1.0 });
                     let _ = keyframes(&self.paint.comp, &o, "Opacity", from, if on { 1.0 } else { 0.0 }, 120, 0);
-                }
-            }
-        }
-        // Boost chevrons / pin wrapper opacity to crisp 1.0 while directly hovered.
-        if let Some(ch) = &self.live_vis.chevrons_vis {
-            let on_ch = matches!(hit, Some(Action::PrevTab | Action::NextTab));
-            let to = if on_ch { 1.0 } else if self.tracking { 0.48 } else { 0.0 };
-            let from = ch.Opacity().unwrap_or(to);
-            if (from - to).abs() > 0.01 {
-                if let Ok(o) = ch.cast::<CompositionObject>() {
-                    let _ = keyframes(&self.paint.comp, &o, "Opacity", from, to, 120, 0);
                 }
             }
         }
@@ -2678,19 +2687,21 @@ impl Notch {
                     self.sp_nav.snap(0.0);
                     kill(self.hwnd, T_NAV_COLLAPSE);
                 }
-                self.retire_content(motion::SWAP_FADE_MS);
-                self.apply_size(Some(SpringParams::swap()));
+                let glide = SpringParams::lyrics_glide();
+                self.sp_lyrics.set_target(if self.lyrics_open { 1.0 } else { 0.0 }, glide);
+                self.apply_size(Some(glide));
                 self.publish_notch();
-                self.render();
-                self.intro(false, 0);
+                if self.lyrics_open || self.live_vis.lyrics_panel.is_none() {
+                    // Mount lyrics panel at current `sp_lyrics.pos` so it glides smoothly in without flashing the player.
+                    self.render();
+                }
+                self.start_frame();
             }
             Action::ToggleMute => {
                 crate::services::toggle_mute();
                 self.muted = !self.muted;
                 self.render();
             }
-            Action::PrevTab => self.step_tab(-1),
-            Action::NextTab => self.step_tab(1),
             Action::Seek(..) | Action::Zone(_) => {}
             Action::ShelfItem(i) => {
                 if let Some(it) = self.shelf.items().get(i) {
@@ -3717,7 +3728,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 }
 
 fn hover_scale(a: Action) -> f32 {
-    if matches!(a, Action::PrevTab | Action::NextTab | Action::Pin) {
+    if a == Action::Pin {
         1.15
     } else if matches!(a, Action::ShelfItem(_)) {
         crate::motion::HOVER_ROW

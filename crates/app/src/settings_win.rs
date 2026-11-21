@@ -9,6 +9,7 @@ use nacre_platform::{log, sys};
 use nacre_ui::gfx::Gfx;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use windows::core::w;
 use windows::UI::Color;
 use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual};
@@ -21,6 +22,8 @@ use windows_core::Interface;
 use windows_numerics::{Vector2, Vector3};
 
 const WM_CLOSE_SELF: u32 = WM_APP + 50;
+const WM_GEMINI_MODELS: u32 = WM_APP + 51;
+static FETCHED_GEMINI_RESULT: Mutex<Option<Result<Vec<String>, String>>> = Mutex::new(None);
 const W: f32 = 780.0;
 const H: f32 = 560.0;
 const SIDEBAR_W: f32 = 214.0;
@@ -87,6 +90,8 @@ enum Action {
     NotifSetup,
     GoogleTasksToggle,
     GeminiModel(u8),
+    GeminiFetchModels,
+    GeminiCycleFetched,
     LyricsOnline,
     LyricsDir,
     Donate,
@@ -202,6 +207,9 @@ struct Win {
     thumbs: HashMap<String, CompositionDrawingSurface>,
     edit: Option<u8>,
     edit_buf: String,
+    fetched_models: Vec<String>,
+    models_status: String,
+    fetching_models: bool,
     frame: Option<windows::UI::Composition::SpriteVisual>,
     frame_key: (i32, i32, bool),
 }
@@ -235,7 +243,7 @@ fn create(comp: &Compositor) -> windows_core::Result<()> {
     };
     let _ = popup.panel.set_tier(tier);
     let _ = popup.panel.set_radius(24.0 * dpi);
-    let mut win = Box::new(Win { popup, gfx, comp: comp.clone(), dpi, size: (0.0, 0.0), regions: vec![], cache: HashMap::new(), dragging: None, side: vec![], side_hover: None, side_scroll: 0.0, side_view: (0.0, 0.0), side_bar: None, side_drag: None, press: None, tab: 0, scroll: 0.0, content_h: 0.0, history: vec![0], hpos: 0, search: String::new(), search_focus: false, thumbs: HashMap::new(), edit: None, edit_buf: String::new(), frame: None, frame_key: (0, 0, false) });
+    let mut win = Box::new(Win { popup, gfx, comp: comp.clone(), dpi, size: (0.0, 0.0), regions: vec![], cache: HashMap::new(), dragging: None, side: vec![], side_hover: None, side_scroll: 0.0, side_view: (0.0, 0.0), side_bar: None, side_drag: None, press: None, tab: 0, scroll: 0.0, content_h: 0.0, history: vec![0], hpos: 0, search: String::new(), search_focus: false, thumbs: HashMap::new(), edit: None, edit_buf: String::new(), fetched_models: Vec::new(), models_status: String::new(), fetching_models: false, frame: None, frame_key: (0, 0, false) });
     win.render();
     let (sw, sh) = sys::screen_size();
     let (w, h) = (win.size.0 as i32, win.size.1 as i32);
@@ -474,6 +482,10 @@ impl Win {
             4 => {
                 nacre_platform::cred::write_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_SECRET, &self.edit_buf);
                 prefs::broadcast();
+            }
+            5 => {
+                let m = nacre_core::settings::ShortText::new(&self.edit_buf);
+                prefs::update(|s| s.gemini_custom_model = m);
             }
             _ => {}
         }
@@ -769,15 +781,16 @@ impl Win {
                 {
                     use nacre_platform::notifications::{status, Status};
                     let st = match status() {
-                        Status::Connected => prefs::tr("Tersambung"),
-                        Status::NeedsIdentity => prefs::tr("Butuh Paket Identitas"),
+                        Status::Connected => prefs::tr("Aktif (WinRT)"),
+                        Status::ConnectedUia => prefs::tr("Aktif (Zero-Config)"),
+                        Status::NeedsIdentity => prefs::tr("Mode Zero-Config"),
                         Status::Denied => prefs::tr("Ditolak"),
                         Status::Unsupported => prefs::tr("Tidak didukung"),
                         Status::Connecting => prefs::tr("Menyambung…"),
                     };
                     vec![
                         RowDef::Toggle(prefs::tr("Tampilkan notifikasi Windows di Visor"), s.notch_notifs, Action::NotchNotifs),
-                        RowDef::Pick(prefs::tr("Izin notifikasi Windows"), st.to_string(), Action::NotifSetup),
+                        RowDef::Pick(prefs::tr("Listener notifikasi Windows"), st.to_string(), Action::NotifSetup),
                     ]
                 },
             ), (
@@ -814,7 +827,7 @@ impl Win {
                     RowDef::Toggle(prefs::tr("Kirim ke HP lewat QR (Wi-Fi yang sama)"), s.notch_send, Action::NotchSend),
                 ],
             ), (
-                Some(prefs::tr("Google To-Do")),
+                Some(prefs::tr("Google (Tasks & Calendar)")),
                 {
                     use nacre_platform::cred;
                     use nacre_platform::gtasks::{status, SyncStatus};
@@ -828,7 +841,7 @@ impl Win {
                     let cid = cred::read_secret(cred::TARGET_GTASKS_CLIENT_ID).map(|v| cred::mask_secret(&v)).unwrap_or_default();
                     let csec = cred::read_secret(cred::TARGET_GTASKS_CLIENT_SECRET).map(|v| cred::mask_secret(&v)).unwrap_or_default();
                     vec![
-                        RowDef::Pick(prefs::tr("Akun Google Tasks"), st.to_string(), Action::GoogleTasksToggle),
+                        RowDef::Pick(prefs::tr("Akun Google (Tasks & Calendar)"), st.to_string(), Action::GoogleTasksToggle),
                         RowDef::Text(prefs::tr("Google Client ID"), cid, prefs::tr("Tempel ID…").to_string(), 3),
                         RowDef::Text(prefs::tr("Google Client Secret"), csec, prefs::tr("Tempel rahasia…").to_string(), 4),
                     ]
@@ -838,14 +851,61 @@ impl Win {
                 {
                     use nacre_platform::cred;
                     let key = cred::read_secret(cred::TARGET_GEMINI_KEY).map(|v| cred::mask_secret(&v)).unwrap_or_default();
-                    vec![
+                    let custom = s.gemini_custom_model.as_str().to_string();
+                    let seg_sel = if custom.is_empty() {
+                        s.gemini_model.min(3) as usize
+                    } else {
+                        nacre_core::notch::gemini::MODELS
+                            .iter()
+                            .position(|m| m.eq_ignore_ascii_case(&custom))
+                            .unwrap_or(usize::MAX)
+                    };
+                    let fetch_label = if self.fetching_models {
+                        prefs::tr("Mengambil…").to_string()
+                    } else if !self.models_status.is_empty() {
+                        self.models_status.clone()
+                    } else {
+                        prefs::tr("Refresh / Fetch Models").to_string()
+                    };
+                    let mut rows = vec![
                         RowDef::Text(prefs::tr("Gemini API Key"), key, prefs::tr("Tempel kunci…").to_string(), 2),
                         RowDef::Seg(
-                            prefs::tr("Model Gemini"),
-                            vec![("2.5 Flash", Action::GeminiModel(0)), ("2.5 Pro", Action::GeminiModel(1))],
-                            s.gemini_model.min(1) as usize,
+                            prefs::tr("Model preset"),
+                            vec![
+                                ("3.6 Flash", Action::GeminiModel(0)),
+                                ("3.5 Pro", Action::GeminiModel(1)),
+                                ("3.5 Flash", Action::GeminiModel(2)),
+                                ("2.5 Flash", Action::GeminiModel(3)),
+                            ],
+                            seg_sel,
                         ),
-                    ]
+                        RowDef::Text(
+                            prefs::tr("Custom Model ID"),
+                            custom.clone(),
+                            prefs::tr("Kosong = pakai preset…").to_string(),
+                            5,
+                        ),
+                        RowDef::Pick(prefs::tr("Daftar model aktif"), fetch_label, Action::GeminiFetchModels),
+                    ];
+                    if !self.fetched_models.is_empty() {
+                        let cur_idx = self
+                            .fetched_models
+                            .iter()
+                            .position(|m| m.eq_ignore_ascii_case(&custom))
+                            .unwrap_or(0);
+                        let live_lbl = format!(
+                            "{} ({}/{})",
+                            self.fetched_models[cur_idx],
+                            cur_idx + 1,
+                            self.fetched_models.len()
+                        );
+                        rows.push(RowDef::Pick(
+                            prefs::tr("Model live (klik ganti)"),
+                            live_lbl,
+                            Action::GeminiCycleFetched,
+                        ));
+                    }
+                    rows
                 },
             )],
             3 => {
@@ -1510,6 +1570,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                                 2 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GEMINI_KEY).unwrap_or_default(),
                                 3 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_ID).unwrap_or_default(),
                                 4 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_SECRET).unwrap_or_default(),
+                                5 => s.gemini_custom_model.as_str().to_string(),
                                 _ => String::new(),
                             };
                             w.edit = Some(f);
@@ -1525,7 +1586,60 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::NotchSend) => prefs::update(|s| s.notch_send = !s.notch_send),
                 Some(Action::NotchNotifPeek) => prefs::update(|s| s.notch_notif_peek = !s.notch_notif_peek),
                 Some(Action::NotchNotifs) => prefs::update(|s| s.notch_notifs = !s.notch_notifs),
-                Some(Action::GeminiModel(m)) => prefs::update(|s| s.gemini_model = m),
+                Some(Action::GeminiModel(m)) => prefs::update(|s| {
+                    s.gemini_model = m;
+                    s.gemini_custom_model = nacre_core::settings::ShortText::EMPTY;
+                }),
+                Some(Action::GeminiFetchModels) => {
+                    let already = with_win(|w| {
+                        if w.fetching_models {
+                            return true;
+                        }
+                        w.fetching_models = true;
+                        w.models_status = prefs::tr("Mengambil…").to_string();
+                        w.render();
+                        false
+                    })
+                    .unwrap_or(true);
+                    if !already {
+                        let hw = hwnd.0 as isize;
+                        std::thread::spawn(move || {
+                            let res = nacre_platform::gemini::fetch_models();
+                            if let Ok(mut g) = FETCHED_GEMINI_RESULT.lock() {
+                                *g = Some(res);
+                            }
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(HWND(hw as *mut core::ffi::c_void)),
+                                    WM_GEMINI_MODELS,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        });
+                    }
+                }
+                Some(Action::GeminiCycleFetched) => {
+                    let next = with_win(|w| {
+                        if w.fetched_models.is_empty() {
+                            return None;
+                        }
+                        let cur = prefs::get().gemini_custom_model;
+                        let cur_s = cur.as_str();
+                        let next_i = w
+                            .fetched_models
+                            .iter()
+                            .position(|m| m.eq_ignore_ascii_case(cur_s))
+                            .map(|i| (i + 1) % w.fetched_models.len())
+                            .unwrap_or(0);
+                        Some(w.fetched_models[next_i].clone())
+                    })
+                    .flatten();
+                    if let Some(m) = next {
+                        let st = nacre_core::settings::ShortText::new(&m);
+                        prefs::update(|s| s.gemini_custom_model = st);
+                    }
+                }
                 Some(Action::GoogleTasksToggle) => {
                     use nacre_platform::gtasks::{status, SyncStatus};
                     match status() {
@@ -1668,6 +1782,25 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
                 _ => {}
             }
+            LRESULT(0)
+        }
+        WM_GEMINI_MODELS => {
+            let res = FETCHED_GEMINI_RESULT.lock().ok().and_then(|mut g| g.take());
+            with_win(|w| {
+                w.fetching_models = false;
+                match res {
+                    Some(Ok(list)) => {
+                        w.models_status = format!("{} model ditemukan", list.len());
+                        w.fetched_models = list;
+                    }
+                    Some(Err(e)) => {
+                        let short: String = e.chars().take(36).collect();
+                        w.models_status = short;
+                    }
+                    None => {}
+                }
+                w.render();
+            });
             LRESULT(0)
         }
         WM_PREFS => {
