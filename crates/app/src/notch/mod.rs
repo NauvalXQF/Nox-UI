@@ -1571,6 +1571,25 @@ impl Notch {
                         changed = true;
                     }
                 }
+                nacre_platform::notifications::Event::Seed(list) => {
+                    for raw in list {
+                        let aumid = raw.aumid.clone();
+                        self.notifs.push(nacre_core::notch::notif::Notification {
+                            id: raw.id,
+                            app_name: raw.app_name,
+                            aumid: raw.aumid,
+                            title: raw.title,
+                            body: raw.body,
+                            timestamp_s: raw.timestamp_s,
+                            read: true,
+                        });
+                        if !aumid.is_empty() && !self.app_icons.contains_key(&aumid) {
+                            let px = (48.0 * self.dpi).round() as i32;
+                            self.request_icon(IconKind::MediaApp, aumid, px);
+                        }
+                    }
+                    changed = true;
+                }
                 nacre_platform::notifications::Event::Arrived(raw) => {
                     self.push_notification(nacre_core::notch::notif::Notification {
                         id: raw.id,

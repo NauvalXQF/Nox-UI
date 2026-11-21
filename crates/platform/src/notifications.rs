@@ -95,6 +95,7 @@ pub struct RawNotification {
 #[derive(Clone, Debug)]
 pub enum Event {
     Status(Status),
+    Seed(Vec<RawNotification>),
     Arrived(RawNotification),
     Removed(u32),
 }
@@ -632,7 +633,10 @@ fn collect_visible_toast_hosts() -> Vec<isize> {
         }
         let mut pid = 0u32;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if is_toast_host_pid(pid) && is_toast_host_class(&window_class_name(hwnd)) && looks_like_toast_rect(hwnd) {
+        let cls = window_class_name(hwnd);
+        let is_host = is_toast_host_pid(pid) && is_toast_host_class(&cls);
+        let is_named_toast = !is_host && is_toast_host_class(&cls) && is_toast_window_name(&window_title(hwnd));
+        if (is_host || is_named_toast) && looks_like_toast_rect(hwnd) {
             let list = &mut *(lp.0 as *mut Vec<isize>);
             list.push(hwnd.0 as isize);
         }
@@ -874,6 +878,7 @@ fn try_winrt_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag
         .ok();
 
     let mut seen: HashSet<u32> = HashSet::new();
+    let mut initial: Vec<RawNotification> = Vec::new();
     if let Ok(list) = listener
         .GetNotificationsAsync(NotificationKinds::Toast)
         .and_then(|op| op.join())
@@ -884,18 +889,40 @@ fn try_winrt_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag
                 if let Ok(id) = u.Id() {
                     seen.insert(id);
                 }
+                if let Some(raw) = extract_notification(&u) {
+                    initial.push(raw);
+                }
             }
+        }
+    }
+    if !initial.is_empty() {
+        initial.sort_by_key(|n| n.timestamp_s);
+        let keep_from = initial.len().saturating_sub(12);
+        let seeded = initial.split_off(keep_from);
+        crate::log::line("notif", &format!("WinRT seed: {} notifikasi aktif dimuat", seeded.len()));
+        if !emit(tx, notify, Event::Seed(seeded)) {
+            if let Some(tok) = token {
+                let _ = listener.RemoveNotificationChanged(tok);
+            }
+            if com {
+                unsafe { CoUninitialize() };
+            }
+            return true;
         }
     }
 
     while !flag.load(Ordering::Relaxed) {
-        match poke_rx.recv_timeout(Duration::from_secs(2)) {
+        match poke_rx.recv_timeout(Duration::from_millis(1500)) {
             Ok((true, id)) => {
                 if !seen.insert(id) {
                     continue;
                 }
                 if let Ok(u) = listener.GetNotification(id) {
                     if let Some(raw) = extract_notification(&u) {
+                        crate::log::line(
+                            "notif",
+                            &format!("winrt app={} aumid={} title={}", raw.app_name, raw.aumid, raw.title),
+                        );
                         if !emit(tx, notify, Event::Arrived(raw)) {
                             break;
                         }
@@ -908,7 +935,56 @@ fn try_winrt_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag
                     break;
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Periodic reconciliation guarantees notifications are never missed even if
+                // Windows drops a WinRT NotificationChanged callback on sparse Win32 apps.
+                if let Ok(list) = listener
+                    .GetNotificationsAsync(NotificationKinds::Toast)
+                    .and_then(|op| op.join())
+                {
+                    let n = list.Size().unwrap_or(0);
+                    let mut live_ids: HashSet<u32> = HashSet::with_capacity(n as usize);
+                    let mut newly_arrived: Vec<RawNotification> = Vec::new();
+                    for i in 0..n {
+                        if let Ok(u) = list.GetAt(i) {
+                            if let Ok(id) = u.Id() {
+                                live_ids.insert(id);
+                                if seen.insert(id) {
+                                    if let Some(raw) = extract_notification(&u) {
+                                        newly_arrived.push(raw);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    newly_arrived.sort_by_key(|r| r.timestamp_s);
+                    let mut closed = false;
+                    for raw in newly_arrived {
+                        crate::log::line(
+                            "notif",
+                            &format!("winrt-poll app={} aumid={} title={}", raw.app_name, raw.aumid, raw.title),
+                        );
+                        if !emit(tx, notify, Event::Arrived(raw)) {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    if closed {
+                        break;
+                    }
+                    let removed: Vec<u32> = seen.iter().copied().filter(|id| !live_ids.contains(id)).collect();
+                    for id in removed {
+                        seen.remove(&id);
+                        if !emit(tx, notify, Event::Removed(id)) {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    if closed {
+                        break;
+                    }
+                }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }

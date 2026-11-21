@@ -440,6 +440,14 @@ const EN: &[(&str, &str)] = &[
     ("Sepanjang hari", "All day"),
     ("14:00 Rapat Tim…", "14:00 Team Sync…"),
     ("Memuat jadwal…", "Loading schedule…"),
+    ("Listener notifikasi Windows", "Windows notification listener"),
+    ("Google (Tasks & Calendar)", "Google (Tasks & Calendar)"),
+    ("Akun Google (Tasks & Calendar)", "Google Account (Tasks & Calendar)"),
+    ("Refresh / Fetch Models", "Refresh / Fetch Models"),
+    ("Model preset", "Preset model"),
+    ("Custom Model ID", "Custom Model ID"),
+    ("Kosong = pakai preset…", "Empty = use preset…"),
+    ("Daftar model aktif", "Active models list"),
 ];
 
 pub fn is_known(src: &str) -> bool {
