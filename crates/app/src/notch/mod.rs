@@ -116,7 +116,7 @@ const WIN_W: f32 = 640.0;
 const WIN_H: f32 = 250.0;
 const SHADOW_PAD_X: f32 = 36.0;
 const SHADOW_PAD_B: f32 = 44.0;
-const EAR_DP: f32 = 13.0;
+const EAR_DP: f32 = 17.0;
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -1732,6 +1732,9 @@ impl Notch {
         self.todo_input = None;
         self.gemini_input = None;
         let c = self.shell.content.clone();
+        if matches!(self.mode, Mode::Open(_)) {
+            let _ = c.SetOpacity(1.0);
+        }
         if let Ok(k) = c.Children() {
             let _ = k.RemoveAll();
         }

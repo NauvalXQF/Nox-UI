@@ -524,6 +524,10 @@ fn make_hover_circle(p: &Painter, parent: &ContainerVisual, cx: f32, cy: f32, di
 }
 
 fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
+    // Keep Timer/Calendar top-right completely clear for weekday headers (THU FRI SAT SUN MON).
+    if cur == Tab::Timer {
+        return;
+    }
     let cy = p.px(18.0);
     let mut right_x = f.x0 + f.w - p.px(22.0);
     let media_playing = d.media.as_ref().is_some_and(|m| m.playing);
@@ -1261,7 +1265,7 @@ fn music_column(
     regions: &mut Vec<Region>,
     live: &mut Live,
 ) {
-    let art = p.px(50.0);
+    let art = p.px(58.0);
     let (ax, ay) = (x, y);
     if let Ok(art_wrap) = p.comp.CreateContainerVisual() {
         let _ = art_wrap.SetCenterPoint(Vector3 { X: ax + art / 2.0, Y: ay + art / 2.0, Z: 0.0 });
@@ -1272,24 +1276,24 @@ fn music_column(
         let _ = c.Children().and_then(|k| k.InsertAtTop(&art_wrap));
         match m.art {
             Some(s) => {
-                p.image(&art_wrap, s, ax, ay, art, art, p.px(12.0));
+                p.image(&art_wrap, s, ax, ay, art, art, p.px(13.0));
             }
             None => {
-                p.rect(&art_wrap, ax, ay, art, art, p.px(12.0), white(24));
-                p.sym(&art_wrap, Sym::Note, ax + art / 2.0, ay + art / 2.0, 22.0, WHITE, 0.8);
+                p.rect(&art_wrap, ax, ay, art, art, p.px(13.0), white(24));
+                p.sym(&art_wrap, Sym::Note, ax + art / 2.0, ay + art / 2.0, 24.0, WHITE, 0.8);
             }
         }
         live.album_art = Some(art_wrap);
     }
-    let tx = ax + art + p.px(11.0);
-    let tw = (x + w - tx - if lyrics_open { 0.0 } else { p.px(32.0) }).max(p.px(40.0));
-    let title = p.fit(m.title, 14.0, 700, tw);
-    p.text(c, &title, tx, ay + p.px(8.0), 14.0, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
-    let artist = p.fit(m.artist, 11.5, 500, tw);
-    p.text(c, &artist, tx, ay + p.px(28.0), 11.5, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
+    let tx = ax + art + p.px(12.0);
+    let tw = (x + w - tx - if lyrics_open { 0.0 } else { p.px(34.0) }).max(p.px(40.0));
+    let title = p.fit(m.title, 15.0, 700, tw);
+    p.text(c, &title, tx, ay + p.px(11.0), 15.0, 700, WHITE, 1.0, Anchor::Left, tw + 2.0);
+    let artist = p.fit(m.artist, 12.0, 500, tw);
+    p.text(c, &artist, tx, ay + p.px(33.0), 12.0, 500, WHITE, 0.56, Anchor::Left, tw + 2.0);
 
-    // Inline Nusa scrub row aligned near vertical midpoint: `02:55  [=====-----]  -01:28`
-    let sy = ay + art + p.px(16.0);
+    // Inline Nusa scrub row aligned right at vertical midpoint (y ≈ 93dp on 186dp Visor).
+    let sy = ay + art + p.px(21.0);
     let left_time_w = p.px(37.0);
     let right_time_w = p.px(43.0);
     let sx = x + left_time_w;
@@ -1360,28 +1364,28 @@ fn music_column(
         regions.push(Region { x: sx - p.px(6.0), y: sy - p.px(12.0), w: sw + p.px(12.0), h: p.px(24.0), action: Action::Seek(sx, sw), vis: None, hover_bg: None });
     }
 
-    // Chunky, tactile Nusa-proportioned transport controls (22-26 dp) + Quote & Speaker.
-    let cy = (y + h - p.px(15.0)).max(sy + p.px(26.0));
+    // Chunky, tactile Nusa-proportioned transport controls (23-27 dp) + Quote & Speaker.
+    let cy = (y + h - p.px(18.0)).max(sy + p.px(28.0));
     let cx = x + w / 2.0;
     let vol_sym = if muted { Sym::SpeakerMute } else { Sym::SpeakerMid };
     let vol_op = if muted { 0.48 } else { 0.92 };
     let controls = if lyrics_open {
-        let step = p.px(40.0);
+        let step = p.px(41.0);
         [
             (Sym::Quote, cx - 2.0 * step, 20.5, Action::ToggleLyrics, 1.0),
-            (Sym::Backward, cx - step, 21.0, Action::Prev, 0.96),
-            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 24.5, Action::PlayPause, 1.0),
-            (Sym::Forward, cx + step, 21.0, Action::Next, 0.96),
-            (vol_sym, cx + 2.0 * step, 16.5, Action::ToggleMute, vol_op),
+            (Sym::Backward, cx - step, 21.5, Action::Prev, 0.96),
+            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 25.0, Action::PlayPause, 1.0),
+            (Sym::Forward, cx + step, 21.5, Action::Next, 0.96),
+            (vol_sym, cx + 2.0 * step, 17.0, Action::ToggleMute, vol_op),
         ]
     } else {
-        let step = p.px(44.0);
+        let step = p.px(48.0);
         [
-            (Sym::Quote, x + p.px(20.0), 21.5, Action::ToggleLyrics, 0.56),
-            (Sym::Backward, cx - step, 22.5, Action::Prev, 0.98),
-            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 26.0, Action::PlayPause, 1.0),
-            (Sym::Forward, cx + step, 22.5, Action::Next, 0.98),
-            (vol_sym, x + w - p.px(20.0), 18.0, Action::ToggleMute, vol_op),
+            (Sym::Quote, x + p.px(22.0), 21.5, Action::ToggleLyrics, 0.56),
+            (Sym::Backward, cx - step, 23.0, Action::Prev, 0.98),
+            (if m.playing { Sym::Pause } else { Sym::Play }, cx, 27.0, Action::PlayPause, 1.0),
+            (Sym::Forward, cx + step, 23.0, Action::Next, 0.98),
+            (vol_sym, x + w - p.px(22.0), 18.5, Action::ToggleMute, vol_op),
         ]
     };
     for (s, bx, size, a, op) in controls {
@@ -1491,9 +1495,9 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
     let bot = f.h - p.px(DOTS_STRIP_DP + 4.0);
     let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
 
-    // Compact Nusa TodoList layout (385 x 166 dp):
-    let lw = p.px(154.0);
-    let rx = x0 + lw + p.px(8.0);
+    // Uniform 395 x 186 dp Nusa TodoList layout:
+    let lw = p.px(158.0);
+    let rx = x0 + lw + p.px(9.0);
     let rw = (x0 + w - rx).max(p.px(110.0));
 
     // Two-tone "TodoList" title matching Nusa reference.
@@ -1975,11 +1979,11 @@ fn timer_col(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f3
         Phase::Finished => (ORANGE, tr("Selesai")),
         Phase::Idle => (WHITE, tr("Siap")),
     };
-    p.text(c, &format_mmss(secs), x + p.px(2.0), y + p.px(2.0), 26.0, 700, rgb, 1.0, Anchor::Left, w * 0.72);
-    p.text(c, status, x + w - p.px(2.0), y + p.px(10.0), 10.5, 500, WHITE, 0.50, Anchor::Right, w * 0.34);
-    let (bd, bgap) = (p.px(30.0), p.px(8.0));
+    p.text(c, &format_mmss(secs), x + p.px(2.0), y + p.px(6.0), 28.0, 700, rgb, 1.0, Anchor::Left, w * 0.72);
+    p.text(c, status, x + w - p.px(2.0), y + p.px(14.0), 11.0, 500, WHITE, 0.50, Anchor::Right, w * 0.34);
+    let (bd, bgap) = (p.px(32.0), p.px(9.0));
     let total = 4.0 * bd + 3.0 * bgap;
-    let cy = y + h - p.px(6.0) - bd / 2.0;
+    let cy = y + h - p.px(12.0) - bd / 2.0;
     let mut cx = x + (w - total) / 2.0 + bd / 2.0;
     let idle = matches!(t.phase, Phase::Idle | Phase::Finished);
     let accent = crate::prefs::accent();
@@ -2014,11 +2018,11 @@ fn calendar_col(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h:
     let cal = &d.cal;
     let accent = crate::prefs::accent();
     let (sy, sm, sd) = cal.sel;
-    p.text(c, month_short(sm, en), x + p.px(2.0), y + p.px(4.0), 14.5, 700, WHITE, 1.0, Anchor::Left, p.px(44.0));
-    p.text(c, &sy.to_string(), x + p.px(2.0), y + p.px(23.0), 10.0, 500, WHITE, 0.45, Anchor::Left, p.px(44.0));
-    let (left, right) = (x + p.px(42.0), x + w);
+    p.text(c, month_short(sm, en), x + p.px(2.0), y + p.px(8.0), 15.0, 700, WHITE, 1.0, Anchor::Left, p.px(44.0));
+    p.text(c, &sy.to_string(), x + p.px(2.0), y + p.px(28.0), 10.5, 500, WHITE, 0.45, Anchor::Left, p.px(44.0));
+    let (left, right) = (x + p.px(44.0), x + w);
     let cell = (right - left) / 5.0;
-    let (wy, ny, dia) = (y + p.px(4.0), y + p.px(22.0), p.px(22.0));
+    let (wy, ny, dia) = (y + p.px(8.0), y + p.px(27.0), p.px(24.0));
     for i in -2i32..=2 {
         let (yy, mm, dd) = add_days(sy, sm, sd, i);
         let cx = left + cell * (i + 2) as f32 + cell / 2.0;

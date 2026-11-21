@@ -71,6 +71,7 @@ pub struct Shell {
     rim: ShapeVisual,
     rim_brush: CompositionColorBrush,
     path_geo: CompositionPathGeometry,
+    rim_geo: CompositionPathGeometry,
     tier: Tier,
 }
 
@@ -191,8 +192,9 @@ impl Shell {
         content.SetSize(sz)?;
         shell_root.Children()?.InsertAtTop(&content)?;
 
-        // Subtle inner edge rim (~1px visible after shell_root geometric clip).
-        let rim_shape = comp.CreateSpriteShapeWithGeometry(&path_geo)?;
+        // Subtle inner edge rim (~1px visible after shell_root geometric clip), open at top bezel.
+        let rim_geo = comp.CreatePathGeometry()?;
+        let rim_shape = comp.CreateSpriteShapeWithGeometry(&rim_geo)?;
         let rim_brush = comp.CreateColorBrushWithColor(INNER_RIM_BLACK)?;
         rim_shape.SetStrokeBrush(&rim_brush)?;
         rim_shape.SetStrokeThickness(1.6)?;
@@ -220,6 +222,7 @@ impl Shell {
             rim,
             rim_brush,
             path_geo,
+            rim_geo,
             tier,
         };
         shell.apply_material(tier);
@@ -298,6 +301,9 @@ impl Shell {
     pub fn set_geometry(&self, x0: f32, w: f32, h: f32, radius: f32, ear: f32) {
         if let Ok(path) = nacre_ui::visor_geo::visor_path(x0, 0.0, w, h, radius, ear) {
             let _ = self.path_geo.SetPath(&path);
+        }
+        if let Ok(rim) = nacre_ui::visor_geo::visor_rim_path(x0, 0.0, w, h, radius, ear) {
+            let _ = self.rim_geo.SetPath(&rim);
         }
     }
 

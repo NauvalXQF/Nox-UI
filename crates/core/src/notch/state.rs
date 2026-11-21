@@ -268,14 +268,8 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
         View::Compact(_) => (292.0, 30.0, 15.0),
-        View::Open(Tab::Play) if ctx.lyrics_open => (530.0, 160.0, 28.0),
-        View::Open(Tab::Play) => (356.0, 154.0, 28.0),
-        View::Open(Tab::Shelf) if ctx.shelf_empty => (350.0, 146.0, 28.0),
-        View::Open(Tab::Shelf) => (400.0, 160.0, 28.0),
-        View::Open(Tab::Alerts) => (395.0, 186.0, 28.0),
-        View::Open(Tab::Todo) => (385.0, 166.0, 28.0),
-        View::Open(Tab::Gemini) => (430.0, 205.0, 28.0),
-        View::Open(Tab::Timer) => (375.0, 154.0, 28.0),
+        View::Open(Tab::Play) if ctx.lyrics_open => (530.0, 186.0, 28.0),
+        View::Open(_) => (395.0, 186.0, 28.0),
         View::Drop => (480.0, 118.0, 28.0),
     };
     if let View::Open(tab) = l.view {
@@ -400,25 +394,17 @@ mod tests {
         assert!(music.w > rest.w && music.h == rest.h);
         assert!(lyr.w > music.w && lyr.h >= music.h && lyr.h < 40.0, "lirik ringkas: satu baris yang lebih lebar");
         let open_lyr = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: true, shelf_empty: true, nav_expanded: false });
-        assert_eq!((open_lyr.w, open_lyr.h, open_lyr.radius), (530.0, 160.0, 28.0));
+        assert_eq!((open_lyr.w, open_lyr.h, open_lyr.radius), (530.0, 186.0, 28.0));
         let open_lyr_nav = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: true, shelf_empty: true, nav_expanded: true });
         assert_eq!(open_lyr_nav.h, open_lyr.h, "mode lirik menyembunyikan nav sehingga tinggi tidak berubah");
         let open_compact = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: false });
         let open_compact_exp = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: true });
-        assert_eq!((open_compact.w, open_compact.h), (356.0, 154.0));
+        assert_eq!((open_compact.w, open_compact.h), (395.0, 186.0));
         assert_eq!(open_compact_exp.h - open_compact.h, NAV_EXPAND_H_DP);
-        let shelf_empty = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: true, nav_expanded: false });
-        let shelf_filled = size_with(look(Mode::Open(Tab::Shelf), None), 1.0, SizeContext { lyrics_open: true, shelf_empty: false, nav_expanded: false });
-        assert_eq!((shelf_empty.w, shelf_empty.h), (350.0, 146.0));
-        assert_eq!((shelf_filled.w, shelf_filled.h), (400.0, 160.0));
-        let todo = size(look(Mode::Open(Tab::Todo), None), 1.0);
-        assert_eq!((todo.w, todo.h), (385.0, 166.0));
-        let alerts = size(look(Mode::Open(Tab::Alerts), None), 1.0);
-        assert_eq!((alerts.w, alerts.h), (395.0, 186.0));
-        let gemini = size(look(Mode::Open(Tab::Gemini), None), 1.0);
-        assert_eq!((gemini.w, gemini.h), (430.0, 205.0));
-        let timer = size(look(Mode::Open(Tab::Timer), None), 1.0);
-        assert_eq!((timer.w, timer.h), (375.0, 154.0));
+        for t in [Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini, Tab::Timer] {
+            let z = size_with(look(Mode::Open(t), None), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: false });
+            assert_eq!((z.w, z.h), (395.0, 186.0), "tab {t:?} seragam dengan Alerts");
+        }
         let b = size(look(Mode::Open(Tab::Play), None), 1.5);
         assert_eq!((b.w, b.radius), (795.0, 42.0));
         assert_eq!(adaptive_compact_w(40.0, 100.0, 190.0, 500.0), 190.0);

@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use windows::Graphics::{IGeometrySource2D, IGeometrySource2D_Impl};
 use windows::UI::Composition::CompositionPath;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D_SIZE_F,
+    D2D1_BEZIER_SEGMENT, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW,
+    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D_SIZE_F,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1Geometry, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
@@ -65,9 +66,23 @@ fn arc(x: f32, y: f32, r: f32, cw: bool) -> D2D1_ARC_SEGMENT {
     }
 }
 
-/// Builds a unified `CompositionPath` for either Visor (`ear > 0.5`: top-attached with concave ears
-/// and rounded bottom corners) or Capsule (`ear <= 0.5`: floating rounded pill).
+fn bezier(c1: Vector2, c2: Vector2, end: Vector2) -> D2D1_BEZIER_SEGMENT {
+    D2D1_BEZIER_SEGMENT { point1: c1, point2: c2, point3: end }
+}
+
+/// Builds a unified filled `CompositionPath` for either Visor (`ear > 0.5`: top-attached with
+/// smooth continuous cubic Bézier shoulders and -1px top bezel overlap) or Capsule (`ear <= 0.5`).
 pub fn visor_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
+    build_visor(x0, y0, w, h, radius, ear, false)
+}
+
+/// Builds the `1px` inner-rim stroke `CompositionPath`. In Visor mode (`ear > 0.5`), the figure is
+/// left **open** along the top (`y = 0`) so no horizontal seam line is ever drawn at the screen bezel.
+pub fn visor_rim_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
+    build_visor(x0, y0, w, h, radius, ear, true)
+}
+
+fn build_visor(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32, open_top_rim: bool) -> Result<CompositionPath> {
     let w = w.max(2.0);
     let h = h.max(2.0);
     let fac = factory()?;
@@ -76,11 +91,21 @@ pub fn visor_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Re
 
     unsafe {
         if ear > 0.5 {
-            let e = ear.min(h * 0.45);
-            let r = radius.clamp(0.0, (w * 0.5).min((h - e).max(0.0)));
-            sink.BeginFigure(pt(x0 - e, y0), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddArc(&arc(x0, y0 + e, e, true));
-            if h - r > e + 0.01 {
+            // Overlap 1px above y = 0 for filled silhouette so DPI rounding never creates a top seam.
+            let top_y = if open_top_rim { y0 } else { y0 - 1.0 };
+            let ew = ear.min(h * 0.52);
+            let eh = (ew * 1.06).min(h * 0.52);
+            let r = radius.clamp(0.0, (w * 0.5).min((h - eh).max(0.0)));
+
+            let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
+            sink.BeginFigure(pt(x0 - ew, top_y), begin);
+            // Sweeping Nusa-style cubic Bézier left shoulder: tangent-horizontal at top_y, tangent-vertical at x0.
+            sink.AddBezier(&bezier(
+                pt(x0 - ew * 0.28, top_y),
+                pt(x0, y0 + eh * 0.22),
+                pt(x0, y0 + eh),
+            ));
+            if h - r > eh + 0.01 {
                 sink.AddLine(pt(x0, y0 + h - r));
             }
             if r > 0.5 {
@@ -90,21 +115,27 @@ pub fn visor_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Re
             if r > 0.5 {
                 sink.AddArc(&arc(x0 + w, y0 + h - r, r, false));
             }
-            if h - r > e + 0.01 {
-                sink.AddLine(pt(x0 + w, y0 + e));
+            if h - r > eh + 0.01 {
+                sink.AddLine(pt(x0 + w, y0 + eh));
             }
-            sink.AddArc(&arc(x0 + w + e, y0, e, true));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            // Sweeping cubic Bézier right shoulder: tangent-vertical at x0 + w, tangent-horizontal at top_y.
+            sink.AddBezier(&bezier(
+                pt(x0 + w, y0 + eh * 0.22),
+                pt(x0 + w + ew * 0.28, top_y),
+                pt(x0 + w + ew, top_y),
+            ));
+            sink.EndFigure(if open_top_rim { D2D1_FIGURE_END_OPEN } else { D2D1_FIGURE_END_CLOSED });
         } else {
             let r = radius.clamp(0.0, (w * 0.5).min(h * 0.5));
+            let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
             if r <= 0.5 {
-                sink.BeginFigure(pt(x0, y0), D2D1_FIGURE_BEGIN_FILLED);
+                sink.BeginFigure(pt(x0, y0), begin);
                 sink.AddLine(pt(x0 + w, y0));
                 sink.AddLine(pt(x0 + w, y0 + h));
                 sink.AddLine(pt(x0, y0 + h));
                 sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             } else {
-                sink.BeginFigure(pt(x0 + r, y0), D2D1_FIGURE_BEGIN_FILLED);
+                sink.BeginFigure(pt(x0 + r, y0), begin);
                 sink.AddLine(pt(x0 + w - r, y0));
                 sink.AddArc(&arc(x0 + w, y0 + r, r, true));
                 sink.AddLine(pt(x0 + w, y0 + h - r));

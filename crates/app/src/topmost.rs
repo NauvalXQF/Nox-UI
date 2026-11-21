@@ -74,7 +74,7 @@ unsafe extern "system" fn collect(h: HWND, lp: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-const BASE_LAYERS: [&str; 5] = ["AbraWidget", "NacreEdgeStrip", "NacreDock", "AbraMenuBar", "AbraNotch"];
+const BASE_LAYERS: [&str; 6] = ["AbraWidget", "NacreEdgeStrip", "NacreDock", "AbraMenuBar", "AbraNotchShadow", "AbraNotch"];
 
 fn class_of(h: HWND) -> String {
     let mut buf = [0u16; 64];
