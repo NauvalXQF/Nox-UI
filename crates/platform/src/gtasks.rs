@@ -90,9 +90,11 @@ fn now_s() -> i64 {
 fn client_creds() -> Option<(String, String)> {
     let cid = cred::read_secret(cred::TARGET_GTASKS_CLIENT_ID)
         .or_else(|| std::env::var("ABRA_GOOGLE_CLIENT_ID").ok())
-        .filter(|s| !s.trim().is_empty())?;
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
     let csec = cred::read_secret(cred::TARGET_GTASKS_CLIENT_SECRET)
         .or_else(|| std::env::var("ABRA_GOOGLE_CLIENT_SECRET").ok())
+        .map(|s| s.trim().to_string())
         .unwrap_or_default();
     Some((cid, csec))
 }
@@ -223,6 +225,20 @@ fn random_bytes(n: usize) -> Vec<u8> {
     buf
 }
 
+const OAUTH_SCOPES: &str =
+    "https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/calendar.readonly";
+
+fn build_auth_url(cid: &str, redirect: &str, challenge: &str, state: &str) -> String {
+    format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
+        url_enc(cid.trim()),
+        url_enc(redirect.trim()),
+        url_enc(OAUTH_SCOPES),
+        url_enc(challenge.trim()),
+        url_enc(state.trim()),
+    )
+}
+
 fn oauth_connect(cid: &str, csec: &str) -> Result<Tokens, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind loopback: {e}"))?;
     let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
@@ -233,15 +249,8 @@ fn oauth_connect(cid: &str, csec: &str) -> Result<Tokens, String> {
     let challenge = base64url(&sha256(verifier.as_bytes()));
     let state = base64url(&random_bytes(16));
 
-    let auth_url = format!(
-        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
-        url_enc(cid),
-        url_enc(&redirect),
-        url_enc("https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/calendar.readonly"),
-        url_enc(&challenge),
-        url_enc(&state),
-    );
-    crate::launch::open(&auth_url);
+    let auth_url = build_auth_url(cid, &redirect, &challenge, &state);
+    crate::launch::open_url(&auth_url);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(180);
     let mut code = None;
@@ -550,4 +559,30 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> GTasks {
     });
 
     GTasks { commands: cmd_tx, events: ev_rx }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_url_has_response_type_first_and_percent_encoded_scopes() {
+        let url = build_auth_url(
+            " 12345-test.apps.googleusercontent.com ",
+            "http://127.0.0.1:54321/callback",
+            "pkce_challenge_xyz",
+            "csrf_state_123",
+        );
+        assert!(!url.chars().any(char::is_whitespace), "URL tidak boleh mengandung spasi mentah: {url}");
+        assert!(
+            url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?response_type=code&"),
+            "response_type=code harus berada di awal query string: {url}"
+        );
+        let rt_pos = url.find("response_type=code").unwrap();
+        let sc_pos = url.find("&scope=").unwrap();
+        assert!(rt_pos < sc_pos, "response_type harus sebelum scope: {url}");
+        assert!(url.contains("client_id=12345-test.apps.googleusercontent.com"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback"));
+        assert!(url.contains("https%3A%2F%2Fwww.googleapis.com%2Fauth%2Ftasks%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly"));
+    }
 }

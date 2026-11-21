@@ -23,10 +23,27 @@ fn off_thread(job: impl FnOnce() + Send + 'static) {
     }
 }
 
+fn sanitize_open_target(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        trimmed.to_string()
+    } else {
+        trimmed.split('?').next().unwrap_or(trimmed).to_string()
+    }
+}
+
 pub fn open(path: &str) {
-    let path = path.split('?').next().unwrap_or(path).to_string();
+    let path = sanitize_open_target(path);
     off_thread(move || unsafe {
         ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_str()), None, None, SW_SHOWNORMAL);
+    });
+}
+
+/// Opens an HTTP/HTTPS URL in the default browser without stripping its query string.
+pub fn open_url(url: &str) {
+    let url = url.trim().to_string();
+    off_thread(move || unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url.as_str()), None, None, SW_SHOWNORMAL);
     });
 }
 
@@ -90,7 +107,7 @@ fn system_tool(file: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::system_tool;
+    use super::{sanitize_open_target, system_tool};
 
     #[test]
     fn bare_tools_resolve_to_system32() {
@@ -98,5 +115,12 @@ mod tests {
         assert!(p.to_lowercase().ends_with("system32\\rundll32.exe"), "{p}");
         assert_eq!(system_tool("C:\\x\\y.exe"), "C:\\x\\y.exe");
         assert_eq!(system_tool("tidak-ada-xyz.exe"), "tidak-ada-xyz.exe");
+    }
+
+    #[test]
+    fn open_preserves_http_query_string() {
+        let u = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=abc";
+        assert_eq!(sanitize_open_target(u), u);
+        assert_eq!(sanitize_open_target("C:\\app\\foo.exe?bar"), "C:\\app\\foo.exe");
     }
 }
