@@ -1,5 +1,6 @@
 const RT_ICON: u16 = 3;
 const RT_GROUP_ICON: u16 = 14;
+const RT_MANIFEST: u16 = 24;
 
 fn res_entry(out: &mut Vec<u8>, typ: u16, name: u16, flags: u16, data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -19,7 +20,7 @@ fn res_entry(out: &mut Vec<u8>, typ: u16, name: u16, flags: u16, data: &[u8]) {
     }
 }
 
-fn ico_to_res(ico: &[u8], group: u16) -> Vec<u8> {
+fn ico_to_res(ico: &[u8], group: u16, manifest: Option<&[u8]>) -> Vec<u8> {
     let u16_at = |o: usize| u16::from_le_bytes([ico[o], ico[o + 1]]);
     let u32_at = |o: usize| u32::from_le_bytes([ico[o], ico[o + 1], ico[o + 2], ico[o + 3]]);
     assert!(ico.len() > 6 && u16_at(2) == 1, "assets/abra.ico bukan berkas ikon");
@@ -44,19 +45,51 @@ fn ico_to_res(ico: &[u8], group: u16) -> Vec<u8> {
         dir.extend_from_slice(&id.to_le_bytes());
     }
     res_entry(&mut res, RT_GROUP_ICON, group, 0x1030, &dir);
+    if let Some(m) = manifest {
+        res_entry(&mut res, RT_MANIFEST, 1, 0x1030, m);
+    }
     res
 }
 
 fn embed_icon() {
-    let ico = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/abra.ico");
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ico = manifest_dir.join("../../assets/abra.ico");
+    let manifest = manifest_dir.join("abra.manifest");
     println!("cargo:rerun-if-changed={}", ico.display());
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
-        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
-    {
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let data = std::fs::read(&ico).expect("assets/abra.ico tidak terbaca");
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("abra_icon.res");
-    std::fs::write(&out, ico_to_res(&data, 1)).expect("gagal menulis abra_icon.res");
-    println!("cargo:rustc-link-arg-bins={}", out.display());
+    let man_bytes = std::fs::read(&manifest).ok();
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let res_path = out_dir.join("abra_icon.res");
+    std::fs::write(&res_path, ico_to_res(&data, 1, man_bytes.as_deref())).expect("gagal menulis abra_icon.res");
+
+    if env == "msvc" {
+        if man_bytes.is_some() {
+            println!("cargo:rustc-link-arg-bins=/MANIFEST:NO");
+        }
+        println!("cargo:rustc-link-arg-bins={}", res_path.display());
+    } else if env == "gnu" {
+        let obj_path = out_dir.join("abra_icon.o");
+        let windres = ["windres", "x86_64-w64-mingw32-windres", r"C:\msys64\mingw64\bin\windres.exe"]
+            .into_iter()
+            .find_map(|tool| {
+                std::process::Command::new(tool)
+                    .args(["-J", "res", "-O", "coff", "-i"])
+                    .arg(&res_path)
+                    .arg("-o")
+                    .arg(&obj_path)
+                    .status()
+                    .ok()
+                    .filter(|s| s.success())
+            });
+        if windres.is_some() {
+            println!("cargo:rustc-link-arg-bins={}", obj_path.display());
+        } else {
+            println!("cargo:warning=windres tidak ditemukan; ikon & manifest MSIX dilewati pada target gnu");
+        }
+    }
 }
