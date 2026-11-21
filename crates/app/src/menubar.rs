@@ -646,6 +646,9 @@ impl Bar {
             let extra = if prefs::get().battery_pct == 2 { self.small_w(&format!("{pct}%"), 12.0, BAR_W) + 5.0 * d } else { 0.0 };
             right.push(LItem { id: BATT, width: 40.0 * d + extra });
         }
+        let left_essential: f32 = left.iter().take(4).map(|it| it.width).sum::<f32>() + 12.0 * d;
+        let right_total: f32 = right.iter().map(|it| it.width).sum::<f32>() + 12.0 * d;
+        services::set_bar_occupied(left_essential.ceil() as i32, right_total.ceil() as i32);
         let nl = services::notch_layout();
         let gap = nl.gap.map(|(l, r)| Gap { left: l as f32, right: r as f32 });
         let (l, r) = lay::layout(self.screen.0 as f32, 6.0 * d, &left, &right, gap);

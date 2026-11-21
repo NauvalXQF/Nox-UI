@@ -42,6 +42,7 @@ use windows_core::{Interface, HSTRING};
 use windows_numerics::{Vector2, Vector3};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_MOUSEHWHEEL: u32 = 0x020E;
 const WM_CAPTURECHANGED: u32 = 0x0215;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_DPICHANGED: u32 = 0x02E0;
@@ -368,6 +369,9 @@ pub struct Notch {
     shelf_press: Option<(usize, f32, f32)>,
     dragging_out: bool,
     pinned: bool,
+    lyrics_open: bool,
+    last_hwheel: Instant,
+    last_pub_half: i32,
     focus: FocusController,
 
     album: String,
@@ -546,6 +550,9 @@ impl Notch {
                 shelf_press: None,
                 dragging_out: false,
                 pinned: false,
+                lyrics_open: true,
+                last_hwheel: Instant::now() - std::time::Duration::from_secs(1),
+                last_pub_half: -1,
                 focus: FocusController::new(),
                 album: String::new(),
                 lyr_worker: nacre_platform::lyrics::spawn(crate::paths::config_dir().join("lyrics"), move || post(hw, WM_LYRICS)),
@@ -687,6 +694,21 @@ impl Notch {
         self.shell.set_stage_y(y);
         STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
         self.shell.set_shadow(18.0 * self.dpi, 4.0 * self.dpi, self.sp_sh_op.pos);
+
+        // Keep compact left/right chrome and bottom ambient glow glued to the animated pill edges.
+        if let Some(left_c) = &self.live_vis.compact_left {
+            let _ = left_c.SetOffset(Vector3 { X: x0.round(), Y: 0.0, Z: 0.0 });
+        }
+        if let Some(right_c) = &self.live_vis.compact_right {
+            let _ = right_c.SetOffset(Vector3 { X: (x0 + w).round(), Y: 0.0, Z: 0.0 });
+        }
+        if let Some(glow) = &self.live_vis.compact_glow {
+            let _ = glow.SetOffset(Vector3 { X: x0.round(), Y: 0.0, Z: 0.0 });
+            let _ = glow.SetSize(Vector2 { X: w.ceil(), Y: h.ceil() });
+        }
+        if self.shown && !self.off && matches!(self.look.view, View::Rest | View::Compact(_)) {
+            self.publish_notch_for_width(w, false);
+        }
 
         if !self.shown && self.sp_y.is_settled() {
             unsafe {
@@ -1359,6 +1381,7 @@ impl Notch {
     fn rotate_glance(&mut self) {
         let n = self.glance_items().len();
         self.glance_idx = glance::next(self.glance_idx, n);
+        self.sync_adaptive_size();
         self.retire_content(120);
         let rise = 6.0 * self.dpi;
         if let Ok(g) = self.shell.ghost.cast::<CompositionObject>() {
@@ -1389,7 +1412,109 @@ impl Notch {
         if look != self.look || self.first {
             self.transition(look);
         } else {
+            self.sync_adaptive_size();
             self.render();
+        }
+    }
+
+    fn max_safe_compact_w(&self) -> f32 {
+        let max_win = (self.win.0 as f32 - 2.0 * SHADOW_PAD * self.dpi).max(200.0 * self.dpi);
+        let cap = (state::COMPACT_MAX_W_DP * self.dpi).min(max_win);
+        let min_safe = (state::COMPACT_MIN_W_DP * self.dpi).min(cap);
+        if !crate::prefs::get().menubar {
+            return cap;
+        }
+        let (bar_l, bar_r) = crate::services::bar_occupied();
+        if bar_l == 0 && bar_r == 0 {
+            return cap.min((self.screen_w as f32 * 0.42).max(min_safe));
+        }
+        let side = bar_l.max(bar_r) as f32 + 16.0 * self.dpi;
+        let avail = self.screen_w as f32 - 2.0 * side - 2.0 * ear_px(self.dpi);
+        avail.clamp(min_safe, cap)
+    }
+
+    fn target_size(&self, look: Look) -> Size {
+        let ctx = state::SizeContext {
+            lyrics_open: self.lyrics_open,
+            shelf_empty: self.shelf.is_empty() && self.send.is_none() && !self.send_err,
+        };
+        let mut z = state::size_with(look, self.dpi, ctx);
+        let peek_extra = if look.peek && matches!(look.view, View::Rest | View::Compact(_)) {
+            state::PEEK_GROW.0 * self.dpi
+        } else {
+            0.0
+        };
+        let max_safe = self.max_safe_compact_w();
+        let min_w = state::COMPACT_MIN_W_DP * self.dpi;
+
+        match look.view {
+            View::Compact(state::Activity::Lyrics) => {
+                let line = self
+                    .lyr
+                    .as_ref()
+                    .and_then(|l| l.current(self.position_ms()))
+                    .unwrap_or("\u{266A}");
+                let text_px = self.paint.measure_dwrite(line, 13.0, 600).max(self.paint.measure(line, 13.0, 600));
+                let chrome_px = 108.0 * self.dpi;
+                z.w = state::adaptive_compact_w(text_px, chrome_px, min_w, max_safe) + peek_extra;
+                z.w = z.w.min(max_safe);
+            }
+            View::Compact(state::Activity::Music) if self.has_media => {
+                let label = if self.artist.is_empty() {
+                    self.title.clone()
+                } else {
+                    format!("{} \u{00B7} {}", self.title, self.artist)
+                };
+                let text_px = self.paint.measure_dwrite(&label, 12.0, 600).max(self.paint.measure(&label, 12.0, 600));
+                let chrome_px = 106.0 * self.dpi;
+                let cap = max_safe.min(380.0 * self.dpi);
+                z.w = state::adaptive_compact_w(text_px, chrome_px, 204.0 * self.dpi, cap) + peek_extra;
+                z.w = z.w.min(cap);
+            }
+            View::Compact(state::Activity::Glance) => {
+                let items = self.glance_items();
+                let item = items[self.glance_idx.min(items.len() - 1)];
+                let text = self.glance_text(item);
+                let text_px = self.paint.measure_dwrite(&text, 12.5, 600).max(self.paint.measure(&text, 12.5, 600));
+                let chrome_px = if item == glance::Item::Greeting { 40.0 * self.dpi } else { 66.0 * self.dpi };
+                let cap = max_safe.min(290.0 * self.dpi);
+                z.w = state::adaptive_compact_w(text_px, chrome_px, min_w, cap) + peek_extra;
+                z.w = z.w.min(cap);
+            }
+            View::Compact(state::Activity::Notification) => {
+                if let Some(n) = self.toast_id.and_then(|id| self.notifs.get(id)) {
+                    let head = if n.app_name.is_empty() || n.title.eq_ignore_ascii_case(&n.app_name) {
+                        n.title.clone()
+                    } else {
+                        format!("{} \u{00B7} {}", n.app_name, n.title)
+                    };
+                    let hw = self.paint.measure_dwrite(&head, 12.0, 700);
+                    let bw = self.paint.measure_dwrite(&n.body, 11.0, 400);
+                    let cap = max_safe.min(400.0 * self.dpi);
+                    z.w = state::adaptive_compact_w(hw.max(bw), 84.0 * self.dpi, 260.0 * self.dpi, cap) + peek_extra;
+                    z.w = z.w.min(cap);
+                }
+            }
+            _ => {}
+        }
+
+        z.radius *= crate::prefs::round(crate::prefs::Role::Notch);
+        z.w = z.w.round();
+        z.h = z.h.round();
+        let gap = island_gap(self.dpi);
+        if gap > 0.0 {
+            z.radius = z.radius.min(z.h / 2.0).min(36.0 * self.dpi);
+        } else {
+            z.radius = z.radius.min((z.h - ear_px(self.dpi)).max(2.0)).min(z.w / 2.0);
+        }
+        z
+    }
+
+    fn sync_adaptive_size(&mut self) {
+        let next = self.target_size(self.look);
+        if (next.w - self.size.w).abs() >= 1.5 || (next.h - self.size.h).abs() >= 1.5 {
+            self.apply_size(Some(SpringParams::swap()));
+            self.publish_notch();
         }
     }
 
@@ -1433,17 +1558,9 @@ impl Notch {
     }
 
     fn apply_size(&mut self, sp: Option<SpringParams>) {
-        let mut z = state::size(self.look, self.dpi);
-        z.radius *= crate::prefs::round(crate::prefs::Role::Notch);
-        z.w = z.w.round();
-        z.h = z.h.round();
-        let gap = island_gap(self.dpi);
-        if gap > 0.0 {
-            z.radius = z.radius.min(z.h / 2.0).min(36.0 * self.dpi);
-        } else {
-            z.radius = z.radius.min((z.h - ear_px(self.dpi)).max(2.0)).min(z.w / 2.0);
-        }
+        let z = self.target_size(self.look);
         self.size = z;
+        let gap = island_gap(self.dpi);
         let target_ear = ear_px(self.dpi);
         let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
         let target_sh_op = if self.shown { state::shadow(self.look).2 } else { 0.0 };
@@ -1551,6 +1668,8 @@ impl Notch {
         let notif_toast = self.toast_id.and_then(|id| self.notifs.get(id)).map(|n| notif_row(n, app_icons, now_unix, en));
         let notif_list: Vec<views::NotifRow> = self.notifs.items().iter().map(|n| notif_row(n, app_icons, now_unix, en)).collect();
         let todos = self.todos.visible();
+        let todo_total = todos.len();
+        let todo_done = todos.iter().filter(|t| t.completed).count();
         let gemini_model_label = nacre_core::notch::gemini::model_label(crate::prefs::get().gemini_model);
         let gemini_has_key = nacre_platform::gemini::has_api_key();
         let d = Data {
@@ -1560,6 +1679,7 @@ impl Notch {
             glance,
             media,
             lyrics,
+            lyrics_open: self.lyrics_open,
             shelf,
             drop_zone: self.drop_zone,
             drop_count,
@@ -1576,6 +1696,8 @@ impl Notch {
             notif_status: self.notif_status,
             timer_running: self.timer.phase == Phase::Running,
             todos,
+            todo_done,
+            todo_total,
             todo_scroll: self.todo_scroll,
             todo_status: self.todo_status,
             gemini_text: &self.gemini_resp,
@@ -1763,6 +1885,8 @@ impl Notch {
             let forward = matches!((self.lyr_idx, idx), (Some(a), Some(b)) if b == a + 1) || (self.lyr_idx.is_none() && idx == Some(0));
             self.lyr_idx = idx;
             if self.look.view == View::Compact(state::Activity::Lyrics) {
+                self.marquee_t = 0.0;
+                self.sync_adaptive_size();
                 self.swap_lyric();
             } else if self.mode == Mode::Open(Tab::Play) || self.look.view == View::Compact(state::Activity::Player) {
                 if self.live_vis.lyrics_host.is_some() {
@@ -1774,7 +1898,7 @@ impl Notch {
                 if forward {
                     if let Some(sc) = &self.live_vis.lyric_scroll {
                         if let Ok(o) = sc.cast::<CompositionObject>() {
-                            let _ = keyframes(&self.paint.comp, &o, "Offset.Y", self.live_vis.lyric_shift, 0.0, 420, 0);
+                            let _ = keyframes(&self.paint.comp, &o, "Offset.Y", self.live_vis.lyric_shift, 0.0, 320, 0);
                         }
                     }
                 }
@@ -2167,6 +2291,16 @@ impl Notch {
             Action::Prev => {
                 let _ = self.media.commands.send(Command::Prev);
             }
+            Action::ToggleLyrics => {
+                self.lyrics_open = !self.lyrics_open;
+                self.retire_content(motion::SWAP_FADE_MS);
+                self.apply_size(Some(SpringParams::swap()));
+                self.publish_notch();
+                self.render();
+                self.intro(false);
+            }
+            Action::PrevTab => self.step_tab(-1),
+            Action::NextTab => self.step_tab(1),
             Action::Seek(..) | Action::Zone(_) => {}
             Action::ShelfItem(i) => {
                 if let Some(it) = self.shelf.items().get(i) {
@@ -2378,16 +2512,34 @@ impl Notch {
                 return;
             }
         }
+        if matches!(self.mode, Mode::Open(_)) {
+            self.step_tab(if delta > 0 { -1 } else { 1 });
+        }
+    }
+
+    fn step_tab(&mut self, dir: i32) {
         if let Mode::Open(cur) = self.mode {
-            let i = Tab::MAIN.iter().position(|t| *t == cur).unwrap_or(0) as i32;
-            let n = Tab::MAIN.len() as i32;
-            let next = Tab::MAIN[(i + if delta > 0 { -1 } else { 1 }).rem_euclid(n) as usize];
+            let i = Tab::ALL.iter().position(|t| *t == cur).unwrap_or(0) as i32;
+            let n = Tab::ALL.len() as i32;
+            let next = Tab::ALL[(i + dir).rem_euclid(n) as usize];
             if next == Tab::Alerts {
                 self.notifs.mark_all_read();
                 self.alerts_scroll = 0;
             }
             self.dispatch(Event::SelectTab(next));
         }
+    }
+
+    fn on_hwheel(&mut self, delta: i16) {
+        if !matches!(self.mode, Mode::Open(_)) || delta == 0 {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_hwheel).as_millis() < 180 {
+            return;
+        }
+        self.last_hwheel = now;
+        self.step_tab(if delta > 0 { 1 } else { -1 });
     }
 
     fn sync_tick(&self) {
@@ -2523,19 +2675,29 @@ impl Notch {
         }
     }
 
-    fn publish_notch(&self) {
+    fn publish_notch(&mut self) {
+        self.publish_notch_for_width(self.size.w, true);
+    }
+
+    fn publish_notch_for_width(&mut self, w: f32, force: bool) {
         if self.off {
+            self.last_pub_half = -1;
             crate::services::set_notch_layout(None, None);
             return;
         }
         let rail_h = (30.0 * self.dpi).round() as i32;
         if !self.shown {
+            self.last_pub_half = -1;
             crate::services::set_notch_layout(None, Some(rail_h));
             return;
         }
         let ear = ear_px(self.dpi);
         let pad = 4.0 * self.dpi;
-        let half = (self.size.w / 2.0 + ear + pad).ceil() as i32;
+        let half = (w / 2.0 + ear + pad).ceil() as i32;
+        if !force && (half - self.last_pub_half).abs() < 2 {
+            return;
+        }
+        self.last_pub_half = half;
         let cx = self.screen_w / 2;
         let gap = ((cx - half).max(0), (cx + half).min(self.screen_w));
         crate::services::set_notch_layout(Some(gap), Some(rail_h));
@@ -3026,6 +3188,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEWHEEL => {
             let delta = (wp.0 >> 16) as i16;
             with(hwnd, |d| d.on_wheel(delta));
+            LRESULT(0)
+        }
+        WM_MOUSEHWHEEL => {
+            let delta = (wp.0 >> 16) as i16;
+            with(hwnd, |d| d.on_hwheel(delta));
             LRESULT(0)
         }
         STRIP_ENTER => {

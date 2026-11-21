@@ -715,12 +715,12 @@ pub fn look(s: &Settings, system_dark: bool, material: Material) -> Look {
             highlight = 0.2;
         }
         Material::Black => {
-            (tr, tg, tb) = (10, 10, 12);
-            a = lerp(255.0, 225.0, t);
+            (tr, tg, tb) = (0, 0, 0);
+            a = lerp(255.0, 232.0, t);
             saturation = 1.0;
             blur_sigma *= 0.8;
             rim = [0, 255, 255, 255];
-            solid = [255, 10, 10, 12];
+            solid = [255, 0, 0, 0];
             highlight = 0.0;
         }
     }

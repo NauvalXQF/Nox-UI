@@ -10,14 +10,14 @@ use windows::UI::Composition::{
 use windows_core::Interface;
 use windows_numerics::{Vector2, Vector3};
 
-pub const ONYX: (u8, u8, u8) = (10, 10, 12);
+pub const ONYX: (u8, u8, u8) = (0, 0, 0);
 
 pub fn glass_params(radius: f32) -> GlassParams {
     let look = crate::prefs::look(crate::prefs::Role::Notch);
     let mut g = crate::prefs::apply(GlassParams::dark((10.0, 10.0), radius), &look);
     if is_black() {
         g.tint = Color { A: 255, R: ONYX.0, G: ONYX.1, B: ONYX.2 };
-        g.solid = Color { A: 248, R: ONYX.0, G: ONYX.1, B: ONYX.2 };
+        g.solid = Color { A: 255, R: ONYX.0, G: ONYX.1, B: ONYX.2 };
     } else {
         g.tint.A = g.tint.A.max(96);
     }

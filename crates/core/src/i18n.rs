@@ -422,6 +422,9 @@ const EN: &[(&str, &str)] = &[
     ("Tempel kunci…", "Paste key…"),
     ("Tempel ID…", "Paste ID…"),
     ("Tempel rahasia…", "Paste secret…"),
+    ("Taruh berkas di sini", "Drop files here"),
+    ("Seret keluar kapan saja · klik untuk buka", "Drag out anytime · click to open"),
+    ("Selesai hari ini", "Task Done Today"),
 ];
 
 pub fn is_known(src: &str) -> bool {

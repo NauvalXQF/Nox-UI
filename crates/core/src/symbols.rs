@@ -37,6 +37,7 @@ pub enum Sym {
     Wifi1,
     Wifi2,
     ChevronRight,
+    ChevronLeft,
     ChevronDown,
     Headphones,
     Keyboard,
@@ -49,6 +50,8 @@ pub enum Sym {
     Close,
     Sparkle,
     Copy,
+    Quote,
+    Checklist,
 }
 
 pub fn for_command(id: usize) -> Option<Sym> {
@@ -182,6 +185,7 @@ fn shape(sym: Sym, p: P) -> bool {
             circle(p, apex, 0.075) <= 0.0 || [0.27f32, 0.46, 0.65][..n].iter().any(|r| arc(p, apex, *r, w, half) <= 0.0)
         }
         Sym::ChevronRight => line(p, (0.38, 0.22), (0.64, 0.5), 0.1) <= 0.0 || line(p, (0.64, 0.5), (0.38, 0.78), 0.1) <= 0.0,
+        Sym::ChevronLeft => line(p, (0.62, 0.22), (0.36, 0.5), 0.1) <= 0.0 || line(p, (0.36, 0.5), (0.62, 0.78), 0.1) <= 0.0,
         Sym::ChevronDown => line(p, (0.22, 0.38), (0.5, 0.64), 0.1) <= 0.0 || line(p, (0.5, 0.64), (0.78, 0.38), 0.1) <= 0.0,
         Sym::Headphones => {
             let band = arc(p, (0.5, 0.56), 0.34, 0.085, 1.5708) <= 0.0 && p.1 <= 0.58;
@@ -368,6 +372,18 @@ fn shape(sym: Sym, p: P) -> bool {
             let front = rrect(p, (0.60, 0.60), (0.22, 0.24), 0.06).abs() - 0.035 <= 0.0;
             back || front
         }
+        Sym::Quote => {
+            let bubble = rrect(p, (0.50, 0.44), (0.36, 0.27), 0.12) <= 0.0;
+            let tail = poly(p, &[(0.34, 0.68), (0.54, 0.68), (0.30, 0.86)]) <= 0.0;
+            let q1 = circle(p, (0.40, 0.40), 0.062) <= 0.0 || line(p, (0.42, 0.42), (0.37, 0.52), 0.055) <= 0.0;
+            let q2 = circle(p, (0.60, 0.40), 0.062) <= 0.0 || line(p, (0.62, 0.42), (0.57, 0.52), 0.055) <= 0.0;
+            (bubble || tail) && !(q1 || q2)
+        }
+        Sym::Checklist => {
+            let top = circle(p, (0.24, 0.33), 0.09) <= 0.0 || line(p, (0.44, 0.33), (0.84, 0.33), 0.095) <= 0.0;
+            let bot = ring(p, (0.24, 0.67), 0.075, 0.06) <= 0.0 || line(p, (0.44, 0.67), (0.84, 0.67), 0.095) <= 0.0;
+            top || bot
+        }
     }
 }
 
@@ -414,7 +430,7 @@ mod tests {
     fn menu_symbols_draw_and_command_map() {
         assert_eq!(for_command(111), Some(Sym::Restart));
         assert_eq!(for_command(999), None);
-        for s in [Sym::Info, Sym::Gear, Sym::Bag, Sym::Grid, Sym::Windows, Sym::XCircle, Sym::Moon, Sym::Restart, Sym::Power, Sym::Lock, Sym::EyeSlash, Sym::Speaker, Sym::SpeakerWave, Sym::SpeakerLow, Sym::SpeakerMid, Sym::SpeakerMute, Sym::Sun, Sym::SunSmall, Sym::Bluetooth, Sym::Play, Sym::Pause, Sym::Backward, Sym::Forward, Sym::Plus, Sym::Minus, Sym::Calendar, Sym::Note, Sym::Stopwatch, Sym::Clock, Sym::Tray, Sym::Folder, Sym::Wifi1, Sym::Wifi2, Sym::ChevronRight, Sym::ChevronDown, Sym::Headphones, Sym::Keyboard, Sym::Mouse, Sym::ArrowDown, Sym::Check, Sym::ArrowUp, Sym::Pin, Sym::Bell, Sym::Close, Sym::Sparkle, Sym::Copy] {
+        for s in [Sym::Info, Sym::Gear, Sym::Bag, Sym::Grid, Sym::Windows, Sym::XCircle, Sym::Moon, Sym::Restart, Sym::Power, Sym::Lock, Sym::EyeSlash, Sym::Speaker, Sym::SpeakerWave, Sym::SpeakerLow, Sym::SpeakerMid, Sym::SpeakerMute, Sym::Sun, Sym::SunSmall, Sym::Bluetooth, Sym::Play, Sym::Pause, Sym::Backward, Sym::Forward, Sym::Plus, Sym::Minus, Sym::Calendar, Sym::Note, Sym::Stopwatch, Sym::Clock, Sym::Tray, Sym::Folder, Sym::Wifi1, Sym::Wifi2, Sym::ChevronRight, Sym::ChevronLeft, Sym::ChevronDown, Sym::Headphones, Sym::Keyboard, Sym::Mouse, Sym::ArrowDown, Sym::Check, Sym::ArrowUp, Sym::Pin, Sym::Bell, Sym::Close, Sym::Sparkle, Sym::Copy, Sym::Quote, Sym::Checklist] {
             let b = render(s, 40, [255, 255, 255]);
             let filled = b.chunks_exact(4).filter(|p| p[3] > 128).count();
             assert!(filled > 40 && filled < 40 * 40 * 3 / 4, "{s:?} terisi {filled}");

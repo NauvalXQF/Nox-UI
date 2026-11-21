@@ -91,6 +91,17 @@ use std::sync::atomic::AtomicI32;
 static NOTCH_L: AtomicI32 = AtomicI32::new(0);
 static NOTCH_R: AtomicI32 = AtomicI32::new(0);
 static NOTCH_H: AtomicI32 = AtomicI32::new(0);
+static BAR_LEFT_W: AtomicI32 = AtomicI32::new(0);
+static BAR_RIGHT_W: AtomicI32 = AtomicI32::new(0);
+
+pub fn set_bar_occupied(left_px: i32, right_px: i32) {
+    BAR_LEFT_W.store(left_px.max(0), Ordering::Relaxed);
+    BAR_RIGHT_W.store(right_px.max(0), Ordering::Relaxed);
+}
+
+pub fn bar_occupied() -> (i32, i32) {
+    (BAR_LEFT_W.load(Ordering::Relaxed), BAR_RIGHT_W.load(Ordering::Relaxed))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotchLayout {

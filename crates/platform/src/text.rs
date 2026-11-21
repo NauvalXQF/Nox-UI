@@ -109,6 +109,58 @@ pub fn measure(text: &str, style: &Style) -> (i32, i32) {
     }
 }
 
+/// Measure exact physical-pixel text metrics using DirectWrite (`IDWriteTextLayout::GetMetrics`).
+/// Falls back to GDI `measure` if DirectWrite cannot be initialized.
+pub fn measure_dwrite(text: &str, px: f32, weight: i32) -> (f32, f32) {
+    use windows::Win32::Graphics::DirectWrite::{
+        DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_TEXT_METRICS,
+    };
+    if text.is_empty() || px <= 0.0 {
+        return (0.0, 0.0);
+    }
+    thread_local! {
+        static DW_FACTORY: std::cell::RefCell<Option<IDWriteFactory>> = const { std::cell::RefCell::new(None) };
+    }
+    let try_dw = || -> windows_core::Result<(f32, f32)> {
+        let factory = DW_FACTORY.with(|cell| -> windows_core::Result<IDWriteFactory> {
+            let mut slot = cell.borrow_mut();
+            if let Some(f) = slot.as_ref() {
+                return Ok(f.clone());
+            }
+            let f: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+            *slot = Some(f.clone());
+            Ok(f)
+        })?;
+        let face = HSTRING::from(text_face());
+        let locale = HSTRING::from("en-us");
+        let w = DWRITE_FONT_WEIGHT(weight.clamp(100, 950));
+        let fmt = unsafe {
+            factory.CreateTextFormat(
+                &face,
+                None,
+                w,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                px,
+                &locale,
+            )?
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let layout = unsafe { factory.CreateTextLayout(&wide, &fmt, 10_000.0, 10_000.0)? };
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe { layout.GetMetrics(&mut metrics)? };
+        Ok((metrics.widthIncludingTrailingWhitespace.ceil(), metrics.height.ceil()))
+    };
+    match try_dw() {
+        Ok(sz) if sz.0 > 0.0 => sz,
+        _ => {
+            let (w, h) = measure(text, &Style { px: px.ceil() as i32, weight });
+            (w as f32, h as f32)
+        }
+    }
+}
+
 pub fn render(text: &str, style: &Style, w: i32, h: i32) -> Option<Bitmap> {
     render_face(text, style, text_face(), w, h)
 }

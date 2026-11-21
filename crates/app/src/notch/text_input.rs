@@ -4,7 +4,8 @@ use super::draw::{clip, white, Painter, WHITE};
 use nacre_core::notch::input::TextBuffer;
 use windows::UI::Color;
 use windows::UI::Composition::{
-    CompositionColorBrush, CompositionStretch, Compositor, ContainerVisual, SpriteVisual,
+    CompositionBitmapInterpolationMode, CompositionColorBrush, CompositionStretch, Compositor,
+    ContainerVisual, SpriteVisual,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -113,7 +114,7 @@ impl TextInput {
 
         let bg = comp.CreateSpriteVisual()?;
         bg.SetSize(Vector2 { X: w, Y: h })?;
-        let bg_brush = comp.CreateColorBrushWithColor(white(24))?;
+        let bg_brush = comp.CreateColorBrushWithColor(white(18))?;
         bg.SetBrush(&bg_brush)?;
         bg.SetClip(&clip(comp, w, h, h / 2.0)?)?;
         root.Children()?.InsertAtTop(&bg)?;
@@ -157,7 +158,7 @@ impl TextInput {
     pub fn set_focused(&mut self, on: bool, paint: &mut Painter) {
         self.focused = on;
         self.caret_on = on;
-        let _ = self.bg_brush.SetColor(if on { white(38) } else { white(24) });
+        let _ = self.bg_brush.SetColor(if on { white(30) } else { white(18) });
         let _ = self.caret.SetOpacity(if on { 1.0 } else { 0.0 });
         self.sync_visual(paint);
     }
@@ -253,6 +254,7 @@ impl TextInput {
         if let Some((surf, tw, th)) = paint.render_text_surface(shown, self.font_dp, 500, WHITE, (vw + scroll + 64.0).max(vw)) {
             if let Ok(b) = paint.comp.CreateSurfaceBrushWithSurface(&surf) {
                 let _ = b.SetStretch(CompositionStretch::None);
+                let _ = b.SetBitmapInterpolationMode(CompositionBitmapInterpolationMode::NearestNeighbor);
                 let _ = self.text_vis.SetBrush(&b);
             }
             let _ = self.text_vis.SetSize(Vector2 { X: tw as f32, Y: th as f32 });
