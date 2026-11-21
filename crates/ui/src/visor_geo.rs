@@ -73,78 +73,138 @@ fn bezier(c1: Vector2, c2: Vector2, end: Vector2) -> D2D1_BEZIER_SEGMENT {
 /// Builds a unified filled `CompositionPath` for either Visor (`ear > 0.5`: top-attached with
 /// smooth continuous cubic Bézier shoulders and -1px top bezel overlap) or Capsule (`ear <= 0.5`).
 pub fn visor_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
-    build_visor(x0, y0, w, h, radius, ear, false)
+    build_visor_multi(x0, y0, w, h, radius, ear, None, false)
 }
 
 /// Builds the `1px` inner-rim stroke `CompositionPath`. In Visor mode (`ear > 0.5`), the figure is
 /// left **open** along the top (`y = 0`) so no horizontal seam line is ever drawn at the screen bezel.
 pub fn visor_rim_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
-    build_visor(x0, y0, w, h, radius, ear, true)
+    build_visor_multi(x0, y0, w, h, radius, ear, None, true)
 }
 
-fn build_visor(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32, open_top_rim: bool) -> Result<CompositionPath> {
+/// Builds a filled `CompositionPath` containing the primary Visor capsule plus an optional
+/// detached right-hand pill (`(tx, tw, th, tr, t_ear)`) in a single GPU geometry so geometric clip,
+/// GPU DropShadow mask, and inner rim stay 100% synchronized.
+#[allow(clippy::too_many_arguments)]
+pub fn visor_path_with_detached(
+    x0: f32,
+    y0: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    ear: f32,
+    detached: Option<(f32, f32, f32, f32, f32)>,
+) -> Result<CompositionPath> {
+    build_visor_multi(x0, y0, w, h, radius, ear, detached, false)
+}
+
+/// Builds the `1px` inner-rim stroke `CompositionPath` for both the primary Visor capsule and an
+/// optional detached right-hand pill (`(tx, tw, th, tr, t_ear)`).
+#[allow(clippy::too_many_arguments)]
+pub fn visor_rim_path_with_detached(
+    x0: f32,
+    y0: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    ear: f32,
+    detached: Option<(f32, f32, f32, f32, f32)>,
+) -> Result<CompositionPath> {
+    build_visor_multi(x0, y0, w, h, radius, ear, detached, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn append_visor_figure(
+    sink: &windows::Win32::Graphics::Direct2D::ID2D1GeometrySink,
+    x0: f32,
+    y0: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    ear: f32,
+    open_top_rim: bool,
+) {
     let w = w.max(2.0);
     let h = h.max(2.0);
+    if ear > 0.5 {
+        // Overlap 1px above y = 0 for filled silhouette so DPI rounding never creates a top seam.
+        let top_y = if open_top_rim { y0 } else { y0 - 1.0 };
+        let ew = ear.min(h * 0.52);
+        let eh = (ew * 1.06).min(h * 0.52);
+        let r = radius.clamp(0.0, (w * 0.5).min((h - eh).max(0.0)));
+
+        let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
+        sink.BeginFigure(pt(x0 - ew, top_y), begin);
+        // Sweeping Nusa-style cubic Bézier left shoulder: tangent-horizontal at top_y, tangent-vertical at x0.
+        sink.AddBezier(&bezier(
+            pt(x0 - ew * 0.28, top_y),
+            pt(x0, y0 + eh * 0.22),
+            pt(x0, y0 + eh),
+        ));
+        if h - r > eh + 0.01 {
+            sink.AddLine(pt(x0, y0 + h - r));
+        }
+        if r > 0.5 {
+            sink.AddArc(&arc(x0 + r, y0 + h, r, false));
+        }
+        sink.AddLine(pt(x0 + w - r, y0 + h));
+        if r > 0.5 {
+            sink.AddArc(&arc(x0 + w, y0 + h - r, r, false));
+        }
+        if h - r > eh + 0.01 {
+            sink.AddLine(pt(x0 + w, y0 + eh));
+        }
+        // Sweeping cubic Bézier right shoulder: tangent-vertical at x0 + w, tangent-horizontal at top_y.
+        sink.AddBezier(&bezier(
+            pt(x0 + w, y0 + eh * 0.22),
+            pt(x0 + w + ew * 0.28, top_y),
+            pt(x0 + w + ew, top_y),
+        ));
+        sink.EndFigure(if open_top_rim { D2D1_FIGURE_END_OPEN } else { D2D1_FIGURE_END_CLOSED });
+    } else {
+        let r = radius.clamp(0.0, (w * 0.5).min(h * 0.5));
+        let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
+        if r <= 0.5 {
+            sink.BeginFigure(pt(x0, y0), begin);
+            sink.AddLine(pt(x0 + w, y0));
+            sink.AddLine(pt(x0 + w, y0 + h));
+            sink.AddLine(pt(x0, y0 + h));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        } else {
+            sink.BeginFigure(pt(x0 + r, y0), begin);
+            sink.AddLine(pt(x0 + w - r, y0));
+            sink.AddArc(&arc(x0 + w, y0 + r, r, true));
+            sink.AddLine(pt(x0 + w, y0 + h - r));
+            sink.AddArc(&arc(x0 + w - r, y0 + h, r, true));
+            sink.AddLine(pt(x0 + r, y0 + h));
+            sink.AddArc(&arc(x0, y0 + h - r, r, true));
+            sink.AddLine(pt(x0, y0 + r));
+            sink.AddArc(&arc(x0 + r, y0, r, true));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_visor_multi(
+    x0: f32,
+    y0: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    ear: f32,
+    detached: Option<(f32, f32, f32, f32, f32)>,
+    open_top_rim: bool,
+) -> Result<CompositionPath> {
     let fac = factory()?;
     let path = unsafe { fac.CreatePathGeometry()? };
     let sink = unsafe { path.Open()? };
 
     unsafe {
-        if ear > 0.5 {
-            // Overlap 1px above y = 0 for filled silhouette so DPI rounding never creates a top seam.
-            let top_y = if open_top_rim { y0 } else { y0 - 1.0 };
-            let ew = ear.min(h * 0.52);
-            let eh = (ew * 1.06).min(h * 0.52);
-            let r = radius.clamp(0.0, (w * 0.5).min((h - eh).max(0.0)));
-
-            let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
-            sink.BeginFigure(pt(x0 - ew, top_y), begin);
-            // Sweeping Nusa-style cubic Bézier left shoulder: tangent-horizontal at top_y, tangent-vertical at x0.
-            sink.AddBezier(&bezier(
-                pt(x0 - ew * 0.28, top_y),
-                pt(x0, y0 + eh * 0.22),
-                pt(x0, y0 + eh),
-            ));
-            if h - r > eh + 0.01 {
-                sink.AddLine(pt(x0, y0 + h - r));
-            }
-            if r > 0.5 {
-                sink.AddArc(&arc(x0 + r, y0 + h, r, false));
-            }
-            sink.AddLine(pt(x0 + w - r, y0 + h));
-            if r > 0.5 {
-                sink.AddArc(&arc(x0 + w, y0 + h - r, r, false));
-            }
-            if h - r > eh + 0.01 {
-                sink.AddLine(pt(x0 + w, y0 + eh));
-            }
-            // Sweeping cubic Bézier right shoulder: tangent-vertical at x0 + w, tangent-horizontal at top_y.
-            sink.AddBezier(&bezier(
-                pt(x0 + w, y0 + eh * 0.22),
-                pt(x0 + w + ew * 0.28, top_y),
-                pt(x0 + w + ew, top_y),
-            ));
-            sink.EndFigure(if open_top_rim { D2D1_FIGURE_END_OPEN } else { D2D1_FIGURE_END_CLOSED });
-        } else {
-            let r = radius.clamp(0.0, (w * 0.5).min(h * 0.5));
-            let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
-            if r <= 0.5 {
-                sink.BeginFigure(pt(x0, y0), begin);
-                sink.AddLine(pt(x0 + w, y0));
-                sink.AddLine(pt(x0 + w, y0 + h));
-                sink.AddLine(pt(x0, y0 + h));
-                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            } else {
-                sink.BeginFigure(pt(x0 + r, y0), begin);
-                sink.AddLine(pt(x0 + w - r, y0));
-                sink.AddArc(&arc(x0 + w, y0 + r, r, true));
-                sink.AddLine(pt(x0 + w, y0 + h - r));
-                sink.AddArc(&arc(x0 + w - r, y0 + h, r, true));
-                sink.AddLine(pt(x0 + r, y0 + h));
-                sink.AddArc(&arc(x0, y0 + h - r, r, true));
-                sink.AddLine(pt(x0, y0 + r));
-                sink.AddArc(&arc(x0 + r, y0, r, true));
-                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        append_visor_figure(&sink, x0, y0, w, h, radius, ear, open_top_rim);
+        if let Some((tx, tw, th, tr, t_ear)) = detached {
+            if tw > 2.0 && th > 2.0 {
+                append_visor_figure(&sink, tx, y0, tw, th, tr, t_ear, open_top_rim);
             }
         }
         sink.Close()?;

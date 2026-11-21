@@ -1,5 +1,6 @@
 use nacre_core::island::calendar::add_days;
 use nacre_core::notch::json::{self, Json};
+use nacre_core::notch::todo::push_json_str;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 use windows::ApplicationModel::Appointments::{
@@ -22,9 +23,19 @@ pub struct Event {
     pub minute: Option<u32>,
 }
 
+pub enum Cmd {
+    Fetch(Date),
+    Create { date: Date, input: String },
+}
+
+pub enum AgendaMsg {
+    Loaded(Date, Option<Vec<Event>>),
+    CreateFailed(String),
+}
+
 pub struct Agenda {
-    pub requests: Sender<Date>,
-    pub answers: Receiver<(Date, Option<Vec<Event>>)>,
+    pub commands: Sender<Cmd>,
+    pub answers: Receiver<AgendaMsg>,
 }
 
 fn local_midnight_utc_st(d: Date) -> Option<SYSTEMTIME> {
@@ -41,6 +52,136 @@ fn local_midnight_utc_st(d: Date) -> Option<SYSTEMTIME> {
     }
 }
 
+/// Computes the signed local timezone offset in minutes from UTC for date `d` (e.g. `+420` for WIB `+07:00`).
+fn local_offset_minutes(d: Date) -> i32 {
+    unsafe {
+        let local = SYSTEMTIME {
+            wYear: d.0 as u16,
+            wMonth: d.1 as u16,
+            wDay: d.2 as u16,
+            wHour: 12,
+            ..Default::default()
+        };
+        let mut utc = SYSTEMTIME::default();
+        if TzSpecificLocalTimeToSystemTime(None, &local, &mut utc).is_err() {
+            return 0;
+        }
+        let (mut ft_l, mut ft_u) = (FILETIME::default(), FILETIME::default());
+        if SystemTimeToFileTime(&local, &mut ft_l).is_err() || SystemTimeToFileTime(&utc, &mut ft_u).is_err() {
+            return 0;
+        }
+        let ticks_l = (((ft_l.dwHighDateTime as u64) << 32) | ft_l.dwLowDateTime as u64) as i64;
+        let ticks_u = (((ft_u.dwHighDateTime as u64) << 32) | ft_u.dwLowDateTime as u64) as i64;
+        ((ticks_l - ticks_u) / (60 * 10_000_000)) as i32
+    }
+}
+
+fn format_local_rfc3339(d: Date, h: u8, m: u8, s: u8, offset_min: i32) -> String {
+    let sign = if offset_min < 0 { '-' } else { '+' };
+    let abs = offset_min.abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
+        d.0,
+        d.1,
+        d.2,
+        h,
+        m,
+        s,
+        sign,
+        abs / 60,
+        abs % 60
+    )
+}
+
+/// Parses quick schedule entry such as `"14:00 Rapat Tim"`, `"9.30 Sarapan"`, or `"Bayar Listrik"`.
+pub fn parse_schedule_input(raw: &str) -> Option<(Option<(u8, u8)>, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((first, rest)) = trimmed.split_once(char::is_whitespace) {
+        let rest_clean = rest.trim();
+        if !rest_clean.is_empty() {
+            let parts = first.split_once(':').or_else(|| first.split_once('.'));
+            if let Some((hs, ms)) = parts {
+                if let (Ok(h), Ok(m)) = (hs.parse::<u8>(), ms.parse::<u8>()) {
+                    if h < 24 && m < 60 && ms.len() == 2 {
+                        return Some((Some((h, m)), rest_clean.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    Some((None, trimmed.to_string()))
+}
+
+fn build_event_payload(d: Date, time_hm: Option<(u8, u8)>, title: &str, offset_min: i32) -> String {
+    let mut out = String::from("{\"summary\":");
+    push_json_str(&mut out, title);
+    match time_hm {
+        Some((h, m)) => {
+            let start_str = format_local_rfc3339(d, h, m, 0, offset_min);
+            let total_end = h as u32 * 60 + m as u32 + 60;
+            let (end_d, eh, em) = if total_end >= 24 * 60 {
+                (add_days(d.0, d.1, d.2, 1), ((total_end - 24 * 60) / 60) as u8, (total_end % 60) as u8)
+            } else {
+                (d, (total_end / 60) as u8, (total_end % 60) as u8)
+            };
+            let end_str = format_local_rfc3339(end_d, eh, em, 0, offset_min);
+            out.push_str(",\"start\":{\"dateTime\":");
+            push_json_str(&mut out, &start_str);
+            out.push_str("},\"end\":{\"dateTime\":");
+            push_json_str(&mut out, &end_str);
+            out.push_str("}}");
+        }
+        None => {
+            let sd = format!("{:04}-{:02}-{:02}", d.0, d.1, d.2);
+            let nd = add_days(d.0, d.1, d.2, 1);
+            let ed = format!("{:04}-{:02}-{:02}", nd.0, nd.1, nd.2);
+            out.push_str(",\"start\":{\"date\":");
+            push_json_str(&mut out, &sd);
+            out.push_str("},\"end\":{\"date\":");
+            push_json_str(&mut out, &ed);
+            out.push_str("}}");
+        }
+    }
+    out
+}
+
+fn create_google_event(d: Date, input: &str) -> Result<(), String> {
+    let Some((time_hm, title)) = parse_schedule_input(input) else {
+        return Err("Judul jadwal kosong.".into());
+    };
+    let Some(token) = crate::gtasks::access_token() else {
+        return Err("Hubungkan Google di Pengaturan terlebih dahulu.".into());
+    };
+    let offset_min = local_offset_minutes(d);
+    let payload = build_event_payload(d, time_hm, &title, offset_min);
+    let auth = format!("Bearer {token}");
+    let (status, body) = crate::http::request(
+        "POST",
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        &[("Authorization", auth.as_str()), ("Content-Type", "application/json")],
+        Some(payload.as_bytes()),
+    )?;
+    if status == 403 {
+        crate::log::line("kalender", "POST event 403: perlu reconnect Google untuk izin calendar.events");
+        return Err("Hubungkan ulang Google di Pengaturan untuk izin tulis Kalender.".into());
+    }
+    if status >= 400 {
+        let msg = json::parse(&body)
+            .and_then(|j| j.get("error")?.get("message")?.as_str().map(String::from))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        crate::log::line("kalender", &format!("POST event gagal: {msg}"));
+        return Err(msg);
+    }
+    crate::log::line(
+        "kalender",
+        &format!("acara dibuat {:04}-{:02}-{:02} {:?} {}", d.0, d.1, d.2, time_hm, title),
+    );
+    Ok(())
+}
+
 fn local_midnight(d: Date) -> Option<DateTime> {
     unsafe {
         let utc = local_midnight_utc_st(d)?;
@@ -50,13 +191,6 @@ fn local_midnight(d: Date) -> Option<DateTime> {
             UniversalTime: ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64,
         })
     }
-}
-
-fn format_rfc3339_utc(st: SYSTEMTIME) -> String {
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
-    )
 }
 
 fn to_local(t: DateTime) -> Option<(Date, u32)> {
@@ -278,11 +412,9 @@ fn fetch_google_calendar(state: &mut GCalState, d: Date) -> Option<Vec<Event>> {
     };
     state.logged_no_token = false;
 
-    let start_utc = local_midnight_utc_st(d)?;
-    let next_day = add_days(d.0, d.1, d.2, 1);
-    let end_utc = local_midnight_utc_st(next_day)?;
-    let time_min = format_rfc3339_utc(start_utc);
-    let time_max = format_rfc3339_utc(end_utc);
+    let offset_min = local_offset_minutes(d);
+    let time_min = format_local_rfc3339(d, 0, 0, 0, offset_min);
+    let time_max = format_local_rfc3339(d, 23, 59, 59, offset_min);
 
     let cals = state.calendar_ids(&token);
     let mut combined = Vec::new();
@@ -380,8 +512,8 @@ fn fake(d: Date, today: Date) -> Option<Vec<Event>> {
 }
 
 pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {
-    let (req_tx, req_rx) = channel::<Date>();
-    let (ans_tx, ans_rx) = channel::<(Date, Option<Vec<Event>>)>();
+    let (cmd_tx, cmd_rx) = channel::<Cmd>();
+    let (ans_tx, ans_rx) = channel::<AgendaMsg>();
     let fake_mode = std::env::var_os("NACRE_FAKE_CAL").is_some();
     std::thread::spawn(move || {
         unsafe {
@@ -405,25 +537,50 @@ pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {
             );
         }
         let mut gcal_state = GCalState::new();
-        while let Ok(mut d) = req_rx.recv() {
-            while let Ok(n) = req_rx.try_recv() {
-                d = n;
-            }
+        while let Ok(cmd) = cmd_rx.recv() {
+            let fetch_date = match cmd {
+                Cmd::Fetch(mut d) => {
+                    while let Ok(next) = cmd_rx.try_recv() {
+                        match next {
+                            Cmd::Fetch(nd) => d = nd,
+                            Cmd::Create { date, input } => {
+                                if !fake_mode {
+                                    if let Err(e) = create_google_event(date, &input) {
+                                        let _ = ans_tx.send(AgendaMsg::CreateFailed(e));
+                                        notify();
+                                    }
+                                }
+                                d = date;
+                            }
+                        }
+                    }
+                    d
+                }
+                Cmd::Create { date, input } => {
+                    if !fake_mode {
+                        if let Err(e) = create_google_event(date, &input) {
+                            let _ = ans_tx.send(AgendaMsg::CreateFailed(e));
+                            notify();
+                        }
+                    }
+                    date
+                }
+            };
             let ans = if fake_mode {
                 let t = crate::time::local_now();
-                fake(d, (t.year, t.month, t.day))
+                fake(fetch_date, (t.year, t.month, t.day))
             } else {
-                let gcal = fetch_google_calendar(&mut gcal_state, d);
-                let win = store.as_ref().and_then(|s| read(s, d));
+                let gcal = fetch_google_calendar(&mut gcal_state, fetch_date);
+                let win = store.as_ref().and_then(|s| read(s, fetch_date));
                 merge_events(gcal, win)
             };
-            if ans_tx.send((d, ans)).is_err() {
+            if ans_tx.send(AgendaMsg::Loaded(fetch_date, ans)).is_err() {
                 return;
             }
             notify();
         }
     });
-    Agenda { requests: req_tx, answers: ans_rx }
+    Agenda { commands: cmd_tx, answers: ans_rx }
 }
 
 #[cfg(test)]
@@ -441,5 +598,43 @@ mod tests {
     fn parses_rfc3339_with_offset() {
         assert!(parse_gcal_datetime("2026-11-21T14:30:00+07:00").is_some());
         assert!(parse_gcal_datetime("2026-11-21T07:30:00Z").is_some());
+    }
+
+    #[test]
+    fn parses_schedule_input_and_builds_gcal_payload() {
+        assert_eq!(
+            parse_schedule_input("14:00 Rapat Tim"),
+            Some((Some((14, 0)), "Rapat Tim".into()))
+        );
+        assert_eq!(
+            parse_schedule_input("09.30 Sarapan Pagi"),
+            Some((Some((9, 30)), "Sarapan Pagi".into()))
+        );
+        assert_eq!(
+            parse_schedule_input("Bayar Listrik"),
+            Some((None, "Bayar Listrik".into()))
+        );
+        let timed = build_event_payload((2026, 11, 21), Some((14, 0)), "Rapat Tim", 420);
+        let jt = json::parse(&timed).expect("valid timed event json");
+        assert_eq!(jt.get("summary").and_then(Json::as_str), Some("Rapat Tim"));
+        assert_eq!(
+            jt.get("start").and_then(|s| s.get("dateTime")).and_then(Json::as_str),
+            Some("2026-11-21T14:00:00+07:00")
+        );
+        assert_eq!(
+            jt.get("end").and_then(|s| s.get("dateTime")).and_then(Json::as_str),
+            Some("2026-11-21T15:00:00+07:00")
+        );
+
+        let allday = build_event_payload((2026, 11, 21), None, "Bayar Listrik", 420);
+        let ja = json::parse(&allday).expect("valid all-day event json");
+        assert_eq!(
+            ja.get("start").and_then(|s| s.get("date")).and_then(Json::as_str),
+            Some("2026-11-21")
+        );
+        assert_eq!(
+            ja.get("end").and_then(|s| s.get("date")).and_then(Json::as_str),
+            Some("2026-11-22")
+        );
     }
 }

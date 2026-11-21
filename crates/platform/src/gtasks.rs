@@ -226,7 +226,7 @@ fn random_bytes(n: usize) -> Vec<u8> {
 }
 
 const OAUTH_SCOPES: &str =
-    "https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/calendar.readonly";
+    "https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events";
 
 fn build_auth_url(cid: &str, redirect: &str, challenge: &str, state: &str) -> String {
     format!(
@@ -353,7 +353,8 @@ fn percent_decode(s: &str) -> String {
 }
 
 fn ensure_access_token(tokens: &mut Tokens) -> Result<String, String> {
-    if now_s() < tokens.expires_at && !tokens.access_token.is_empty() {
+    // Refresh proactively when within 120 seconds of expiry.
+    if now_s() + 60 < tokens.expires_at && !tokens.access_token.is_empty() {
         return Ok(tokens.access_token.clone());
     }
     if tokens.refresh_token.is_empty() {
@@ -375,6 +376,7 @@ fn ensure_access_token(tokens: &mut Tokens) -> Result<String, String> {
         Some(form.as_bytes()),
     )?;
     if st >= 400 {
+        crate::log::line("gtasks", &format!("refresh token gagal HTTP {st}"));
         return Err(format!("Refresh HTTP {st}"));
     }
     let j = json::parse(&body).ok_or("Respons refresh bukan JSON")?;
@@ -583,6 +585,8 @@ mod tests {
         assert!(rt_pos < sc_pos, "response_type harus sebelum scope: {url}");
         assert!(url.contains("client_id=12345-test.apps.googleusercontent.com"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback"));
-        assert!(url.contains("https%3A%2F%2Fwww.googleapis.com%2Fauth%2Ftasks%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly"));
+        assert!(url.contains(
+            "https%3A%2F%2Fwww.googleapis.com%2Fauth%2Ftasks%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events"
+        ));
     }
 }

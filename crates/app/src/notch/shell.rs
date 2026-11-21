@@ -298,11 +298,20 @@ impl Shell {
         }
     }
 
-    pub fn set_geometry(&self, x0: f32, w: f32, h: f32, radius: f32, ear: f32) {
-        if let Ok(path) = nacre_ui::visor_geo::visor_path(x0, 0.0, w, h, radius, ear) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_geometry_with_detached(
+        &self,
+        x0: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        ear: f32,
+        detached: Option<(f32, f32, f32, f32, f32)>,
+    ) {
+        if let Ok(path) = nacre_ui::visor_geo::visor_path_with_detached(x0, 0.0, w, h, radius, ear, detached) {
             let _ = self.path_geo.SetPath(&path);
         }
-        if let Ok(rim) = nacre_ui::visor_geo::visor_rim_path(x0, 0.0, w, h, radius, ear) {
+        if let Ok(rim) = nacre_ui::visor_geo::visor_rim_path_with_detached(x0, 0.0, w, h, radius, ear, detached) {
             let _ = self.rim_geo.SetPath(&rim);
         }
     }

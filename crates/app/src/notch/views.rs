@@ -1,6 +1,6 @@
 use super::draw::{white, Anchor, Painter, WHITE};
 use crate::prefs::tr;
-use nacre_core::island::timer::{format_mmss, Phase, Timer};
+use nacre_core::island::timer::{format_mmss, Phase, PomodoroStage, Timer};
 use nacre_core::notch::glance::Item;
 use nacre_core::notch::state::{Activity, Look, NavState, Tab, View, NAV_EXPAND_H_DP};
 use nacre_core::symbols::Sym;
@@ -27,20 +27,20 @@ pub enum Action {
     Settings,
     TimerToggle,
     TimerReset,
-    TimerPlus,
-    TimerMinus,
-    CalDay(i32),
+    TimerStage(PomodoroStage),
+    OpenTimerPill,
     CalRefresh,
+    CalAddOpen,
     SendDone,
     NotifFocus(u32),
     NotifDismiss(u32),
     NotifClearAll,
+    TodoCalToggle,
     TodoAddOpen,
     TodoEditToggle,
     TodoFocus,
     TodoToggle(usize),
     TodoDelete(usize),
-    TodoSync,
     TodoConnect,
     GeminiFocus,
     GeminiSend,
@@ -129,12 +129,17 @@ pub struct Data<'a> {
     pub notif_scroll: usize,
     pub notif_status: nacre_platform::notifications::Status,
     pub timer_running: bool,
+    pub detached_timer: Option<(f32, f32, f32, f32)>,
     pub todos: Vec<&'a nacre_core::notch::todo::TodoItem>,
     pub todo_done: usize,
     pub todo_total: usize,
     pub todo_scroll: usize,
     pub todo_adding: bool,
     pub todo_editing: bool,
+    pub todo_cal_mode: bool,
+    pub todo_cal_adding: bool,
+    pub todo_cal_scroll: usize,
+    pub todo_cal_err: &'a str,
     pub todo_status: nacre_platform::gtasks::SyncStatus,
     pub gemini_text: &'a str,
     pub gemini_streaming: bool,
@@ -168,8 +173,6 @@ pub struct SendView<'a> {
 pub type Date = (i32, u32, u32);
 
 pub struct CalView<'a> {
-    pub today: Date,
-    pub sel: Date,
     pub events: Events<'a>,
 }
 
@@ -451,6 +454,7 @@ pub struct Live {
     pub compact_left: Option<ContainerVisual>,
     pub compact_right: Option<ContainerVisual>,
     pub compact_glow: Option<SpriteVisual>,
+    pub detached_timer: Option<ContainerVisual>,
     pub nav: Option<NavLive>,
     pub pin_vis: Option<ContainerVisual>,
     pub play_layout: Option<PlayLayoutLive>,
@@ -458,6 +462,10 @@ pub struct Live {
 }
 
 const ORANGE: [u8; 3] = [255, 159, 10];
+const AMBER: [u8; 3] = [251, 191, 36]; // #FBBF24
+const INDIGO: [u8; 3] = [124, 102, 255]; // #7C66FF
+const VIOLET_GLOW: [u8; 3] = [139, 92, 246]; // #8B5CF6
+const CORAL: [u8; 3] = [240, 93, 78]; // #F05D4E
 const GREEN: [u8; 3] = [48, 209, 88];
 const BLUE: [u8; 3] = [10, 132, 255];
 const RED: [u8; 3] = [255, 59, 48];
@@ -511,7 +519,56 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
     }
     if matches!(look.view, View::Rest | View::Compact(_)) {
         privacy_dots(p, c, f, d.privacy);
+        if let Some((tx, tw, th, op)) = d.detached_timer {
+            detached_timer_pill(p, c, tx, tw, th, op, d, regions, live);
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detached_timer_pill(
+    p: &mut Painter,
+    c: &ContainerVisual,
+    tx: f32,
+    tw: f32,
+    th: f32,
+    op: f32,
+    d: &Data,
+    regions: &mut Vec<Region>,
+    live: &mut Live,
+) {
+    let Ok(wrap) = p.comp.CreateContainerVisual() else { return };
+    let _ = wrap.SetOffset(Vector3 { X: tx.round(), Y: 0.0, Z: 0.0 });
+    let _ = wrap.SetOpacity(op.clamp(0.0, 1.0));
+    let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
+
+    let cy = th / 2.0;
+    let content_op = if d.timer.phase == Phase::Running { 1.0 } else { 0.80 };
+    p.sym(&wrap, Sym::Stopwatch, p.px(19.0), cy, 14.5, AMBER, content_op);
+    let txt = format_mmss(d.timer.remaining_secs(d.now_ms));
+    let txt_h = p.px(13.5) * 1.28;
+    p.text(
+        &wrap,
+        &txt,
+        tw - p.px(12.0),
+        cy - txt_h / 2.0,
+        13.5,
+        700,
+        AMBER,
+        content_op,
+        Anchor::Right,
+        (tw - p.px(30.0)).max(p.px(24.0)),
+    );
+    regions.push(Region {
+        x: tx,
+        y: 0.0,
+        w: tw,
+        h: th,
+        action: Action::OpenTimerPill,
+        vis: None,
+        hover_bg: None,
+    });
+    live.detached_timer = Some(wrap);
 }
 
 fn privacy_dots(p: &mut Painter, c: &ContainerVisual, f: Frame, (mic, cam): (bool, bool)) {
@@ -548,11 +605,7 @@ fn make_hover_circle(p: &Painter, parent: &ContainerVisual, cx: f32, cy: f32, di
 }
 
 fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
-    // Keep Timer/Calendar top-right completely clear for weekday headers (THU FRI SAT SUN MON).
-    if cur == Tab::Timer {
-        return;
-    }
-    let cy = p.px(18.0);
+    let cy = if cur == Tab::Timer { p.px(15.0) } else { p.px(18.0) };
     let mut right_x = f.x0 + f.w - p.px(22.0);
     let media_playing = d.media.as_ref().is_some_and(|m| m.playing);
 
@@ -560,6 +613,7 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
     let shelf_has_clear = cur == Tab::Shelf && d.send.is_none() && !d.shelf.is_empty();
     let alerts_has_clear = cur == Tab::Alerts && !d.notif_list.is_empty();
     let gemini_has_btn = cur == Tab::Gemini;
+    let timer_clean_top = cur == Tab::Timer;
 
     if shelf_has_clear {
         right_x -= p.px(66.0);
@@ -568,6 +622,9 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
     } else if gemini_has_btn {
         // Keep Pin neatly tucked away from the Gemini send button.
         right_x = f.x0 + f.w - p.px(13.0);
+    } else if timer_clean_top {
+        // Keep Pomodoro right column clean; only tuck Pin neatly at top-right corner when hovered/pinned.
+        right_x = f.x0 + f.w - p.px(18.0);
     } else if d.notif_unread > 0 && cur != Tab::Alerts {
         // Unread alerts bell with crisp red dot.
         let n0 = kids(c);
@@ -1068,7 +1125,7 @@ fn current_line(d: &Data) -> String {
 
 fn compact_lyrics(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live) {
     compact_music(p, c, f, d, live, f.h, false);
-    let left = f.x0 + p.px(42.0);
+    let left = f.x0 + p.px(44.0);
     let right = f.x0 + f.w - p.px(50.0);
     let vw = (right - left).max(p.px(24.0));
     let line = current_line(d);
@@ -1139,30 +1196,36 @@ fn compact_player(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regi
 
 fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live, row_h: f32, show_marquee: bool) {
     let Some(m) = &d.media else { return };
-    let rgb = accent_or(m.tint);
+    let is_lyrics = !show_marquee;
+    let rgb = m.tint.unwrap_or(if is_lyrics { CORAL } else { crate::prefs::accent() });
     live.compact_glow = p.ambient_glow(c, f.x0, 0.0, f.w, row_h, 0.0, rgb, true);
 
     let cy = row_h / 2.0;
-    let a = p.px(20.0);
+    let a = if is_lyrics { p.px(23.0) } else { p.px(20.0) };
+    let art_pad = if is_lyrics { p.px(11.0) } else { p.px(12.0) };
 
     if let Ok(left_c) = p.comp.CreateContainerVisual() {
         let _ = left_c.SetOffset(Vector3 { X: f.x0.round(), Y: 0.0, Z: 0.0 });
         let _ = c.Children().and_then(|k| k.InsertAtTop(&left_c));
         match m.art {
             Some(s) => {
-                p.image(&left_c, s, p.px(12.0), cy - a / 2.0, a, a, p.px(6.0));
+                p.image(&left_c, s, art_pad, cy - a / 2.0, a, a, p.px(6.0));
             }
             None => {
-                p.rect(&left_c, p.px(12.0), cy - a / 2.0, a, a, p.px(6.0), white(30));
-                p.sym(&left_c, Sym::Note, p.px(12.0) + a / 2.0, cy, 12.0, WHITE, 0.85);
+                p.rect(&left_c, art_pad, cy - a / 2.0, a, a, p.px(6.0), white(30));
+                p.sym(&left_c, Sym::Note, art_pad + a / 2.0, cy, 12.0, WHITE, 0.85);
             }
         }
         live.compact_left = Some(left_c);
     }
 
-    let (bw, gap, bh) = (p.px(3.0), p.px(3.0), p.px(13.0));
+    let (bw, gap, bh) = if is_lyrics {
+        (p.px(2.8), p.px(2.6), p.px(14.0))
+    } else {
+        (p.px(3.0), p.px(3.0), p.px(13.0))
+    };
     let vis_w = 5.0 * bw + 4.0 * gap;
-    let right_pad = p.px(14.0);
+    let right_pad = if is_lyrics { p.px(13.0) } else { p.px(14.0) };
 
     if show_marquee {
         let left = f.x0 + p.px(40.0);
@@ -1469,49 +1532,78 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
     let bot = f.h - p.px(DOTS_STRIP_DP + 4.0);
     let (x0, w) = (f.x0 + pad, f.w - 2.0 * pad);
 
-    // Slimmer left column (116 dp) with vertically stacked pills -> wider right task list (~233 dp).
+    // Slimmer left column (116 dp) with vertically stacked pills -> wider right panel (~233 dp).
     let lw = p.px(116.0);
     let rx = x0 + lw + p.px(10.0);
     let rw = (x0 + w - rx).max(p.px(150.0));
 
+    let cal_events = match &d.cal.events {
+        Events::List(list) => Some(*list),
+        _ => None,
+    };
+    let ev_count = cal_events.map_or(0, |l| l.len());
+    let has_today_events = ev_count > 0;
+
     // Two-tone "TodoList" title matching Nusa reference.
     let todo_w = p.text(c, "Todo", x0 + p.px(2.0), top, 14.5, 700, WHITE, 0.98, Anchor::Left, p.px(56.0));
-    p.text(c, "List", x0 + p.px(2.0) + todo_w - p.px(1.0), top, 14.5, 700, GREEN, 0.96, Anchor::Left, p.px(56.0));
+    p.text(
+        c,
+        "List",
+        x0 + p.px(2.0) + todo_w - p.px(1.0),
+        top,
+        14.5,
+        700,
+        if d.todo_cal_mode { BLUE } else { GREEN },
+        0.96,
+        Anchor::Left,
+        p.px(56.0),
+    );
 
-    // Big progress counter + circular Google Tasks sync badge with blue status dot.
-    let ratio = format!("{}/{}", d.todo_done, d.todo_total);
+    // Big progress counter + circular Google Calendar toggle button (blue dot when events exist today).
+    let ratio = if d.todo_cal_mode {
+        format!("{ev_count}")
+    } else {
+        format!("{}/{}", d.todo_done, d.todo_total)
+    };
     let num_w = p.text(c, &ratio, x0 + p.px(2.0), top + p.px(19.0), 28.0, 700, WHITE, 1.0, Anchor::Left, p.px(82.0));
-    let sync_dia = p.px(25.0);
-    let scx = (x0 + num_w + p.px(20.0)).min(x0 + lw - sync_dia / 2.0 - p.px(2.0));
+    let cal_dia = p.px(25.0);
+    let scx = (x0 + num_w + p.px(20.0)).min(x0 + lw - cal_dia / 2.0 - p.px(2.0));
     let scy = top + p.px(37.0);
-    let sync_act = match d.todo_status {
-        SyncStatus::Synced | SyncStatus::Syncing | SyncStatus::Connecting => Action::TodoSync,
-        SyncStatus::NeedsClientConfig => Action::Settings,
-        SyncStatus::Disconnected | SyncStatus::Error => Action::TodoConnect,
-    };
     let n0 = kids(c);
-    p.rect(c, (scx - sync_dia / 2.0).round(), (scy - sync_dia / 2.0).round(), sync_dia, sync_dia, sync_dia / 2.0, white(20));
-    p.sym(c, Sym::Calendar, scx, scy, 13.0, WHITE, 0.72);
-    let dot_rgb = match d.todo_status {
-        SyncStatus::Synced => BLUE,
-        SyncStatus::Syncing | SyncStatus::Connecting => ORANGE,
-        SyncStatus::Disconnected | SyncStatus::Error | SyncStatus::NeedsClientConfig => BLUE,
+    let cal_fill = if d.todo_cal_mode {
+        Color { A: 225, R: BLUE[0], G: BLUE[1], B: BLUE[2] }
+    } else {
+        white(20)
     };
-    let dot = p.px(6.0);
-    p.rect(c, scx + p.px(5.5), scy - p.px(11.5), dot, dot, dot / 2.0, Color { A: 255, R: dot_rgb[0], G: dot_rgb[1], B: dot_rgb[2] });
+    p.rect(c, (scx - cal_dia / 2.0).round(), (scy - cal_dia / 2.0).round(), cal_dia, cal_dia, cal_dia / 2.0, cal_fill);
+    p.sym(c, Sym::Calendar, scx, scy, 13.0, WHITE, if d.todo_cal_mode { 1.0 } else { 0.78 });
+    if has_today_events || matches!(d.cal.events, Events::Loading) {
+        let dot_rgb = if has_today_events { BLUE } else { ORANGE };
+        let dot = p.px(6.0);
+        p.rect(
+            c,
+            scx + p.px(5.5),
+            scy - p.px(11.5),
+            dot,
+            dot,
+            dot / 2.0,
+            Color { A: 255, R: dot_rgb[0], G: dot_rgb[1], B: dot_rgb[2] },
+        );
+    }
     regions.push(Region {
-        x: scx - sync_dia / 2.0,
-        y: scy - sync_dia / 2.0,
-        w: sync_dia,
-        h: sync_dia,
-        action: sync_act,
+        x: scx - cal_dia / 2.0,
+        y: scy - cal_dia / 2.0,
+        w: cal_dia,
+        h: cal_dia,
+        action: Action::TodoCalToggle,
         vis: group_since(c, n0),
         hover_bg: None,
     });
 
-    p.text(c, tr("Selesai hari ini"), x0 + p.px(2.0), top + p.px(55.0), 10.5, 500, WHITE, 0.50, Anchor::Left, lw);
+    let sub = if d.todo_cal_mode { tr("Jadwal hari ini") } else { tr("Selesai hari ini") };
+    p.text(c, &p.fit(sub, 10.5, 500, lw), x0 + p.px(2.0), top + p.px(55.0), 10.5, 500, WHITE, 0.50, Anchor::Left, lw);
 
-    // Vertically stacked pill buttons: [+ Add Task] on top, [Edit Task] below (uniform 116 x 26 dp, 6 dp gap).
+    // Vertically stacked pill buttons (uniform 116 x 26 dp, 6 dp gap).
     let btn_h = p.px(26.0);
     let btn_gap = p.px(6.0);
     let bw = lw;
@@ -1519,31 +1611,133 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
     let btn1_y = btn2_y - btn_gap - btn_h;
     let th_btn = p.px(10.5) * 1.3;
 
-    // + Add Task pill (top)
-    let n0 = kids(c);
-    p.rect(c, x0, btn1_y, bw, btn_h, btn_h / 2.0, if d.todo_adding { white(36) } else { white(18) });
-    p.sym(c, Sym::Plus, x0 + p.px(15.0), btn1_y + btn_h / 2.0, 11.0, WHITE, 0.95);
-    p.text(c, &p.fit(tr("Tambah Tugas"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn1_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
-    regions.push(Region { x: x0, y: btn1_y, w: bw, h: btn_h, action: Action::TodoAddOpen, vis: group_since(c, n0), hover_bg: None });
+    if !d.todo_cal_mode {
+        // + Add Task pill (top)
+        let n0 = kids(c);
+        p.rect(c, x0, btn1_y, bw, btn_h, btn_h / 2.0, if d.todo_adding { white(36) } else { white(18) });
+        p.sym(c, Sym::Plus, x0 + p.px(15.0), btn1_y + btn_h / 2.0, 11.0, WHITE, 0.95);
+        p.text(c, &p.fit(tr("Tambah Tugas"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn1_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
+        regions.push(Region { x: x0, y: btn1_y, w: bw, h: btn_h, action: Action::TodoAddOpen, vis: group_since(c, n0), hover_bg: None });
 
-    // Edit Task pill (bottom)
-    let n1 = kids(c);
-    p.rect(c, x0, btn2_y, bw, btn_h, btn_h / 2.0, if d.todo_editing { white(36) } else { white(18) });
-    p.sym(c, Sym::Pencil, x0 + p.px(15.0), btn2_y + btn_h / 2.0, 10.5, WHITE, 0.92);
-    p.text(c, &p.fit(tr("Edit Tugas"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn2_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
-    regions.push(Region { x: x0, y: btn2_y, w: bw, h: btn_h, action: Action::TodoEditToggle, vis: group_since(c, n1), hover_bg: None });
+        // Edit Task pill (bottom)
+        let n1 = kids(c);
+        p.rect(c, x0, btn2_y, bw, btn_h, btn_h / 2.0, if d.todo_editing { white(36) } else { white(18) });
+        p.sym(c, Sym::Pencil, x0 + p.px(15.0), btn2_y + btn_h / 2.0, 10.5, WHITE, 0.92);
+        p.text(c, &p.fit(tr("Edit Tugas"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn2_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
+        regions.push(Region { x: x0, y: btn2_y, w: bw, h: btn_h, action: Action::TodoEditToggle, vis: group_since(c, n1), hover_bg: None });
+    } else {
+        // + Add Schedule pill (top) -> creates Google Calendar event
+        let n0 = kids(c);
+        let add_fill = if d.todo_cal_adding {
+            Color { A: 215, R: BLUE[0], G: BLUE[1], B: BLUE[2] }
+        } else {
+            white(18)
+        };
+        p.rect(c, x0, btn1_y, bw, btn_h, btn_h / 2.0, add_fill);
+        p.sym(c, Sym::Plus, x0 + p.px(15.0), btn1_y + btn_h / 2.0, 11.0, WHITE, 0.95);
+        p.text(c, &p.fit(tr("Tambah Jadwal"), 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn1_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.95, Anchor::Left, bw - p.px(26.0));
+        regions.push(Region { x: x0, y: btn1_y, w: bw, h: btn_h, action: Action::CalAddOpen, vis: group_since(c, n0), hover_bg: None });
 
-    // Right rounded #141416 checklist container
+        // Bottom pill: Refresh (when connected) or Connect Google (when disconnected)
+        let (sec_sym, sec_lbl, sec_act) = match d.todo_status {
+            SyncStatus::Synced | SyncStatus::Syncing | SyncStatus::Connecting => {
+                (Sym::Restart, tr("Muat Ulang"), Action::CalRefresh)
+            }
+            SyncStatus::NeedsClientConfig => (Sym::Gear, tr("Sambungkan"), Action::Settings),
+            SyncStatus::Disconnected | SyncStatus::Error => (Sym::Calendar, tr("Sambungkan"), Action::TodoConnect),
+        };
+        let n1 = kids(c);
+        p.rect(c, x0, btn2_y, bw, btn_h, btn_h / 2.0, white(18));
+        p.sym(c, sec_sym, x0 + p.px(15.0), btn2_y + btn_h / 2.0, 10.5, WHITE, 0.92);
+        p.text(c, &p.fit(sec_lbl, 10.5, 600, bw - p.px(28.0)), x0 + p.px(26.0), btn2_y + btn_h / 2.0 - th_btn / 2.0, 10.5, 600, WHITE, 0.94, Anchor::Left, bw - p.px(26.0));
+        regions.push(Region { x: x0, y: btn2_y, w: bw, h: btn_h, action: sec_act, vis: group_since(c, n1), hover_bg: None });
+    }
+
+    // Right rounded #141416 container (Checklist Tasks OR Today's Google Calendar Schedule)
     let card_y = top + p.px(24.0);
     let card_h = (bot - card_y).max(p.px(64.0));
     p.rect(c, rx, card_y, rw, card_h, p.px(15.0), CARD_DARK);
 
     let mut list_top = card_y + p.px(8.0);
-    if d.todo_adding {
+    if (!d.todo_cal_mode && d.todo_adding) || (d.todo_cal_mode && d.todo_cal_adding) {
         let (ix, iy, iw, ih) = (rx + p.px(7.0), card_y + p.px(7.0), rw - p.px(14.0), p.px(26.0));
         live.todo_input_box = Some((ix, iy, iw, ih));
         regions.push(Region { x: ix, y: iy, w: iw, h: ih, action: Action::TodoFocus, vis: None, hover_bg: None });
         list_top = iy + ih + p.px(5.0);
+    }
+
+    if d.todo_cal_mode {
+        if !d.todo_cal_err.is_empty() {
+            let err_h = p.px(18.0);
+            p.text(
+                c,
+                &p.fit(d.todo_cal_err, 9.5, 600, rw - p.px(18.0)),
+                rx + p.px(10.0),
+                list_top,
+                9.5,
+                600,
+                [255, 130, 110],
+                0.95,
+                Anchor::Left,
+                rw - p.px(16.0),
+            );
+            regions.push(Region {
+                x: rx,
+                y: list_top - p.px(2.0),
+                w: rw,
+                h: err_h + p.px(4.0),
+                action: Action::Settings,
+                vis: None,
+                hover_bg: None,
+            });
+            list_top += err_h + p.px(2.0);
+        }
+
+        match &d.cal.events {
+            Events::Loading if !d.todo_cal_adding => {
+                let cx = rx + rw / 2.0;
+                let cy = card_y + card_h / 2.0;
+                p.text(c, tr("Memuat jadwal…"), cx, cy - p.px(7.0), 11.0, 500, WHITE, 0.48, Anchor::Center, rw - p.px(16.0));
+            }
+            Events::Unavailable if !d.todo_cal_adding => {
+                let cx = rx + rw / 2.0;
+                let cy = card_y + card_h / 2.0;
+                p.text(c, &p.fit(tr("Sambungkan Google di Pengaturan"), 10.5, 500, rw - p.px(18.0)), cx, cy - p.px(7.0), 10.5, 500, WHITE, 0.52, Anchor::Center, rw - p.px(14.0));
+                regions.push(Region { x: rx, y: card_y, w: rw, h: card_h, action: Action::Settings, vis: None, hover_bg: None });
+            }
+            Events::List([]) if !d.todo_cal_adding => {
+                let cx = rx + rw / 2.0;
+                let cy = card_y + card_h / 2.0;
+                p.text(c, tr("Tidak ada acara hari ini"), cx, cy - p.px(7.0), 11.5, 500, WHITE, 0.45, Anchor::Center, rw - p.px(14.0));
+                regions.push(Region { x: rx, y: card_y, w: rw, h: card_h, action: Action::CalAddOpen, vis: None, hover_bg: None });
+            }
+            Events::List(list) => {
+                let row_h = p.px(25.0);
+                let gap = p.px(2.0);
+                let max_rows = ((card_y + card_h - p.px(6.0) - list_top) / (row_h + gap)).floor().max(1.0) as usize;
+                let start = d.todo_cal_scroll.min(list.len().saturating_sub(1));
+                let dot = p.px(5.0);
+                let tth = p.px(11.5) * 1.3;
+                for (idx, ev) in list.iter().enumerate().skip(start).take(max_rows) {
+                    let vis_idx = idx - start;
+                    let ry = list_top + vis_idx as f32 * (row_h + gap);
+                    let cy = ry + row_h / 2.0;
+                    p.rect(c, rx + p.px(11.0), cy - dot / 2.0, dot, dot, dot / 2.0, Color { A: 245, R: BLUE[0], G: BLUE[1], B: BLUE[2] });
+                    let when = match ev.minute {
+                        Some(m) if crate::prefs::get().clock_24h => format!("{:02}:{:02}", m / 60, m % 60),
+                        Some(m) => format!("{}:{:02}{}", (m / 60 + 11) % 12 + 1, m % 60, if m < 720 { "a" } else { "p" }),
+                        None => tr("Sepanjang hari").to_string(),
+                    };
+                    let time_x = rx + p.px(22.0);
+                    let time_w = p.text(c, &when, time_x, cy - tth / 2.0, 10.5, 600, BLUE, 0.95, Anchor::Left, p.px(56.0));
+                    let tx = time_x + time_w + p.px(7.0);
+                    let tw = (rx + rw - p.px(10.0) - tx).max(p.px(40.0));
+                    p.text(c, &p.fit(&ev.title, 11.5, 500, tw), tx, cy - tth / 2.0, 11.5, 500, WHITE, 0.94, Anchor::Left, tw + p.px(2.0));
+                }
+            }
+            _ => {}
+        }
+        return;
     }
 
     if d.todos.is_empty() && !d.todo_adding {
@@ -1979,161 +2173,299 @@ fn round_button(p: &mut Painter, c: &ContainerVisual, cx: f32, cy: f32, d: f32, 
 }
 
 fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
-    let pad = p.px(EDGE_PAD_DP);
-    let top = p.px(12.0);
-    let bot = f.h - p.px(DOTS_STRIP_DP + 6.0);
-    let h = (bot - top).max(p.px(74.0));
-    let cw = (f.w - 2.0 * pad - p.px(18.0)) / 2.0;
+    let pad = p.px(EDGE_PAD_DP + 2.0);
+    let top = p.px(13.0);
+    let bot = f.h - p.px(DOTS_STRIP_DP + 8.0);
+    let h = (bot - top).max(p.px(110.0));
     let x_left = f.x0 + pad;
-    let div_x = x_left + cw + p.px(9.0);
-    let x_right = div_x + p.px(9.0);
-    timer_col(p, c, x_left, top, cw, h, d, regions);
-    p.divider_v(c, div_x, top + p.px(6.0), h - p.px(12.0));
-    calendar_col(p, c, x_right, top, cw, h, d, regions);
-}
+    let lw = p.px(148.0);
+    let div_x = x_left + lw + p.px(12.0);
+    let x_right = div_x + p.px(14.0);
+    let rw = (f.x0 + f.w - pad - x_right).max(p.px(152.0));
 
-#[allow(clippy::too_many_arguments)]
-fn timer_col(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, d: &Data, regions: &mut Vec<Region>) {
     let t = d.timer;
     let secs = t.remaining_secs(d.now_ms);
-    let (rgb, status) = match t.phase {
-        Phase::Running if secs <= 60 => (ORANGE, tr("Berjalan")),
-        Phase::Running => (WHITE, tr("Berjalan")),
-        Phase::Paused => (WHITE, tr("Dijeda")),
-        Phase::Finished => (ORANGE, tr("Selesai")),
-        Phase::Idle => (WHITE, tr("Siap")),
-    };
-    p.text(c, &format_mmss(secs), x + p.px(2.0), y + p.px(6.0), 28.0, 700, rgb, 1.0, Anchor::Left, w * 0.72);
-    p.text(c, status, x + w - p.px(2.0), y + p.px(14.0), 11.0, 500, WHITE, 0.50, Anchor::Right, w * 0.34);
-    let (bd, bgap) = (p.px(32.0), p.px(9.0));
-    let total = 4.0 * bd + 3.0 * bgap;
-    let cy = y + h - p.px(12.0) - bd / 2.0;
-    let mut cx = x + (w - total) / 2.0 + bd / 2.0;
-    let idle = matches!(t.phase, Phase::Idle | Phase::Finished);
-    let accent = crate::prefs::accent();
-    let buttons: [(Action, bool); 4] = [(Action::TimerMinus, idle), (Action::TimerToggle, true), (Action::TimerReset, true), (Action::TimerPlus, idle)];
-    for (a, enabled) in buttons {
-        let primary = a == Action::TimerToggle;
-        let fill = if primary { Color { A: 255, R: accent[0], G: accent[1], B: accent[2] } } else { white(if enabled { 24 } else { 11 }) };
-        let n0 = kids(c);
-        round_button(p, c, cx, cy, bd, fill);
-        let op = if enabled { 1.0 } else { 0.32 };
-        match a {
-            Action::TimerToggle => p.sym(c, if t.phase == Phase::Running { Sym::Pause } else { Sym::Play }, cx, cy, 13.5, WHITE, 1.0),
-            Action::TimerReset => p.sym(c, Sym::Restart, cx, cy, 13.0, WHITE, 0.9),
-            Action::TimerMinus | Action::TimerPlus => {
-                let th = p.px(11.0) * 1.3;
-                let s = if a == Action::TimerMinus { "\u{2212}5" } else { "+5" };
-                p.text(c, s, cx, cy - th / 2.0, 11.0, 600, WHITE, op, Anchor::Center, bd);
-            }
-            _ => {}
-        }
-        if enabled {
-            regions.push(Region { x: cx - bd / 2.0, y: cy - bd / 2.0, w: bd, h: bd, action: a, vis: group_since(c, n0), hover_bg: None });
-        }
-        cx += bd + bgap;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn calendar_col(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, d: &Data, regions: &mut Vec<Region>) {
-    use nacre_core::island::calendar::{add_days, month_short, weekday, weekday_short};
+    let mins = t.mins_left(d.now_ms);
+    let prog = t.progress(d.now_ms);
     let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
-    let cal = &d.cal;
-    let accent = crate::prefs::accent();
-    let (sy, sm, sd) = cal.sel;
-    p.text(c, month_short(sm, en), x + p.px(2.0), y + p.px(8.0), 15.0, 700, WHITE, 1.0, Anchor::Left, p.px(44.0));
-    p.text(c, &sy.to_string(), x + p.px(2.0), y + p.px(28.0), 10.5, 500, WHITE, 0.45, Anchor::Left, p.px(44.0));
-    let (left, right) = (x + p.px(44.0), x + w);
-    let cell = (right - left) / 5.0;
-    let (wy, ny, dia) = (y + p.px(8.0), y + p.px(27.0), p.px(24.0));
-    for i in -2i32..=2 {
-        let (yy, mm, dd) = add_days(sy, sm, sd, i);
-        let cx = left + cell * (i + 2) as f32 + cell / 2.0;
-        let selected = i == 0;
-        let today = (yy, mm, dd) == cal.today;
-        let wd = weekday_short(weekday(yy, mm, dd), en);
-        let n0 = kids(c);
-        p.text(c, wd, cx, wy, 8.5, 600, if selected { accent } else { WHITE }, if selected { 1.0 } else { 0.4 }, Anchor::Center, cell);
-        if selected {
-            p.rect(c, (cx - dia / 2.0).round(), ny.round(), dia, dia, dia / 2.0, Color { A: 255, R: accent[0], G: accent[1], B: accent[2] });
+
+    // --- Left Column: Pomodoro title, session subtitle, big countdown, status & thin progress bar ---
+    p.text(c, "Pomodoro", x_left, top, 15.0, 700, WHITE, 0.98, Anchor::Left, lw);
+
+    let stage_sub = match t.stage {
+        PomodoroStage::Focus(n) => {
+            if en {
+                format!("Focus \u{00B7} {n} of 4")
+            } else {
+                format!("Fokus \u{00B7} {n} dari 4")
+            }
         }
-        let th = p.px(12.0) * 1.3;
-        let (rgb, op) = if selected { (WHITE, 1.0) } else if today { (accent, 1.0) } else { (WHITE, 0.8) };
-        p.text(c, &format!("{dd:02}"), cx, ny + dia / 2.0 - th / 2.0, 12.0, if selected || today { 700 } else { 500 }, rgb, op, Anchor::Center, cell);
-        if !selected {
-            regions.push(Region { x: cx - cell / 2.0, y: wy, w: cell, h: ny + dia - wy, action: Action::CalDay(i), vis: group_since(c, n0), hover_bg: None });
+        PomodoroStage::ShortBreak(n) => {
+            if en {
+                format!("Short Break \u{00B7} {n} of 4")
+            } else {
+                format!("Istirahat Singkat \u{00B7} {n} dari 4")
+            }
         }
+        PomodoroStage::LongBreak => tr("Istirahat Panjang").to_string(),
+    };
+    p.text(c, &stage_sub, x_left, top + p.px(25.0), 11.0, 500, WHITE, 0.48, Anchor::Left, lw);
+
+    let time_rgb = if t.phase == Phase::Running && secs <= 60 { AMBER } else { WHITE };
+    p.text(c, &format_mmss(secs), x_left, top + p.px(42.0), 31.0, 700, time_rgb, 1.0, Anchor::Left, lw);
+
+    let mins_str = if en { format!("{mins} min left") } else { format!("{mins} mnt lagi") };
+    let st_str = match t.phase {
+        Phase::Running => tr("Berjalan"),
+        Phase::Paused => tr("Dijeda"),
+        Phase::Finished => tr("Selesai"),
+        Phase::Idle => tr("Siap"),
+    };
+    let status_y = top + p.px(92.0);
+    let mw = p.text(c, &mins_str, x_left, status_y, 12.0, 700, WHITE, 0.96, Anchor::Left, lw * 0.68);
+    p.text(c, st_str, x_left + mw + p.px(6.0), status_y, 12.0, 500, WHITE, 0.48, Anchor::Left, (lw - mw - p.px(6.0)).max(p.px(24.0)));
+
+    let bar_y = top + p.px(118.0);
+    let bar_w = (lw - p.px(4.0)).max(p.px(60.0));
+    let bar_h = p.px(3.5);
+    p.rect(c, x_left, bar_y, bar_w, bar_h, bar_h / 2.0, white(32));
+    let fill_w = if t.is_active() || t.phase == Phase::Finished {
+        (bar_w * prog).max(p.px(4.0)).min(bar_w)
+    } else {
+        0.0
+    };
+    if fill_w > 0.5 {
+        p.rect(
+            c,
+            x_left,
+            bar_y,
+            fill_w,
+            bar_h,
+            bar_h / 2.0,
+            Color { A: 255, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
+        );
     }
-    let is_today = cal.sel == cal.today;
-    let agenda_top = ny + dia + p.px(12.0);
-    let agenda_bot = y + h - p.px(4.0);
-    let agenda_h = (agenda_bot - agenda_top).max(p.px(22.0));
+
+    // --- Center 1px Vertical Divider ---
+    p.divider_v(c, div_x, top + p.px(22.0), (h - p.px(26.0)).max(p.px(76.0)));
+
+    // --- Right Column: "This round" + [Start/Resume/Pause] pill + Reset + 1..4 Long timeline ---
+    let row_cy = top + p.px(33.0);
+    let lbl_h = p.px(11.5) * 1.3;
+    p.text(c, tr("Ronde ini"), x_right, row_cy - lbl_h / 2.0, 11.5, 500, WHITE, 0.50, Anchor::Left, p.px(68.0));
+
+    let rst_dia = p.px(25.0);
+    let rst_cx = x_right + rw - rst_dia / 2.0;
+    let n_rst = kids(c);
+    round_button(p, c, rst_cx, row_cy, rst_dia, white(24));
+    p.sym(c, Sym::Restart, rst_cx, row_cy, 12.0, WHITE, 0.90);
     regions.push(Region {
-        x,
-        y: agenda_top,
-        w,
-        h: agenda_h,
-        action: Action::CalRefresh,
-        vis: None,
+        x: rst_cx - rst_dia / 2.0,
+        y: row_cy - rst_dia / 2.0,
+        w: rst_dia,
+        h: rst_dia,
+        action: Action::TimerReset,
+        vis: group_since(c, n_rst),
         hover_bg: None,
     });
 
-    match &cal.events {
-        Events::Loading => {
-            let ly = y + h - p.px(18.0);
-            p.sym(c, Sym::Calendar, x + p.px(8.0), ly + p.px(6.5), 10.5, WHITE, 0.5);
-            p.text(c, "\u{2026}", x + p.px(18.0), ly, 10.5, 500, WHITE, 0.60, Anchor::Left, w - p.px(20.0));
-        }
-        Events::Unavailable => {}
-        Events::List([]) => {
-            let ly = y + h - p.px(18.0);
-            p.sym(c, Sym::Calendar, x + p.px(8.0), ly + p.px(6.5), 10.5, WHITE, 0.5);
-            let maxw = w - p.px(20.0);
-            let msg = tr(if is_today { "Tidak ada acara hari ini" } else { "Tidak ada acara" });
-            p.text(c, &p.fit(msg, 10.5, 500, maxw), x + p.px(18.0), ly, 10.5, 500, WHITE, 0.62, Anchor::Left, maxw + p.px(4.0));
-        }
-        Events::List(list) => {
-            let row_h = p.px(20.0);
-            let show_n = list.len().min(2);
-            let start_y = (agenda_bot - show_n as f32 * row_h).max(agenda_top);
-            let maxw = w - p.px(16.0);
-            for (idx, e) in list.iter().take(show_n).enumerate() {
-                let ry = start_y + idx as f32 * row_h;
-                let when = match e.minute {
-                    Some(m) if crate::prefs::get().clock_24h => format!("{:02}:{:02} ", m / 60, m % 60),
-                    Some(m) => format!("{}:{:02}{} ", (m / 60 + 11) % 12 + 1, m % 60, if m < 720 { "a" } else { "p" }),
-                    None => String::new(),
-                };
-                let extra = if idx == show_n - 1 && list.len() > show_n {
-                    format!("  +{}", list.len() - show_n)
-                } else {
-                    String::new()
-                };
-                let dot = p.px(4.5);
+    let pill_label = match t.phase {
+        Phase::Running => tr("Jeda"),
+        Phase::Paused => tr("Lanjutkan"),
+        Phase::Idle | Phase::Finished => tr("Mulai"),
+    };
+    let pill_h = p.px(25.0);
+    let pill_w = (p.measure(pill_label, 11.5, 700) + p.px(22.0)).clamp(p.px(56.0), p.px(78.0));
+    let pill_x = rst_cx - rst_dia / 2.0 - p.px(7.0) - pill_w;
+    let pill_y = row_cy - pill_h / 2.0;
+    let n_btn = kids(c);
+    p.rect(
+        c,
+        pill_x,
+        pill_y,
+        pill_w,
+        pill_h,
+        pill_h / 2.0,
+        Color { A: 255, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
+    );
+    let bth = p.px(11.5) * 1.3;
+    p.text(c, pill_label, pill_x + pill_w / 2.0, row_cy - bth / 2.0, 11.5, 700, WHITE, 1.0, Anchor::Center, pill_w);
+    regions.push(Region {
+        x: pill_x,
+        y: pill_y,
+        w: pill_w,
+        h: pill_h,
+        action: Action::TimerToggle,
+        vis: group_since(c, n_btn),
+        hover_bg: None,
+    });
+
+    // 4 Focus segments separated by 3 short-break dots + Long Break segment
+    let track_cy = top + p.px(78.0);
+    let label_y = top + p.px(92.0);
+    let seg_h = p.px(5.5);
+    let dot_d = p.px(4.0);
+    let seg_gap = p.px(3.5);
+    let long_w = p.px(20.0);
+    // Total fixed overhead: 3 break dots + 6 gaps around them + 1 gap before Long + Long width
+    let fixed = 3.0 * dot_d + 7.0 * seg_gap + long_w;
+    let seg_w = ((rw - fixed) / 4.0).max(p.px(18.0));
+    let active_slot = t.stage.focus_slot();
+    let in_short_break = matches!(t.stage, PomodoroStage::ShortBreak(_));
+
+    let mut cur_x = x_right;
+    let mut orb_pos: Option<(f32, f32)> = None;
+
+    for i in 0u8..4 {
+        let sx = cur_x;
+        let completed = i < active_slot || (in_short_break && i == active_slot);
+        let active_focus = matches!(t.stage, PomodoroStage::Focus(n) if n == i + 1);
+        let track_col = if completed {
+            Color { A: 220, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] }
+        } else {
+            white(32)
+        };
+        let n_seg = kids(c);
+        p.rect(c, sx, track_cy - seg_h / 2.0, seg_w, seg_h, seg_h / 2.0, track_col);
+        if active_focus {
+            let fw = (seg_w * prog).clamp(0.0, seg_w);
+            if fw > 1.0 {
                 p.rect(
                     c,
-                    x + p.px(4.0),
-                    ry + p.px(5.0),
-                    dot,
-                    dot,
-                    dot / 2.0,
-                    Color { A: 240, R: accent[0], G: accent[1], B: accent[2] },
-                );
-                let line = format!("{when}{}{extra}", e.title);
-                p.text(
-                    c,
-                    &p.fit(&line, 10.5, if idx == 0 { 600 } else { 500 }, maxw),
-                    x + p.px(13.0),
-                    ry,
-                    10.5,
-                    if idx == 0 { 600 } else { 500 },
-                    WHITE,
-                    if idx == 0 { 0.90 } else { 0.66 },
-                    Anchor::Left,
-                    maxw + p.px(4.0),
+                    sx,
+                    track_cy - seg_h / 2.0,
+                    fw,
+                    seg_h,
+                    seg_h / 2.0,
+                    Color { A: 245, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
                 );
             }
+            orb_pos = Some((sx + (seg_w * prog).clamp(p.px(3.0), seg_w - p.px(3.0)), track_cy));
+        }
+        let lbl = (i + 1).to_string();
+        let is_cur = active_focus;
+        p.text(
+            c,
+            &lbl,
+            sx + seg_w / 2.0,
+            label_y,
+            10.0,
+            if is_cur { 700 } else { 500 },
+            WHITE,
+            if is_cur { 0.98 } else { 0.48 },
+            Anchor::Center,
+            seg_w + p.px(6.0),
+        );
+        regions.push(Region {
+            x: sx - p.px(2.0),
+            y: track_cy - p.px(12.0),
+            w: seg_w + p.px(4.0),
+            h: p.px(34.0),
+            action: Action::TimerStage(PomodoroStage::Focus(i + 1)),
+            vis: group_since(c, n_seg),
+            hover_bg: None,
+        });
+        cur_x += seg_w + seg_gap;
+
+        if i < 3 {
+            let dcx = cur_x + dot_d / 2.0;
+            let brk_done = i < active_slot && !(in_short_break && i == active_slot);
+            let brk_active = matches!(t.stage, PomodoroStage::ShortBreak(n) if n == i + 1);
+            let dot_col = if brk_done || brk_active {
+                Color { A: 230, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] }
+            } else {
+                white(36)
+            };
+            p.rect(c, dcx - dot_d / 2.0, track_cy - dot_d / 2.0, dot_d, dot_d, dot_d / 2.0, dot_col);
+            if brk_active {
+                orb_pos = Some((dcx, track_cy));
+            }
+            cur_x += dot_d + seg_gap;
         }
     }
+
+    // Long break segment
+    let lx = cur_x;
+    let active_long = t.stage == PomodoroStage::LongBreak;
+    let n_long = kids(c);
+    p.rect(c, lx, track_cy - seg_h / 2.0, long_w, seg_h, seg_h / 2.0, white(32));
+    if active_long {
+        let fw = (long_w * prog).clamp(0.0, long_w);
+        if fw > 1.0 {
+            p.rect(
+                c,
+                lx,
+                track_cy - seg_h / 2.0,
+                fw,
+                seg_h,
+                seg_h / 2.0,
+                Color { A: 245, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
+            );
+        }
+        orb_pos = Some((lx + (long_w * prog).clamp(p.px(3.0), long_w - p.px(3.0)), track_cy));
+    }
+    p.text(
+        c,
+        tr("Panjang"),
+        lx + long_w / 2.0,
+        label_y,
+        9.5,
+        if active_long { 700 } else { 500 },
+        WHITE,
+        if active_long { 0.98 } else { 0.48 },
+        Anchor::Center,
+        long_w + p.px(14.0),
+    );
+    regions.push(Region {
+        x: lx - p.px(3.0),
+        y: track_cy - p.px(12.0),
+        w: long_w + p.px(6.0),
+        h: p.px(34.0),
+        action: Action::TimerStage(PomodoroStage::LongBreak),
+        vis: group_since(c, n_long),
+        hover_bg: None,
+    });
+
+    // Glowing white + soft violet orb on the active session segment (drawn on top of track).
+    if let Some((ox, oy)) = orb_pos {
+        let h1 = p.px(21.0);
+        let h2 = p.px(13.5);
+        let core = p.px(8.0);
+        p.rect(
+            c,
+            (ox - h1 / 2.0).round(),
+            (oy - h1 / 2.0).round(),
+            h1,
+            h1,
+            h1 / 2.0,
+            Color { A: 54, R: VIOLET_GLOW[0], G: VIOLET_GLOW[1], B: VIOLET_GLOW[2] },
+        );
+        p.rect(
+            c,
+            (ox - h2 / 2.0).round(),
+            (oy - h2 / 2.0).round(),
+            h2,
+            h2,
+            h2 / 2.0,
+            Color { A: 135, R: VIOLET_GLOW[0], G: VIOLET_GLOW[1], B: VIOLET_GLOW[2] },
+        );
+        p.rect(
+            c,
+            (ox - core / 2.0).round(),
+            (oy - core / 2.0).round(),
+            core,
+            core,
+            core / 2.0,
+            white(255),
+        );
+    }
+
+    // Bottom round summary: "2 h 10 min · 4 sessions"
+    let total_m = Timer::total_round_mins();
+    let summary = if en {
+        format!("{} h {} min \u{00B7} 4 sessions", total_m / 60, total_m % 60)
+    } else {
+        format!("{} j {} mnt \u{00B7} 4 sesi", total_m / 60, total_m % 60)
+    };
+    p.text(c, &summary, x_right, top + p.px(114.0), 10.5, 500, WHITE, 0.44, Anchor::Left, rw);
 }

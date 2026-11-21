@@ -33,7 +33,7 @@ use views::{Action, Data, Frame, LyrState, LyricsView, MediaView, Region};
 use windows::core::w;
 use windows::UI::Composition::{AnimationDelayBehavior, CompositionDrawingSurface, CompositionObject, Compositor, Visual};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON};
@@ -112,11 +112,13 @@ struct SendSess {
     done_at: Option<Instant>,
 }
 
-const WIN_W: f32 = 640.0;
+const WIN_W: f32 = 720.0;
 const WIN_H: f32 = 250.0;
 const SHADOW_PAD_X: f32 = 36.0;
 const SHADOW_PAD_B: f32 = 44.0;
 const EAR_DP: f32 = 17.0;
+const DETACHED_TIMER_W_DP: f32 = 86.0;
+const DETACHED_TIMER_GAP_DP: f32 = 9.0;
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -363,6 +365,7 @@ pub struct Notch {
     sp_lyrics: Spring,
     sp_scrub_hover: Spring,
     sp_art_scale: Spring,
+    sp_timer_pill: Spring,
     nav_expanded: bool,
     nav_collapse_armed: bool,
     scrub_hovered: bool,
@@ -375,6 +378,7 @@ pub struct Notch {
     frame_last: Instant,
     frame_ms: u32,
     rgn_rect: (i32, i32, i32, i32),
+    rgn_timer: (i32, i32, i32, i32),
 
     timer: Timer,
     t0: Instant,
@@ -409,6 +413,10 @@ pub struct Notch {
     last_pub_half: i32,
     todo_adding: bool,
     todo_editing: bool,
+    todo_cal_mode: bool,
+    todo_cal_adding: bool,
+    todo_cal_scroll: usize,
+    todo_cal_err: String,
     focus: FocusController,
 
     album: String,
@@ -556,6 +564,7 @@ impl Notch {
                 sp_lyrics: Spring::new(1.0, SpringParams::lyrics_glide()),
                 sp_scrub_hover: Spring::new(0.0, SpringParams::tactile()),
                 sp_art_scale: Spring::new(1.0, SpringParams::open()),
+                sp_timer_pill: Spring::new(0.0, SpringParams::swap()),
                 nav_expanded: false,
                 nav_collapse_armed: false,
                 scrub_hovered: false,
@@ -568,6 +577,7 @@ impl Notch {
                 frame_last: Instant::now(),
                 frame_ms,
                 rgn_rect: (-1, -1, -1, -1),
+                rgn_timer: (0, 0, 0, 0),
                 timer: Timer::new(std::env::var("NACRE_TIMER_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(25 * 60)),
                 t0: Instant::now(),
                 last_sec: -1,
@@ -610,6 +620,10 @@ impl Notch {
                 last_pub_half: -1,
                 todo_adding: false,
                 todo_editing: false,
+                todo_cal_mode: false,
+                todo_cal_adding: false,
+                todo_cal_scroll: 0,
+                todo_cal_err: String::new(),
                 focus: FocusController::new(),
                 album: String::new(),
                 lyr_worker: nacre_platform::lyrics::spawn(crate::paths::config_dir().join("lyrics"), move || post(hw, WM_LYRICS)),
@@ -741,6 +755,38 @@ impl Notch {
         }
     }
 
+    fn want_detached_timer(&self) -> bool {
+        matches!(self.look.view, View::Rest | View::Compact(_))
+            && self.timer.is_active()
+            && !matches!(self.look.view, View::Compact(state::Activity::Timer | state::Activity::TimerEnding))
+    }
+
+    /// Computes `(tx, tw, th, tr, t_ear, opacity)` for the detached right-side Timer pill
+    /// while guaranteed disjoint from the main Visor capsule on every spring frame.
+    fn detached_timer_geom(&self, x0: f32, w: f32, h: f32, r: f32, ear: f32) -> Option<(f32, f32, f32, f32, f32, f32)> {
+        let p = self.sp_timer_pill.pos.clamp(0.0, 1.0);
+        if p <= 0.02 || !matches!(self.look.view, View::Rest | View::Compact(_)) {
+            return None;
+        }
+        let th = h.min(36.0 * self.dpi).max(28.0 * self.dpi);
+        let t_ear = if ear > 0.5 { (ear * 0.65).min(th * 0.42) } else { 0.0 };
+        let ew_main = if ear > 0.5 { ear.min(h * 0.52) } else { 0.0 };
+        let gap_walls = if ear > 0.5 {
+            ew_main + t_ear + 3.0 * self.dpi
+        } else {
+            DETACHED_TIMER_GAP_DP * self.dpi
+        };
+        let tx = (x0 + w + gap_walls).round();
+        let max_avail = (self.win.0 as f32 - t_ear - 4.0 * self.dpi - tx).max(0.0);
+        let target_w = (DETACHED_TIMER_W_DP * self.dpi).min(max_avail);
+        if target_w < 36.0 * self.dpi {
+            return None;
+        }
+        let tw = (target_w * p).max(16.0 * self.dpi);
+        let tr = r.min((th - t_ear).max(4.0)).min(tw * 0.5);
+        Some((tx, tw, th, tr, t_ear, p))
+    }
+
     fn apply_springs_to_shell(&mut self) {
         let w = self.sp_w.pos.max(8.0);
         let h = self.sp_h.pos.max(8.0);
@@ -748,13 +794,21 @@ impl Notch {
         let ear = self.sp_ear.pos.max(0.0);
         let y = self.sp_y.pos;
         let x0 = self.x0_for(w);
+        let detached = self.detached_timer_geom(x0, w, h, r, ear);
 
-        self.shell.set_geometry(x0, w, h, r, ear);
+        self.shell.set_geometry_with_detached(
+            x0,
+            w,
+            h,
+            r,
+            ear,
+            detached.map(|(tx, tw, th, tr, te, _)| (tx, tw, th, tr, te)),
+        );
         self.shell.set_stage_y(y);
         STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
         self.shell.set_shadow(self.sp_sh_blur.pos * self.dpi, self.sp_sh_dy.pos * self.dpi, self.sp_sh_op.pos);
 
-        // Keep compact left/right chrome and bottom ambient glow glued to the animated pill edges.
+        // Keep compact left/right chrome, bottom ambient glow, and detached timer pill glued to animated edges.
         if let Some(left_c) = &self.live_vis.compact_left {
             let _ = left_c.SetOffset(Vector3 { X: x0.round(), Y: 0.0, Z: 0.0 });
         }
@@ -764,6 +818,14 @@ impl Notch {
         if let Some(glow) = &self.live_vis.compact_glow {
             let _ = glow.SetOffset(Vector3 { X: x0.round(), Y: 0.0, Z: 0.0 });
             let _ = glow.SetSize(Vector2 { X: w.ceil(), Y: h.ceil() });
+        }
+        if let Some(dt_vis) = &self.live_vis.detached_timer {
+            if let Some((tx, _, _, _, _, op)) = detached {
+                let _ = dt_vis.SetOffset(Vector3 { X: tx.round(), Y: 0.0, Z: 0.0 });
+                let _ = dt_vis.SetOpacity(op);
+            } else {
+                let _ = dt_vis.SetOpacity(0.0);
+            }
         }
         if self.shown && !self.off && matches!(self.look.view, View::Rest | View::Compact(_)) {
             self.publish_notch_for_width(w, false);
@@ -775,6 +837,7 @@ impl Notch {
             }
             self.shell.set_visible(false, self.hwnd);
             self.rgn_rect = (0, 0, 0, 0);
+            self.rgn_timer = (0, 0, 0, 0);
             return;
         }
 
@@ -783,10 +846,25 @@ impl Notch {
         let rr = (x0 + w + ear).ceil().min(self.win.0 as f32) as i32;
         let b = (y + h).ceil().clamp(0.0, self.win.1 as f32) as i32;
         let next = (l, t, rr.max(l), b.max(t));
-        if next != self.rgn_rect {
+        let next_t = match detached {
+            Some((tx, tw, th, _, te, _)) => {
+                let tl = (tx - te).floor().max(0.0) as i32;
+                let trr = (tx + tw + te).ceil().min(self.win.0 as f32) as i32;
+                let tb = (y + th).ceil().clamp(0.0, self.win.1 as f32) as i32;
+                (tl, t, trr.max(tl), tb.max(t))
+            }
+            None => (0, 0, 0, 0),
+        };
+        if next != self.rgn_rect || next_t != self.rgn_timer {
             self.rgn_rect = next;
+            self.rgn_timer = next_t;
             unsafe {
                 let rgn = CreateRectRgn(next.0, next.1, next.2, next.3);
+                if next_t.2 > next_t.0 && next_t.3 > next_t.1 {
+                    let rgn_t = CreateRectRgn(next_t.0, next_t.1, next_t.2, next_t.3);
+                    let _ = CombineRgn(Some(rgn), Some(rgn), Some(rgn_t), RGN_OR);
+                    let _ = DeleteObject(rgn_t.into());
+                }
                 SetWindowRgn(self.hwnd, Some(rgn), false);
             }
         }
@@ -861,6 +939,7 @@ impl Notch {
         springs_moving |= self.sp_sh_blur.step(dt);
         springs_moving |= self.sp_sh_dy.step(dt);
         springs_moving |= self.sp_sh_op.step(dt);
+        springs_moving |= self.sp_timer_pill.step(dt);
 
         if springs_moving {
             self.apply_springs_to_shell();
@@ -984,8 +1063,10 @@ impl Notch {
             media: self.has_media,
             playing: self.playing,
             lyric_line: self.lyr.as_ref().is_some_and(|l| l.synced),
-            lyrics_on: crate::prefs::get().lyrics_compact,
-            timer_left_s: running.then(|| self.timer.remaining_secs(self.now_ms())),
+            lyrics_on: self.lyrics_open || crate::prefs::get().lyrics_compact,
+            // When media is active, the Detached Timer Pill displays the countdown on the right
+            // so Live Lyrics / Now Playing stays intact in the main capsule.
+            timer_left_s: (running && !self.has_media).then(|| self.timer.remaining_secs(self.now_ms())),
             charging_fresh: self.charging_fresh,
             shelf: self.shelf.len(),
             glance: crate::prefs::get().notch_idle == 0,
@@ -1108,20 +1189,28 @@ impl Notch {
         }
         if let Some(a) = &self.agenda {
             self.cal_in_flight = true;
-            let _ = a.requests.send(date);
+            let _ = a.commands.send(nacre_platform::agenda::Cmd::Fetch(date));
         }
     }
 
     fn on_agenda(&mut self) {
         let Some(a) = &self.agenda else { return };
         let mut got = false;
-        while let Ok(ans) = a.answers.try_recv() {
-            self.cal_events = Some(ans);
-            self.cal_fetched_at = Some(Instant::now());
-            self.cal_in_flight = false;
-            got = true;
+        while let Ok(msg) = a.answers.try_recv() {
+            match msg {
+                nacre_platform::agenda::AgendaMsg::Loaded(d, list) => {
+                    self.cal_events = Some((d, list));
+                    self.cal_fetched_at = Some(Instant::now());
+                    self.cal_in_flight = false;
+                    got = true;
+                }
+                nacre_platform::agenda::AgendaMsg::CreateFailed(err) => {
+                    self.todo_cal_err = err;
+                    got = true;
+                }
+            }
         }
-        if got && self.mode == Mode::Open(Tab::Timer) {
+        if got && self.mode == Mode::Open(Tab::Todo) {
             self.render();
         }
     }
@@ -1240,8 +1329,9 @@ impl Notch {
             gi.set_focused(false, &mut self.paint);
         }
         self.focus.release(self.hwnd, restore_prev);
-        if was_todo && self.todo_draft.trim().is_empty() && self.todo_adding {
+        if was_todo && self.todo_draft.trim().is_empty() && (self.todo_adding || self.todo_cal_adding) {
             self.todo_adding = false;
+            self.todo_cal_adding = false;
             if self.mode == Mode::Open(Tab::Todo) {
                 self.render();
             }
@@ -1257,6 +1347,32 @@ impl Notch {
             .unwrap_or_else(|| self.todo_draft.clone());
         let trimmed = text.trim();
         if trimmed.is_empty() {
+            return;
+        }
+        // In Calendar Schedule mode, "+ Add Schedule" creates a Google Calendar event (NOT a checklist task).
+        if self.todo_cal_mode && self.todo_cal_adding {
+            let input = trimmed.to_string();
+            self.todo_draft.clear();
+            if let Some(ti) = self.todo_input.as_mut() {
+                ti.buf.clear();
+            }
+            self.todo_cal_adding = false;
+            self.todo_cal_err.clear();
+            self.todo_cal_scroll = 0;
+            if self.agenda.is_none() {
+                let hw = self.hwnd.0 as isize;
+                self.agenda = Some(nacre_platform::agenda::spawn(move || post(hw, WM_AGENDA)));
+            }
+            if let Some(a) = &self.agenda {
+                self.cal_in_flight = true;
+                self.cal_fetched_at = None;
+                let _ = a.commands.send(nacre_platform::agenda::Cmd::Create {
+                    date: Self::today(),
+                    input,
+                });
+            }
+            self.blur_inputs(false);
+            self.render();
             return;
         }
         let now = std::time::SystemTime::now()
@@ -1375,7 +1491,8 @@ impl Notch {
                     self.save_todos();
                     // Allow calendar to re-fetch fresh events from Google Calendar on next open / immediately if open.
                     self.cal_fetched_at = None;
-                    if self.mode == Mode::Open(Tab::Timer) {
+                    self.todo_cal_err.clear();
+                    if self.mode == Mode::Open(Tab::Todo) {
                         self.ensure_events();
                     }
                     changed = true;
@@ -1618,7 +1735,13 @@ impl Notch {
     }
 
     fn max_safe_compact_w(&self) -> f32 {
-        let max_win = (self.win.0 as f32 - 2.0 * SHADOW_PAD_X * self.dpi).max(200.0 * self.dpi);
+        let detached_reserve = if self.want_detached_timer() {
+            // Reserve room on the right for the detached timer pill + valley gap while keeping main pill centered.
+            2.0 * (DETACHED_TIMER_W_DP + 36.0) * self.dpi
+        } else {
+            0.0
+        };
+        let max_win = (self.win.0 as f32 - 2.0 * SHADOW_PAD_X * self.dpi - detached_reserve).max(200.0 * self.dpi);
         let cap = (state::COMPACT_MAX_W_DP * self.dpi).min(max_win);
         let min_safe = (state::COMPACT_MIN_W_DP * self.dpi).min(cap);
         if !crate::prefs::get().menubar {
@@ -1629,7 +1752,7 @@ impl Notch {
             return cap.min((self.screen_w as f32 * 0.42).max(min_safe));
         }
         let side = bar_l.max(bar_r) as f32 + 16.0 * self.dpi;
-        let avail = self.screen_w as f32 - 2.0 * side - 2.0 * ear_px(self.dpi);
+        let avail = self.screen_w as f32 - 2.0 * side - 2.0 * ear_px(self.dpi) - detached_reserve * 0.5;
         avail.clamp(min_safe, cap)
     }
 
@@ -1713,7 +1836,11 @@ impl Notch {
 
     fn sync_adaptive_size(&mut self) {
         let next = self.target_size(self.look);
-        if (next.w - self.size.w).abs() >= 1.5 || (next.h - self.size.h).abs() >= 1.5 {
+        let target_tp = if self.want_detached_timer() { 1.0 } else { 0.0 };
+        if (next.w - self.size.w).abs() >= 1.5
+            || (next.h - self.size.h).abs() >= 1.5
+            || (target_tp - self.sp_timer_pill.target).abs() > 0.01
+        {
             self.apply_size(Some(SpringParams::swap()));
             self.publish_notch();
         }
@@ -1776,6 +1903,7 @@ impl Notch {
             self.cal_sel = 0;
             self.todo_adding = false;
             self.todo_editing = false;
+            self.todo_cal_adding = false;
             self.scrub_hovered = false;
             self.sp_scrub_hover.snap(0.0);
             self.sp_lyrics.snap(if self.lyrics_open { 1.0 } else { 0.0 });
@@ -1783,6 +1911,7 @@ impl Notch {
             if new.view != View::Open(Tab::Todo) {
                 self.todo_adding = false;
                 self.todo_editing = false;
+                self.todo_cal_adding = false;
             }
             if new.view == View::Open(Tab::Play) && old.view != View::Open(Tab::Play) {
                 self.sp_lyrics.snap(if self.lyrics_open { 1.0 } else { 0.0 });
@@ -1811,6 +1940,7 @@ impl Notch {
         let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
         let (target_sh_blur, target_sh_dy, sh_op) = state::shadow(self.look);
         let target_sh_op = if self.shown { sh_op } else { 0.0 };
+        let target_timer_pill = if self.want_detached_timer() { 1.0 } else { 0.0 };
 
         match sp {
             None => {
@@ -1822,6 +1952,7 @@ impl Notch {
                 self.sp_sh_blur.snap(target_sh_blur);
                 self.sp_sh_dy.snap(target_sh_dy);
                 self.sp_sh_op.snap(target_sh_op);
+                self.sp_timer_pill.snap(target_timer_pill);
                 self.stop_frame();
                 self.apply_springs_to_shell();
             }
@@ -1834,6 +1965,7 @@ impl Notch {
                 self.sp_sh_blur.set_target(target_sh_blur, p);
                 self.sp_sh_dy.set_target(target_sh_dy, p);
                 self.sp_sh_op.set_target(target_sh_op, p);
+                self.sp_timer_pill.set_target(target_timer_pill, p);
                 self.start_frame();
             }
         }
@@ -1865,7 +1997,7 @@ impl Notch {
         if self.mode == Mode::Open(Tab::Shelf) {
             self.load_shelf_icons();
         }
-        if self.mode == Mode::Open(Tab::Timer) {
+        if self.mode == Mode::Open(Tab::Todo) {
             self.ensure_events();
         }
         if self.has_media && self.art.is_none() {
@@ -1878,7 +2010,7 @@ impl Notch {
             _ => views::Events::Loading,
         };
         let send_c = self.send_compact();
-        let cal = views::CalView { today: Self::today(), sel: cal_date, events };
+        let cal = views::CalView { events };
         let send = match &self.send {
             Some(ss) => {
                 let n = ss.names.len();
@@ -1930,6 +2062,24 @@ impl Notch {
             s_prefs.gemini_custom_model.as_str(),
         );
         let gemini_has_key = nacre_platform::gemini::has_api_key();
+        let detached_timer = if self.want_detached_timer() || self.sp_timer_pill.pos > 0.02 {
+            let ear = self.sp_ear.pos.max(0.0);
+            let h = self.size.h.max(28.0 * self.dpi);
+            let th = h.min(36.0 * self.dpi);
+            let t_ear = if ear > 0.5 { (ear * 0.65).min(th * 0.42) } else { 0.0 };
+            let ew_main = if ear > 0.5 { ear.min(h * 0.52) } else { 0.0 };
+            let gap_walls = if ear > 0.5 {
+                ew_main + t_ear + 3.0 * self.dpi
+            } else {
+                DETACHED_TIMER_GAP_DP * self.dpi
+            };
+            let tx = (self.x0() + self.size.w + gap_walls).round();
+            let max_avail = (self.win.0 as f32 - t_ear - 4.0 * self.dpi - tx).max(0.0);
+            let tw = (DETACHED_TIMER_W_DP * self.dpi).min(max_avail);
+            (tw >= 36.0 * self.dpi).then_some((tx, tw, th, self.sp_timer_pill.pos.clamp(0.0, 1.0)))
+        } else {
+            None
+        };
         let d = Data {
             battery: self.battery,
             timer: &self.timer,
@@ -1961,12 +2111,17 @@ impl Notch {
             notif_scroll: self.alerts_scroll,
             notif_status: self.notif_status,
             timer_running: self.timer.phase == Phase::Running,
+            detached_timer,
             todos,
             todo_done,
             todo_total,
             todo_scroll: self.todo_scroll,
             todo_adding: self.todo_adding,
             todo_editing: self.todo_editing,
+            todo_cal_mode: self.todo_cal_mode,
+            todo_cal_adding: self.todo_cal_adding,
+            todo_cal_scroll: self.todo_cal_scroll,
+            todo_cal_err: &self.todo_cal_err,
             todo_status: self.todo_status,
             gemini_text: &self.gemini_resp,
             gemini_streaming: self.gemini_streaming,
@@ -1993,7 +2148,12 @@ impl Notch {
             }
         }
         if let Some((ix, iy, iw, ih)) = self.live_vis.todo_input_box {
-            if let Ok(mut ti) = TextInput::new(&self.paint.comp, &c, ix, iy, iw, ih, self.dpi, crate::prefs::tr("Tambah tugas…"), 180) {
+            let ph = if self.todo_cal_mode && self.todo_cal_adding {
+                crate::prefs::tr("14:00 Rapat Tim…")
+            } else {
+                crate::prefs::tr("Tambah tugas…")
+            };
+            if let Ok(mut ti) = TextInput::new(&self.paint.comp, &c, ix, iy, iw, ih, self.dpi, ph, 180) {
                 ti.buf.set(&self.todo_draft);
                 ti.set_focused(self.active_input == Some(ActiveInput::Todo), &mut self.paint);
                 if self.todo_input_fade {
@@ -2716,8 +2876,9 @@ impl Notch {
     }
 
     fn on_compact_action(&self, x: f32, y: f32) -> bool {
-        (self.look.view == View::Compact(state::Activity::Player)
-            && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::PlayPause | Action::Next | Action::Prev)))
+        self.regions.iter().any(|r| r.hit(x, y) && r.action == Action::OpenTimerPill)
+            || (self.look.view == View::Compact(state::Activity::Player)
+                && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::PlayPause | Action::Next | Action::Prev)))
             || (self.look.view == View::Compact(state::Activity::Notification)
                 && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::NotifFocus(_) | Action::NotifDismiss(_))))
     }
@@ -2829,30 +2990,36 @@ impl Notch {
                 self.refresh();
             }
             Action::TimerReset => {
-                self.timer.reset();
+                self.timer.reset_pomodoro();
                 self.sync_tick();
                 self.refresh();
             }
-            Action::TimerPlus => {
-                self.timer.adjust(300);
+            Action::TimerStage(stage) => {
+                self.timer.select_stage(stage);
+                self.sync_tick();
                 self.refresh();
             }
-            Action::TimerMinus => {
-                self.timer.adjust(-300);
-                self.refresh();
+            Action::OpenTimerPill => {
+                kill(self.hwnd, T_DWELL);
+                self.dispatch(Event::Click);
+                self.dispatch(Event::SelectTab(Tab::Timer));
             }
             Action::SendDone => self.stop_send(),
-            Action::CalDay(n) => {
-                self.cal_sel = (self.cal_sel + n).clamp(-3650, 3650);
-                self.cal_fetched_at = None;
-                self.cal_in_flight = false;
-                self.render();
-            }
             Action::CalRefresh => {
+                self.todo_cal_err.clear();
                 self.cal_fetched_at = None;
                 self.cal_in_flight = false;
                 self.ensure_events();
                 self.render();
+            }
+            Action::CalAddOpen => {
+                self.todo_cal_mode = true;
+                self.todo_cal_adding = true;
+                self.todo_cal_err.clear();
+                self.todo_draft.clear();
+                self.todo_input_fade = true;
+                self.render();
+                self.focus_input(ActiveInput::Todo);
             }
             Action::NotifFocus(id) => {
                 let target = self
@@ -2906,8 +3073,24 @@ impl Notch {
                 self.refresh();
                 self.update_visibility();
             }
+            Action::TodoCalToggle => {
+                self.todo_cal_mode = !self.todo_cal_mode;
+                self.todo_adding = false;
+                self.todo_editing = false;
+                self.todo_cal_adding = false;
+                self.todo_cal_err.clear();
+                if self.todo_cal_mode {
+                    self.cal_fetched_at = None;
+                    self.cal_in_flight = false;
+                    self.ensure_events();
+                }
+                self.render();
+            }
             Action::TodoAddOpen => {
+                self.todo_cal_mode = false;
+                self.todo_cal_adding = false;
                 self.todo_adding = true;
+                self.todo_draft.clear();
                 self.todo_input_fade = true;
                 self.render();
                 self.focus_input(ActiveInput::Todo);
@@ -2954,9 +3137,6 @@ impl Notch {
                     }
                 }
             }
-            Action::TodoSync => {
-                let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::SyncNow);
-            }
             Action::TodoConnect => {
                 let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::Connect);
             }
@@ -3000,17 +3180,38 @@ impl Notch {
                 return;
             }
         }
-        if self.mode == Mode::Open(Tab::Todo) && self.todos.visible().len() > 4 {
-            let max_scroll = self.todos.visible().len().saturating_sub(4);
-            let next = if delta < 0 {
-                (self.todo_scroll + 1).min(max_scroll)
-            } else {
-                self.todo_scroll.saturating_sub(1)
-            };
-            if next != self.todo_scroll {
-                self.todo_scroll = next;
-                self.render();
-                return;
+        if self.mode == Mode::Open(Tab::Todo) {
+            if self.todo_cal_mode {
+                let cal_len = self
+                    .cal_events
+                    .as_ref()
+                    .and_then(|(_, l)| l.as_ref())
+                    .map_or(0, Vec::len);
+                if cal_len > 4 {
+                    let max_scroll = cal_len.saturating_sub(4);
+                    let next = if delta < 0 {
+                        (self.todo_cal_scroll + 1).min(max_scroll)
+                    } else {
+                        self.todo_cal_scroll.saturating_sub(1)
+                    };
+                    if next != self.todo_cal_scroll {
+                        self.todo_cal_scroll = next;
+                        self.render();
+                        return;
+                    }
+                }
+            } else if self.todos.visible().len() > 4 {
+                let max_scroll = self.todos.visible().len().saturating_sub(4);
+                let next = if delta < 0 {
+                    (self.todo_scroll + 1).min(max_scroll)
+                } else {
+                    self.todo_scroll.saturating_sub(1)
+                };
+                if next != self.todo_scroll {
+                    self.todo_scroll = next;
+                    self.render();
+                    return;
+                }
             }
         }
         if self.mode == Mode::Open(Tab::Gemini) && !self.gemini_resp.is_empty() {
@@ -3079,7 +3280,8 @@ impl Notch {
             self.refresh();
         }
         if finished {
-            log::line("notch", "timer selesai");
+            log::line("notch", &format!("pomodoro selesai stage={:?}", self.timer.stage));
+            self.timer.advance_stage();
             self.sync_tick();
             if crate::prefs::get().notch_notifs {
                 self.internal_notif_id = self.internal_notif_id.wrapping_add(1);
@@ -3096,9 +3298,9 @@ impl Notch {
                     timestamp_s: ts,
                     read: false,
                 });
-                self.refresh();
-                self.update_visibility();
             }
+            self.refresh();
+            self.update_visibility();
         }
     }
 
@@ -3283,6 +3485,7 @@ impl Notch {
             self.dpi = dpi;
             self.win = win;
             self.rgn_rect = (-1, -1, -1, -1);
+            self.rgn_timer = (-1, -1, -1, -1);
             let wx = (screen_w - win.0) / 2;
             unsafe {
                 let _ = SetWindowPos(self.hwnd, None, wx, 0, win.0, win.1, SWP_NOACTIVATE | SWP_NOZORDER);
@@ -3550,11 +3753,19 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let inside = with(hwnd, |d| {
                 let w = d.sp_w.pos.max(8.0);
                 let h = d.sp_h.pos.max(8.0);
+                let r = d.sp_r.pos.max(0.0);
                 let ear = d.sp_ear.pos.max(0.0);
                 let x0 = d.x0_for(w);
                 let cx = pt.x as f32;
                 let cy = pt.y as f32 - d.sp_y.pos;
-                d.shown && cx >= x0 - ear && cx <= x0 + w + ear && cy >= 0.0 && cy <= h
+                if !d.shown || cy < 0.0 {
+                    return false;
+                }
+                let in_main = cx >= x0 - ear && cx <= x0 + w + ear && cy <= h;
+                let in_detached = d.detached_timer_geom(x0, w, h, r, ear).is_some_and(
+                    |(tx, tw, th, _, te, _)| cx >= tx - te && cx <= tx + tw + te && cy <= th,
+                );
+                in_main || in_detached
             })
             .unwrap_or(false);
             LRESULT(if inside { HTCLIENT as isize } else { HTTRANSPARENT as isize })

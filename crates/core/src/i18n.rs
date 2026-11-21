@@ -427,6 +427,19 @@ const EN: &[(&str, &str)] = &[
     ("Selesai hari ini", "Task Done Today"),
     ("Tambah Tugas", "Add Task"),
     ("Edit Tugas", "Edit Task"),
+    ("Istirahat Singkat", "Short Break"),
+    ("Istirahat Panjang", "Long Break"),
+    ("Ronde ini", "This round"),
+    ("Lanjutkan", "Resume"),
+    ("Jeda", "Pause"),
+    ("Panjang", "Long"),
+    ("Jadwal hari ini", "Today's Schedule"),
+    ("Tambah Jadwal", "Add Schedule"),
+    ("Muat Ulang", "Refresh"),
+    ("Sambungkan Google di Pengaturan", "Connect Google in Settings"),
+    ("Sepanjang hari", "All day"),
+    ("14:00 Rapat Tim…", "14:00 Team Sync…"),
+    ("Memuat jadwal…", "Loading schedule…"),
 ];
 
 pub fn is_known(src: &str) -> bool {

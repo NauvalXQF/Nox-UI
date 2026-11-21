@@ -263,7 +263,7 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
     let (mut w, mut h, mut r): (f32, f32, f32) = match l.view {
         View::Rest => (184.0, 30.0, 15.0),
         View::Compact(Activity::Notification) => (360.0, 46.0, 20.0),
-        View::Compact(Activity::Lyrics) => (340.0, 32.0, 16.0),
+        View::Compact(Activity::Lyrics) => (360.0, 36.0, 18.0),
         View::Compact(Activity::Glance) => (220.0, 30.0, 15.0),
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
