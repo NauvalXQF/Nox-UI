@@ -22,13 +22,14 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    IUIAutomationEventHandler, IUIAutomationEventHandler_Impl, IUIAutomationInvokePattern,
-    IUIAutomationSelectionItemPattern, SetWinEventHook, TreeScope_Descendants, TreeScope_Subtree,
-    UnhookWinEvent, HWINEVENTHOOK, UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
+    CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationCondition,
+    IUIAutomationElement, IUIAutomationEventHandler, IUIAutomationEventHandler_Impl,
+    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, SetWinEventHook,
+    TreeScope_Descendants, TreeScope_Element, TreeScope_Subtree, UnhookWinEvent, HWINEVENTHOOK,
+    UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
     UIA_DataItemControlTypeId, UIA_EVENT_ID, UIA_InvokePatternId, UIA_ListItemControlTypeId,
-    UIA_SelectionItemPatternId, UIA_TextControlTypeId, UIA_TreeItemControlTypeId,
-    UIA_Window_WindowOpenedEventId,
+    UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TextControlTypeId,
+    UIA_TreeItemControlTypeId, UIA_Window_WindowOpenedEventId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
@@ -1293,7 +1294,7 @@ fn click_point_safely(expected_hwnd: HWND, cx: i32, cy: i32) -> bool {
         if SetCursorPos(cx, cy).is_err() {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(12));
+        std::thread::sleep(Duration::from_millis(4));
         let inputs = [
             INPUT {
                 r#type: INPUT_MOUSE,
@@ -1315,7 +1316,7 @@ fn click_point_safely(expected_hwnd: HWND, cx: i32, cy: i32) -> bool {
             },
         ];
         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        std::thread::sleep(Duration::from_millis(18));
+        std::thread::sleep(Duration::from_millis(8));
         if have_prev {
             let _ = SetCursorPos(prev.x, prev.y);
         }
@@ -1342,12 +1343,90 @@ fn has_webview_child(hwnd: HWND) -> bool {
     found.0
 }
 
+#[allow(clippy::too_many_arguments)]
+fn scan_cached_candidates(
+    root: &IUIAutomationElement,
+    cond: &IUIAutomationCondition,
+    cache: &IUIAutomationCacheRequest,
+    left_min: i32,
+    left_max: i32,
+    top_min: i32,
+    bottom_max: i32,
+    targets: &[String],
+    limit: i32,
+    early_score: u8,
+) -> Option<(u8, IUIAutomationElement, RECT)> {
+    let arr = unsafe { root.FindAllBuildCache(TreeScope_Descendants, cond, cache) }.ok()?;
+    let total = unsafe { arr.Length() }.unwrap_or(0).min(limit);
+
+    let mut best: Option<(u8, u8, i32, IUIAutomationElement, RECT)> = None;
+    for i in 0..total {
+        let Ok(el) = (unsafe { arr.GetElement(i) }) else {
+            continue;
+        };
+        let Ok(rc) = (unsafe { el.CachedBoundingRectangle() }) else {
+            continue;
+        };
+        let ew = rc.right - rc.left;
+        let eh = rc.bottom - rc.top;
+        if ew <= 4 || eh <= 4 || eh > 150 {
+            continue;
+        }
+        let cx = (rc.left + rc.right) / 2;
+        let cy = (rc.top + rc.bottom) / 2;
+        if cx < left_min || cx > left_max || cy < top_min || cy > bottom_max {
+            continue;
+        }
+        let Ok(name_bstr) = (unsafe { el.CachedName() }) else {
+            continue;
+        };
+        let norm_name = normalize_label(&name_bstr.to_string());
+        if norm_name.is_empty() {
+            continue;
+        }
+        let mut score = 0u8;
+        for (ti, t) in targets.iter().enumerate() {
+            let s = score_chat_candidate(&norm_name, t);
+            let adjusted = s.saturating_sub((ti as u8).saturating_mul(3));
+            if adjusted > score {
+                score = adjusted;
+            }
+        }
+        if score == 0 {
+            continue;
+        }
+        let ctype = unsafe { el.CachedControlType() }.ok();
+        let is_row = ctype == Some(UIA_ListItemControlTypeId)
+            || ctype == Some(UIA_DataItemControlTypeId)
+            || ctype == Some(UIA_TreeItemControlTypeId);
+        let kind_rank: u8 = if is_row { 2 } else { 1 };
+        let better = match &best {
+            None => true,
+            Some((bs, bk, by, _, _)) => {
+                score > *bs || (score == *bs && (kind_rank > *bk || (kind_rank == *bk && cy < *by)))
+            }
+        };
+        if better {
+            best = Some((score, kind_rank, cy, el, rc));
+            // Recent notification chats sit at the top of the sidebar; stop immediately on strong hit.
+            if score >= early_score {
+                break;
+            }
+        }
+    }
+    best.map(|(s, _, _, el, rc)| (s, el, rc))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn try_select_chat_in_hwnd(
     uia: &IUIAutomation,
-    cond: &IUIAutomationCondition,
+    row_cond: &IUIAutomationCondition,
+    text_cond: &IUIAutomationCondition,
+    cache: &IUIAutomationCacheRequest,
     hwnd: HWND,
     targets: &[String],
     app_name: &str,
+    t0: Instant,
 ) -> bool {
     let mut win_rc = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut win_rc) }.is_err() {
@@ -1372,97 +1451,75 @@ fn try_select_chat_in_hwnd(
     let Ok(root) = (unsafe { uia.ElementFromHandle(hwnd) }) else {
         return false;
     };
-    let Ok(arr) = (unsafe { root.FindAll(TreeScope_Descendants, cond) }) else {
-        return false;
-    };
-    let total = unsafe { arr.Length() }.unwrap_or(0).min(500);
 
-    let mut best: Option<(u8, u8, i32, IUIAutomationElement, RECT)> = None;
-    for i in 0..total {
-        let Ok(el) = (unsafe { arr.GetElement(i) }) else {
-            continue;
-        };
-        let Ok(rc) = (unsafe { el.CurrentBoundingRectangle() }) else {
-            continue;
-        };
-        let ew = rc.right - rc.left;
-        let eh = rc.bottom - rc.top;
-        if ew <= 4 || eh <= 4 || eh > 150 {
-            continue;
-        }
-        let cx = (rc.left + rc.right) / 2;
-        let cy = (rc.top + rc.bottom) / 2;
-        if cx < left_min || cx > left_max || cy < top_min || cy > bottom_max {
-            continue;
-        }
-        let Ok(name_bstr) = (unsafe { el.CurrentName() }) else {
-            continue;
-        };
-        let norm_name = normalize_label(&name_bstr.to_string());
-        if norm_name.is_empty() {
-            continue;
-        }
-        let mut score = 0u8;
-        for (ti, t) in targets.iter().enumerate() {
-            let s = score_chat_candidate(&norm_name, t);
-            // Slightly favor higher-priority extracted target (e.g. group name before sender).
-            let adjusted = s.saturating_sub((ti as u8).saturating_mul(3));
-            if adjusted > score {
-                score = adjusted;
-            }
-        }
-        if score == 0 {
-            continue;
-        }
-        let ctype = unsafe { el.CurrentControlType() }.ok();
-        let is_row = ctype == Some(UIA_ListItemControlTypeId)
-            || ctype == Some(UIA_DataItemControlTypeId)
-            || ctype == Some(UIA_TreeItemControlTypeId);
-        let kind_rank: u8 = if is_row { 2 } else { 1 };
-        let better = match &best {
-            None => true,
-            Some((bs, bk, by, _, _)) => {
-                score > *bs || (score == *bs && (kind_rank > *bk || (kind_rank == *bk && cy < *by)))
-            }
-        };
-        if better {
-            best = Some((score, kind_rank, cy, el, rc));
-        }
+    // Fast Pass 1: cached scan of ListItem/DataItem/TreeItem rows ONLY (avoids hundreds of message Text nodes).
+    let mut hit = scan_cached_candidates(
+        &root,
+        row_cond,
+        cache,
+        left_min,
+        left_max,
+        top_min,
+        bottom_max,
+        targets,
+        120,
+        78,
+    );
+    let matched_row_directly = hit.is_some();
+
+    // Fallback Pass 2: cached scan of Text nodes (for custom sidebar DOMs without row ARIA names).
+    if hit.is_none() {
+        hit = scan_cached_candidates(
+            &root,
+            text_cond,
+            cache,
+            left_min,
+            left_max,
+            top_min,
+            bottom_max,
+            targets,
+            260,
+            90,
+        );
     }
 
-    let Some((score, _, _, matched_el, matched_rc)) = best else {
+    let Some((score, matched_el, matched_rc)) = hit else {
         return false;
     };
-
-    // If we matched a child Text node inside a chat row, walk up to its enclosing row item if present.
-    let mut activate_el = matched_el;
-    let mut activate_rc = matched_rc;
-    if let Ok(walker) = unsafe { uia.ControlViewWalker() } {
-        let mut cur = activate_el.clone();
-        for _ in 0..4 {
-            let Ok(parent) = (unsafe { walker.GetParentElement(&cur) }) else {
-                break;
-            };
-            let ptype = unsafe { parent.CurrentControlType() }.ok();
-            if ptype == Some(UIA_ListItemControlTypeId)
-                || ptype == Some(UIA_DataItemControlTypeId)
-                || ptype == Some(UIA_TreeItemControlTypeId)
-                || ptype == Some(UIA_ButtonControlTypeId)
-            {
-                if let Ok(prc) = unsafe { parent.CurrentBoundingRectangle() } {
-                    let ph = prc.bottom - prc.top;
-                    if ph > 12 && ph <= 140 && prc.left >= win_rc.left && prc.right <= left_max + 80 {
-                        activate_el = parent;
-                        activate_rc = prc;
-                        break;
-                    }
-                }
-            }
-            cur = parent;
-        }
-    }
 
     let is_webview = has_webview_child(hwnd);
+    let mut activate_el = matched_el;
+    let mut activate_rc = matched_rc;
+
+    // On native WinUI/XAML apps, walk up from Text to enclosing ListItem so SelectionItemPattern works.
+    // On WebView2/Electron, clicking the matched contact label or row center directly triggers onClick.
+    if !is_webview && !matched_row_directly {
+        if let Ok(walker) = unsafe { uia.ControlViewWalker() } {
+            let mut cur = activate_el.clone();
+            for _ in 0..4 {
+                let Ok(parent) = (unsafe { walker.GetParentElement(&cur) }) else {
+                    break;
+                };
+                let ptype = unsafe { parent.CurrentControlType() }.ok();
+                if ptype == Some(UIA_ListItemControlTypeId)
+                    || ptype == Some(UIA_DataItemControlTypeId)
+                    || ptype == Some(UIA_TreeItemControlTypeId)
+                    || ptype == Some(UIA_ButtonControlTypeId)
+                {
+                    if let Ok(prc) = unsafe { parent.CurrentBoundingRectangle() } {
+                        let ph = prc.bottom - prc.top;
+                        if ph > 12 && ph <= 140 && prc.left >= win_rc.left && prc.right <= left_max + 80 {
+                            activate_el = parent;
+                            activate_rc = prc;
+                            break;
+                        }
+                    }
+                }
+                cur = parent;
+            }
+        }
+    }
+
     if !is_webview {
         if let Ok(sel) = unsafe {
             activate_el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
@@ -1470,7 +1527,11 @@ fn try_select_chat_in_hwnd(
             if unsafe { sel.Select() }.is_ok() {
                 crate::log::line(
                     "notif",
-                    &format!("nav app={app_name} target=\"{}\" score={score} via=uia_select", targets[0]),
+                    &format!(
+                        "nav app={app_name} target=\"{}\" score={score} via=uia_select elapsed={}ms",
+                        targets[0],
+                        t0.elapsed().as_millis()
+                    ),
                 );
                 return true;
             }
@@ -1481,7 +1542,11 @@ fn try_select_chat_in_hwnd(
             if unsafe { inv.Invoke() }.is_ok() {
                 crate::log::line(
                     "notif",
-                    &format!("nav app={app_name} target=\"{}\" score={score} via=uia_invoke", targets[0]),
+                    &format!(
+                        "nav app={app_name} target=\"{}\" score={score} via=uia_invoke elapsed={}ms",
+                        targets[0],
+                        t0.elapsed().as_millis()
+                    ),
                 );
                 return true;
             }
@@ -1495,8 +1560,9 @@ fn try_select_chat_in_hwnd(
         crate::log::line(
             "notif",
             &format!(
-                "nav app={app_name} target=\"{}\" score={score} via=uia_click({cx},{cy}) webview={is_webview}",
-                targets[0]
+                "nav app={app_name} target=\"{}\" score={score} via=uia_click({cx},{cy}) webview={is_webview} elapsed={}ms",
+                targets[0],
+                t0.elapsed().as_millis()
             ),
         );
         return true;
@@ -1505,11 +1571,11 @@ fn try_select_chat_in_hwnd(
 }
 
 fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, targets: Vec<String>) {
+    let t0 = Instant::now();
     let _ = std::thread::Builder::new().name("abra-notif-nav".into()).spawn(move || {
-        // Wait briefly for window restoration/foreground transition to settle.
-        std::thread::sleep(Duration::from_millis(140));
+        // Proceed immediately if already foreground; poll briefly (25ms steps) only while waking from tray.
         let mut raw_hwnd = initial_hwnd;
-        for _ in 0..8 {
+        for _ in 0..24 {
             if raw_hwnd != 0 && unsafe { GetForegroundWindow().0 as isize == raw_hwnd } {
                 break;
             }
@@ -1519,7 +1585,7 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_millis(90));
+            std::thread::sleep(Duration::from_millis(25));
         }
         if raw_hwnd == 0 {
             crate::log::line("notif", &format!("nav app={app_name} aborted: window not found"));
@@ -1533,7 +1599,11 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
 
         let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
         if let Ok(uia) = unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
-            let cond = (|| -> windows_core::Result<IUIAutomationCondition> {
+            let setup = (|| -> windows_core::Result<(
+                IUIAutomationCondition,
+                IUIAutomationCondition,
+                IUIAutomationCacheRequest,
+            )> {
                 let c_list = unsafe {
                     uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_ListItemControlTypeId.0))
                 }?;
@@ -1543,23 +1613,34 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
                 let c_tree = unsafe {
                     uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_TreeItemControlTypeId.0))
                 }?;
-                let c_text = unsafe {
+                let c1 = unsafe { uia.CreateOrCondition(&c_list, &c_data) }?;
+                let row_cond = unsafe { uia.CreateOrCondition(&c1, &c_tree) }?;
+                let text_cond = unsafe {
                     uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_TextControlTypeId.0))
                 }?;
-                let c1 = unsafe { uia.CreateOrCondition(&c_list, &c_data) }?;
-                let c2 = unsafe { uia.CreateOrCondition(&c_tree, &c_text) }?;
-                unsafe { uia.CreateOrCondition(&c1, &c2) }
+                let cache = unsafe { uia.CreateCacheRequest() }?;
+                unsafe {
+                    cache.AddProperty(UIA_NamePropertyId)?;
+                    cache.AddProperty(UIA_BoundingRectanglePropertyId)?;
+                    cache.AddProperty(UIA_ControlTypePropertyId)?;
+                    cache.SetTreeScope(TreeScope_Element)?;
+                }
+                Ok((row_cond, text_cond, cache))
             })();
-            if let Ok(cond) = cond {
-                if !try_select_chat_in_hwnd(&uia, &cond, hwnd, &targets, &app_name) {
-                    // Retry once after 280ms in case the app was just restored from tray and still rendering.
-                    std::thread::sleep(Duration::from_millis(280));
+            if let Ok((row_cond, text_cond, cache)) = setup {
+                if !try_select_chat_in_hwnd(&uia, &row_cond, &text_cond, &cache, hwnd, &targets, &app_name, t0) {
+                    // Retry once after 180ms in case the app was just restored from tray and still rendering.
+                    std::thread::sleep(Duration::from_millis(180));
                     if unsafe { GetForegroundWindow() == hwnd }
-                        && !try_select_chat_in_hwnd(&uia, &cond, hwnd, &targets, &app_name)
+                        && !try_select_chat_in_hwnd(&uia, &row_cond, &text_cond, &cache, hwnd, &targets, &app_name, t0)
                     {
                         crate::log::line(
                             "notif",
-                            &format!("nav app={app_name} target=\"{}\" not visible in chat sidebar", targets[0]),
+                            &format!(
+                                "nav app={app_name} target=\"{}\" not visible in chat sidebar ({}ms)",
+                                targets[0],
+                                t0.elapsed().as_millis()
+                            ),
                         );
                     }
                 }
