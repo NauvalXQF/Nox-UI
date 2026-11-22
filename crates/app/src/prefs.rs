@@ -40,6 +40,22 @@ pub fn update(f: impl FnOnce(&mut Settings)) {
     update_with(true, f);
 }
 
+/// Persists a settings change without broadcasting `WM_PREFS` (for in-place live toggles
+/// that already manage their own smooth transition without tearing down active animations).
+pub fn update_silent(f: impl FnOnce(&mut Settings)) {
+    let before = get();
+    let mut s = before;
+    f(&mut s);
+    if s == before {
+        return;
+    }
+    *CUR.lock().unwrap() = Some(s);
+    let _ = std::fs::create_dir_all(paths::config_dir());
+    if let Err(e) = std::fs::write(file(), s.serialize()) {
+        log::line("prefs", &format!("simpan gagal: {e}"));
+    }
+}
+
 pub fn update_with(save: bool, f: impl FnOnce(&mut Settings)) {
     let before = get();
     let mut s = before;

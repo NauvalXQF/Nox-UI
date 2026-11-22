@@ -23,5 +23,5 @@ features = [
   "ApplicationModel", "ApplicationModel_Appointments", "Win32_System_Time", "Networking_Connectivity",
   "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Storage_Packaging_Appx",
   "Win32_Networking_WinHttp",
-  "UI_Notifications", "UI_Notifications_Management",
+  "UI_Notifications", "UI_Notifications_Management", "Devices_Geolocation",
 ]

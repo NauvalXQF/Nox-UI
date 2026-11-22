@@ -39,9 +39,9 @@ impl SpringParams {
         Self::from_response(0.42, 0.96)
     }
 
-    /// Silky horizontal glide for toggling the lyrics panel (395 <-> 530 dp, ~360ms).
+    /// Silky critically-damped horizontal glide for toggling the lyrics panel (395 <-> 530 dp, ~380ms).
     pub fn lyrics_glide() -> Self {
-        Self::from_response(0.36, 0.94)
+        Self::from_response(0.40, 0.98)
     }
 
     pub fn tactile() -> Self {

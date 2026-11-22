@@ -68,6 +68,7 @@ const WM_NOTIF: u32 = WM_APP + 29;
 const WM_GTASKS: u32 = WM_APP + 30;
 const WM_GEMINI: u32 = WM_APP + 31;
 const WM_GTASKS_ACTION: u32 = WM_APP + 32;
+const WM_PRAYER_TEST: u32 = WM_APP + 35;
 
 const T_DWELL: usize = 1;
 const T_LEAVE: usize = 2;
@@ -93,8 +94,10 @@ const T_CARET: usize = 23;
 const T_COPIED: usize = 24;
 const T_NAV_COLLAPSE: usize = 25;
 const T_SCROLL_IDLE: usize = 26;
+const T_PRAYER_ALERT: usize = 27;
 const NAV_COLLAPSE_MS: u32 = 180;
 const NOTIF_TOAST_MS: u32 = 4500;
+const PRAYER_ALERT_MS: u32 = 8000;
 const SEND_IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -185,6 +188,13 @@ pub fn trigger_gtasks_disconnect() {
     let h = NOTCH_HWND.load(Ordering::Relaxed);
     if h != 0 {
         post_w(h, WM_GTASKS_ACTION, 2);
+    }
+}
+
+pub fn trigger_prayer_test_alert() {
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        post(h, WM_PRAYER_TEST);
     }
 }
 
@@ -472,6 +482,9 @@ pub struct Notch {
     notif_status: nacre_platform::notifications::Status,
     toast_id: Option<u32>,
     notif_peeking: bool,
+    prayer_alert: Option<views::PrayerAlertView>,
+    prayer_peeking: bool,
+    prayer_last_fired: Option<(i32, u32, u32, nacre_core::notch::prayer::Prayer, nacre_core::notch::prayer::AlertKind)>,
     alerts_scroll: f32,
     internal_notif_id: u32,
     todos: nacre_core::notch::todo::TodoStore,
@@ -594,7 +607,10 @@ impl Notch {
                 sp_csh_dy: Spring::new(init_csh_dy, SpringParams::swap()),
                 sp_csh_op: Spring::new_unit(init_csh_op, SpringParams::swap()),
                 sp_nav: Spring::new_unit(0.0, SpringParams::swap()),
-                sp_lyrics: Spring::new_unit(1.0, SpringParams::lyrics_glide()),
+                sp_lyrics: Spring::new_unit(
+                    if crate::prefs::get().lyrics_panel_open { 1.0 } else { 0.0 },
+                    SpringParams::lyrics_glide(),
+                ),
                 sp_scrub_hover: Spring::new_unit(0.0, SpringParams::tactile()),
                 sp_art_scale: Spring::new_unit(1.0, SpringParams::open()),
                 sp_timer_pill: Spring::new_unit(0.0, SpringParams::swap()),
@@ -652,7 +668,7 @@ impl Notch {
                 shelf_press: None,
                 dragging_out: false,
                 pinned: false,
-                lyrics_open: true,
+                lyrics_open: crate::prefs::get().lyrics_panel_open,
                 play_glide_active: false,
                 swipe: state::SwipeLatch::default(),
                 last_pub_half: -1,
@@ -688,6 +704,9 @@ impl Notch {
                 notif_status: nacre_platform::notifications::status(),
                 toast_id: None,
                 notif_peeking: false,
+                prayer_alert: None,
+                prayer_peeking: false,
+                prayer_last_fired: None,
                 alerts_scroll: 0.0,
                 internal_notif_id: 800_000,
                 todos,
@@ -878,6 +897,16 @@ impl Notch {
             let _ = glow.SetOffset(Vector3 { X: x0, Y: 0.0, Z: 0.0 });
             let _ = glow.SetSize(Vector2 { X: w.ceil(), Y: h.ceil() });
         }
+        if let Some(glow) = &self.live_vis.tab_glow {
+            let _ = glow.SetOffset(Vector3 { X: x0, Y: 0.0, Z: 0.0 });
+            let _ = glow.SetSize(Vector2 { X: w.ceil(), Y: h.ceil() });
+        }
+        if !self.play_glide_active {
+            if let Some(glow) = self.live_vis.play_layout.as_ref().and_then(|pl| pl.lyrics_glow.as_ref()) {
+                let _ = glow.SetOffset(Vector3 { X: x0, Y: 0.0, Z: 0.0 });
+                let _ = glow.SetSize(Vector2 { X: w.ceil(), Y: h.ceil() });
+            }
+        }
         if let Some(dt_vis) = &self.live_vis.detached_timer {
             if let Some((tx, _, _, _, _, op)) = detached {
                 let _ = dt_vis.SetOffset(Vector3 { X: tx.round(), Y: 0.0, Z: 0.0 });
@@ -936,59 +965,135 @@ impl Notch {
         let cur_x0 = self.x0_for(cur_w);
         let lp = self.sp_lyrics.pos.clamp(0.0, 1.0);
         let pad = 18.0 * self.dpi;
+        let top = 14.0 * self.dpi;
         let cur_mx = cur_x0 + pad + 4.0 * self.dpi;
         let mw_full = (cur_w - 2.0 * pad - 8.0 * self.dpi).max(180.0 * self.dpi);
         let mw_split = 224.0 * self.dpi;
         let cur_mw = mw_full + (mw_split - mw_full) * lp;
+        let cur_div_x = cur_mx + cur_mw + 14.0 * self.dpi;
+        let base_h = (cur_h - state::NAV_EXPAND_H_DP * self.dpi * self.sp_nav.pos.clamp(0.0, 1.0)).max(100.0 * self.dpi);
 
-        // Keep album art + title/artist glued to the animated left edge (subpixel-smooth, zero jitter).
-        let _ = pl.left_group.SetOffset(Vector3 { X: cur_mx - pl.base_mx, Y: 0.0, Z: 0.0 });
+        let smoothstep = |e0: f32, e1: f32, v: f32| {
+            let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
 
-        // Smoothly stretch/contract scrub bar + timestamps in lockstep with `sp_w`.
+        // Keep album art + title/artist glued to the animated left edge (subpixel-smooth, zero jitter)
+        // and smoothly expand/contract the title clip width with the column boundary.
+        if let Some(lg) = &pl.left_group {
+            let _ = lg.SetOffset(Vector3 { X: cur_mx - pl.base_mx, Y: 0.0, Z: 0.0 });
+        }
+        if let Some(tc) = &pl.title_clip {
+            let live_tw = (cur_mw - 70.0 * self.dpi - (1.0 - lp) * 34.0 * self.dpi).max(40.0 * self.dpi);
+            let _ = tc.SetSize(Vector2 { X: live_tw.ceil(), Y: pl.title_clip_h });
+        }
+
+        // Smoothly stretch/contract scrub bar + timestamps in lockstep with `sp_w` & `lp`.
+        let sy = top + 58.0 * self.dpi + (36.0 + 8.0 * lp) * self.dpi;
         if let Some(scrub) = self.live_vis.scrub.as_mut() {
-            scrub.set_bounds(cur_mx, cur_mx + cur_mw, 37.0 * self.dpi, 43.0 * self.dpi, 40.0 * self.dpi);
+            scrub.set_bounds(cur_mx, cur_mx + cur_mw, sy, 37.0 * self.dpi, 43.0 * self.dpi, 40.0 * self.dpi);
         }
         self.update_scrub_in_place();
 
-        // Continuously glide all 5 transport controls between compact split and full-width spacing
-        // (including vertical lift to make room for the bottom page dots when closing lyrics).
+        // Continuously glide all 5 transport controls (X, Y, GPU Scale, and Quote opacity)
+        // so both settled endpoints match static layout to 0.00px with zero size or brightness pops.
         let Some(pl) = &self.live_vis.play_layout else { return };
         let cx = cur_mx + cur_mw / 2.0;
-        let step = (48.0 + (41.0 - 48.0) * lp) * self.dpi;
-        let dy_ctrl = if pl.lyrics_panel.is_some() { -(1.0 - lp) * 12.0 * self.dpi } else { 0.0 };
+        let step = (52.0 + (44.0 - 52.0) * lp) * self.dpi;
+        let bot_margin = (24.0 + (12.0 - 24.0) * lp) * self.dpi;
+        let col_h = (base_h - bot_margin - top).max(80.0 * self.dpi);
+        let target_cy = (top + col_h - 18.0 * self.dpi).max(sy + 28.0 * self.dpi);
+        let dy_ctrl = target_cy - pl.base_cy;
+        let btn_sc = 1.0 - 0.04 * lp;
         for (act, base_bx, vis) in &pl.ctrl_groups {
             let target_bx = match act {
-                Action::ToggleLyrics => (cur_mx + 22.0 * self.dpi) * (1.0 - lp) + (cx - 2.0 * step) * lp,
+                Action::ToggleLyrics => (cur_mx + 24.0 * self.dpi) * (1.0 - lp) + (cx - 2.0 * step) * lp,
                 Action::Prev => cx - step,
                 Action::PlayPause => cx,
                 Action::Next => cx + step,
-                Action::ToggleMute => (cur_mx + cur_mw - 22.0 * self.dpi) * (1.0 - lp) + (cx + 2.0 * step) * lp,
+                Action::ToggleMute => (cur_mx + cur_mw - 24.0 * self.dpi) * (1.0 - lp) + (cx + 2.0 * step) * lp,
                 _ => *base_bx,
             };
             let _ = vis.SetOffset(Vector3 { X: target_bx - *base_bx, Y: dy_ctrl, Z: 0.0 });
+            let _ = vis.SetScale(Vector3 { X: btn_sc, Y: btn_sc, Z: 1.0 });
+            match act {
+                Action::ToggleLyrics => {
+                    let _ = vis.SetOpacity(0.56 + 0.44 * lp);
+                }
+                Action::Prev | Action::Next => {
+                    let _ = vis.SetOpacity(0.98 - 0.02 * lp);
+                }
+                _ => {}
+            }
         }
 
-        // Sync ambient glow dimensions & opacity with animated shell width + `sp_lyrics`,
-        // preserving the 14 dp pitch-black outer perimeter during transitions.
+        // Sync full-bleed bottom-up media gradient with animated shell width/height + `sp_lyrics`.
         if let Some(gv) = &pl.lyrics_glow {
-            let inset = 14.0 * self.dpi;
-            let _ = gv.SetOpacity(0.78 + 0.22 * lp);
-            let _ = gv.SetOffset(Vector3 { X: cur_x0 + inset, Y: 0.0, Z: 0.0 });
+            let _ = gv.SetOpacity(0.92 + 0.08 * lp);
+            let _ = gv.SetOffset(Vector3 { X: cur_x0, Y: 0.0, Z: 0.0 });
             let _ = gv.SetSize(Vector2 {
-                X: (cur_w - 2.0 * inset).max(40.0 * self.dpi).ceil(),
-                Y: (cur_h - inset).max(40.0 * self.dpi).ceil(),
+                X: cur_w.ceil(),
+                Y: cur_h.ceil(),
             });
         }
-        // Slide, gently scale, and fade lyrics panel + 1px vertical divider into/out of the right column.
+
+        // 1px vertical divider anchored strictly at `cur_div_x` (blooms vertically, zero left-column overlap).
+        if let Some(dv) = &pl.lyrics_divider {
+            let div_t = smoothstep(0.16, 0.72, lp);
+            let _ = dv.SetOffset(Vector3 { X: cur_div_x.round(), Y: (top + 4.0 * self.dpi).round(), Z: 0.0 });
+            let _ = dv.SetScale(Vector3 { X: 1.0, Y: 0.55 + 0.45 * div_t, Z: 1.0 });
+            let _ = dv.SetOpacity(div_t);
+        }
+
+        // Clipped right-column viewport + asymmetric open/close lyrics choreography:
+        // Opening waits for breathing room then glides gently in from the right;
+        // Closing dissolves briskly ahead of the shrinking right edge so text is never crushed.
+        if let Some(vp) = &pl.lyrics_clip {
+            let clip_x = cur_div_x + 4.0 * self.dpi;
+            let clip_w = (cur_x0 + cur_w - pad - clip_x + 4.0 * self.dpi).max(1.0);
+            let lyr_h = (base_h - 12.0 * self.dpi - top).max(80.0 * self.dpi);
+            let _ = vp.SetOffset(Vector3 { X: clip_x, Y: top, Z: 0.0 });
+            let _ = vp.SetSize(Vector2 { X: clip_w, Y: lyr_h });
+        }
         if let Some(panel) = &pl.lyrics_panel {
-            let cur_div_x = cur_mx + cur_mw + 14.0 * self.dpi;
-            let slide_x = (cur_div_x - pl.base_div_x) - (1.0 - lp) * 14.0 * self.dpi;
-            let panel_t = ((lp - 0.08) / 0.92).clamp(0.0, 1.0);
-            let panel_op = panel_t * panel_t * (3.0 - 2.0 * panel_t);
-            let sc = 0.965 + 0.035 * panel_op;
+            let panel_t = if self.lyrics_open {
+                smoothstep(0.20, 0.94, lp)
+            } else {
+                smoothstep(0.32, 0.96, lp)
+            };
+            let travel = if self.lyrics_open { 16.0 * self.dpi } else { 12.0 * self.dpi };
+            let slide_x = (1.0 - panel_t) * travel;
+            let sc = 0.965 + 0.035 * panel_t;
             let _ = panel.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
-            let _ = panel.SetOpacity(panel_op);
+            let _ = panel.SetOpacity(panel_t);
             let _ = panel.SetOffset(Vector3 { X: slide_x, Y: 0.0, Z: 0.0 });
+        }
+
+        // Keep top-right chrome (Pin, Bell, 5-bar waveform) glued to the animated right edge
+        // while crossfading the waveform and sliding Pin smoothly into/out of the corner slot.
+        if let Some((base_right, group)) = &self.live_vis.top_right_group {
+            let _ = group.SetOffset(Vector3 { X: (cur_x0 + cur_w) - *base_right, Y: 0.0, Z: 0.0 });
+        }
+        if let Some(wave) = &self.live_vis.top_right_wave {
+            let wave_op = smoothstep(0.0, 0.60, 1.0 - lp);
+            let wave_sc = 0.78 + 0.22 * wave_op;
+            let _ = wave.SetOpacity(wave_op);
+            let _ = wave.SetScale(Vector3 { X: wave_sc, Y: wave_sc, Z: 1.0 });
+        }
+        if self.live_vis.top_right_pin_shift > 0.0 {
+            if let Some(pin) = &self.live_vis.pin_vis {
+                let _ = pin.SetOffset(Vector3 { X: self.live_vis.top_right_pin_shift * lp, Y: 0.0, Z: 0.0 });
+            }
+        }
+
+        // Choreograph bottom page dots in lockstep with `lp` (graceful fade + vertical drift
+        // as controls slide down/up, eliminating the 1-frame vanish on open and 2-stage pop on close).
+        if let Some(nav) = &self.live_vis.nav {
+            let dots_raw = ((0.55 - lp) / 0.55).clamp(0.0, 1.0);
+            let dots_op = dots_raw * dots_raw * (3.0 - 2.0 * dots_raw);
+            let dots_dy = (1.0 - dots_op) * 6.0 * self.dpi;
+            let _ = nav.anchor.SetOpacity(dots_op);
+            let _ = nav.anchor.SetOffset(Vector3 { X: 0.0, Y: nav.cur_cy + dots_dy, Z: 0.0 });
         }
     }
 
@@ -1038,20 +1143,14 @@ impl Notch {
         if self.play_glide_active
             && !lyrics_moving
             && self.sp_w.is_settled()
+            && self.sp_h.is_settled()
             && self.sp_lyrics.is_settled()
             && self.mode == Mode::Open(Tab::Play)
         {
-            // Glide completed at exact target coordinates: commit final hit-regions & bottom dots.
+            // Glide completed at exact target coordinates: commit final hit-regions & drop hidden transition layers
+            // (every visible element is already at its exact settled pixel, scale, and opacity -> zero pop).
             self.play_glide_active = false;
             self.render();
-            if !self.lyrics_open {
-                if let Some(nav) = &self.live_vis.nav {
-                    if let Ok(o) = nav.anchor.cast::<CompositionObject>() {
-                        let _ = keyframes_glide(&self.paint.comp, &o, "Opacity", 0.0, 1.0, 240, 0);
-                        let _ = keyframes_glide(&self.paint.comp, &o, "Offset.Y", nav.cur_cy + 4.0 * self.dpi, nav.cur_cy, 240, 0);
-                    }
-                }
-            }
         }
 
         // Smooth scrub-bar hover bloom (track thicken + thumb expand).
@@ -1145,10 +1244,11 @@ impl Notch {
         let running = self.timer.phase == Phase::Running;
         Live {
             notification: crate::prefs::get().notch_notifs && self.toast_id.is_some_and(|id| self.notifs.get(id).is_some()),
+            prayer_alert: self.prayer_alert.is_some(),
             media: self.has_media,
             playing: self.playing,
             lyric_line: self.lyr.as_ref().is_some_and(|l| l.synced),
-            lyrics_on: crate::prefs::get().lyrics_compact,
+            lyrics_on: crate::prefs::get().lyrics_compact && self.lyrics_open,
             // When media is active, the Detached Timer Pill displays the countdown on the right
             // so Live Lyrics / Now Playing stays intact in the main capsule.
             timer_left_s: (running && !self.has_media).then(|| self.timer.remaining_secs(self.now_ms())),
@@ -1489,6 +1589,10 @@ impl Notch {
         if trimmed.is_empty() {
             return;
         }
+        self.submit_gemini_prompt(trimmed.to_string());
+    }
+
+    fn submit_gemini_prompt(&mut self, prompt: String) {
         self.gemini_req_id = self.gemini_req_id.wrapping_add(1);
         let id = self.gemini_req_id;
         self.gemini_resp.clear();
@@ -1506,7 +1610,7 @@ impl Notch {
         let model = nacre_core::notch::gemini::active_model_id(s.gemini_model, s.gemini_custom_model.as_str()).to_string();
         let _ = self.gemini.commands.send(nacre_platform::gemini::Cmd::Ask {
             id,
-            prompt: trimmed.to_string(),
+            prompt,
             model,
         });
         self.render();
@@ -1839,10 +1943,15 @@ impl Notch {
     }
 
     fn dispatch(&mut self, ev: Event) {
-        let open_on = if crate::prefs::get().notch_hover_open { OpenOn::Hover } else { OpenOn::Click };
-        let next = state::step(self.mode, ev, open_on, self.tracking);
+        let s = crate::prefs::get();
+        let open_on = if s.notch_hover_open { OpenOn::Hover } else { OpenOn::Click };
+        let next = state::step_with_default(self.mode, ev, open_on, self.tracking, s.default_notch_tab());
         if next != self.mode {
             log::line("notch", &format!("{:?} --{ev:?}--> {next:?}", self.mode));
+            if next == Mode::Open(Tab::Alerts) {
+                self.notifs.mark_all_read();
+                self.alerts_scroll = 0.0;
+            }
             self.mode = next;
             self.refresh();
             self.update_visibility();
@@ -1944,6 +2053,18 @@ impl Notch {
                     z.w = z.w.min(cap);
                 }
             }
+            View::Compact(state::Activity::PrayerAlert) => {
+                if let Some(al) = self.prayer_alert {
+                    let hhmm = nacre_core::notch::prayer::format_hhmm(al.time_min);
+                    let head = format!("{} {} \u{00B7} {hhmm}", crate::prefs::tr("Waktunya"), al.prayer.name());
+                    let sub = crate::prefs::tr("Selamat menunaikan ibadah shalat");
+                    let hw = self.paint.measure_dwrite(&head, 12.0, 700);
+                    let bw = self.paint.measure_dwrite(sub, 11.0, 500);
+                    let cap = max_safe.min(380.0 * self.dpi);
+                    z.w = state::adaptive_compact_w(hw.max(bw), 74.0 * self.dpi, 270.0 * self.dpi, cap) + peek_extra;
+                    z.w = z.w.min(cap);
+                }
+            }
             _ => {}
         }
 
@@ -1991,11 +2112,23 @@ impl Notch {
         if a == b {
             return 0;
         }
-        let n = Tab::ALL.len() as i32;
-        let ia = Tab::ALL.iter().position(|t| *t == a).unwrap_or(0) as i32;
-        let ib = Tab::ALL.iter().position(|t| *t == b).unwrap_or(0) as i32;
-        let diff = (ib - ia).rem_euclid(n);
-        if diff <= n / 2 { 1 } else { -1 }
+        let s = crate::prefs::get();
+        let vis = s.visible_notch_tabs();
+        let (list, ia, ib) = if let (Some(ia), Some(ib)) = (
+            vis.iter().position(|t| *t == a),
+            vis.iter().position(|t| *t == b),
+        ) {
+            (vis.len() as i32, ia as i32, ib as i32)
+        } else {
+            let ia = s.notch_tab_order.iter().position(|t| *t == a).unwrap_or(0) as i32;
+            let ib = s.notch_tab_order.iter().position(|t| *t == b).unwrap_or(0) as i32;
+            (s.notch_tab_order.len() as i32, ia, ib)
+        };
+        if list <= 1 {
+            return 0;
+        }
+        let diff = (ib - ia).rem_euclid(list);
+        if diff <= list / 2 { 1 } else { -1 }
     }
 
     fn transition(&mut self, new: Look) {
@@ -2200,6 +2333,7 @@ impl Notch {
             s_prefs.gemini_custom_model.as_str(),
         );
         let gemini_has_key = nacre_platform::gemini::has_api_key();
+        let (prayer_city, prayer_snap) = self.prayer_snapshot();
         let detached_timer = if self.want_detached_timer() || self.sp_timer_pill.pos > 0.02 {
             let ear = self.sp_ear.pos.max(0.0);
             let h = self.size.h.max(28.0 * self.dpi);
@@ -2227,6 +2361,7 @@ impl Notch {
             lyrics,
             lyrics_open: self.lyrics_open,
             lyrics_progress: self.sp_lyrics.pos,
+            play_gliding: self.play_glide_active,
             muted: self.muted,
             hovered: self.tracking,
             nav_expanded: self.nav_expanded,
@@ -2269,6 +2404,8 @@ impl Notch {
             gemini_auto_follow: self.gemini_auto_follow,
             gemini_model_label: &gemini_model_label,
             gemini_copied: self.gemini_copied,
+            prayer: views::PrayerView { city: &prayer_city, snap: prayer_snap },
+            prayer_alert: self.prayer_alert,
             sb_hover: self.sp_sb_hover.pos,
             sb_active: self.sp_sb_active.pos,
             sb_dragging: self.scroll_drag.is_some(),
@@ -2284,11 +2421,11 @@ impl Notch {
             self.sb_hovered = false;
             self.sp_sb_hover.snap(0.0);
         }
-        if self.play_glide_active && self.live_vis.play_layout.is_some() {
-            self.sync_play_glide();
-        }
         if let Some(nav) = self.live_vis.nav.as_mut() {
             nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
+        }
+        if self.play_glide_active && self.live_vis.play_layout.is_some() {
+            self.sync_play_glide();
         }
         if self.art_pop_pending {
             if let Some(art) = &self.live_vis.album_art {
@@ -2455,6 +2592,7 @@ impl Notch {
             }
             self.refresh();
             self.schedule_lyric();
+            self.update_visibility();
         }
     }
 
@@ -2495,6 +2633,7 @@ impl Notch {
         if got {
             self.refresh();
             self.schedule_lyric();
+            self.update_visibility();
         }
     }
 
@@ -3087,7 +3226,7 @@ impl Notch {
     }
 
     fn on_compact_action(&self, x: f32, y: f32) -> bool {
-        self.regions.iter().any(|r| r.hit(x, y) && r.action == Action::OpenTimerPill)
+        self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::OpenTimerPill | Action::OpenPrayer))
             || (self.look.view == View::Compact(state::Activity::Player)
                 && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::PlayPause | Action::Next | Action::Prev)))
             || (self.look.view == View::Compact(state::Activity::Notification)
@@ -3141,29 +3280,26 @@ impl Notch {
             }
             Action::ToggleLyrics => {
                 self.lyrics_open = !self.lyrics_open;
-                if self.lyrics_open {
+                let open = self.lyrics_open;
+                crate::prefs::update_silent(|s| s.lyrics_panel_open = open);
+                let glide = SpringParams::lyrics_glide();
+                if self.lyrics_open && (self.nav_expanded || self.sp_nav.pos > 0.01) {
                     self.nav_expanded = false;
                     self.nav_collapse_armed = false;
-                    self.sp_nav.snap(0.0);
+                    self.sp_nav.set_target(0.0, glide);
                     kill(self.hwnd, T_NAV_COLLAPSE);
                 }
-                let glide = SpringParams::lyrics_glide();
+                let was_gliding = self.play_glide_active;
                 self.play_glide_active = true;
                 self.sp_lyrics.set_target(if self.lyrics_open { 1.0 } else { 0.0 }, glide);
                 self.apply_size(Some(glide));
                 self.publish_notch();
-                let has_lyrics_layer = self
-                    .live_vis
-                    .play_layout
-                    .as_ref()
-                    .and_then(|pl| pl.lyrics_panel.as_ref())
-                    .is_some();
-                if self.lyrics_open && !has_lyrics_layer {
-                    // Mount lyrics panel at current `sp_lyrics.pos` and lock controls to `sp_w.pos` (zero frame-0 jump).
-                    self.render();
-                } else if !self.lyrics_open && !has_lyrics_layer {
+                if !was_gliding {
+                    // Mount all transitional layers once at current `sp_w.pos` & `sp_lyrics.pos`
+                    // (Frame 0 is pixel-identical to the pre-click frame -> zero jump; rapid re-clicks reverse in-flight).
                     self.render();
                 }
+                self.update_visibility();
                 self.start_frame();
             }
             Action::ToggleMute => {
@@ -3219,6 +3355,14 @@ impl Notch {
                 kill(self.hwnd, T_DWELL);
                 self.dispatch(Event::Click);
                 self.dispatch(Event::SelectTab(Tab::Timer));
+            }
+            Action::OpenPrayer => {
+                kill(self.hwnd, T_DWELL);
+                kill(self.hwnd, T_PRAYER_ALERT);
+                self.prayer_alert = None;
+                self.prayer_peeking = false;
+                self.dispatch(Event::Click);
+                self.dispatch(Event::SelectTab(Tab::Prayer));
             }
             Action::SendDone => self.stop_send(),
             Action::CalDay(n) => {
@@ -3397,6 +3541,34 @@ impl Notch {
                 self.gemini_copied = false;
                 self.render();
             }
+            Action::GeminiQuick(kind) => {
+                let typed = self
+                    .gemini_input
+                    .as_ref()
+                    .map(|gi| gi.buf.as_str().to_string())
+                    .unwrap_or_else(|| self.gemini_draft.clone());
+                let src = if !typed.trim().is_empty() {
+                    typed.trim().chars().take(4000).collect::<String>()
+                } else {
+                    nacre_platform::clipboard::paste_text()
+                        .map(|s| s.trim().chars().take(4000).collect::<String>())
+                        .unwrap_or_default()
+                };
+                if src.is_empty() {
+                    self.gemini_err = crate::prefs::tr("Ketik teks di atas atau salin teks ke clipboard dulu.").to_string();
+                    self.render();
+                } else {
+                    let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
+                    let prompt = match (kind, en) {
+                        (0, true) => format!("Summarize the following text concisely in short bullet points using the same language as the input text:\n\n{src}"),
+                        (0, false) => format!("Ringkas teks berikut secara padat dalam poin-poin singkat dengan bahasa yang sama seperti teks aslinya:\n\n{src}"),
+                        (1, _) => format!("Detect the language of the following text. If it is in Indonesian, translate it naturally into English. If it is in English or another language, translate it naturally into Indonesian. Output ONLY the translation without extra commentary:\n\n{src}"),
+                        (_, true) => format!("Fix grammar, spelling, clarity, and natural phrasing of the following text in its original language without changing its meaning. Output ONLY the improved text:\n\n{src}"),
+                        (_, false) => format!("Perbaiki tata bahasa, ejaan, dan kejelasan teks berikut dalam bahasa aslinya (Indonesia tetap Indonesia, Inggris tetap Inggris) tanpa mengubah maknanya. Berikan hasil akhirnya saja:\n\n{src}"),
+                    };
+                    self.submit_gemini_prompt(prompt);
+                }
+            }
         }
     }
 
@@ -3456,9 +3628,21 @@ impl Notch {
 
     fn step_tab(&mut self, dir: i32) {
         if let Mode::Open(cur) = self.mode {
-            let i = Tab::ALL.iter().position(|t| *t == cur).unwrap_or(0) as i32;
-            let n = Tab::ALL.len() as i32;
-            let next = Tab::ALL[(i + dir).rem_euclid(n) as usize];
+            let tabs = crate::prefs::get().visible_notch_tabs();
+            if tabs.is_empty() {
+                return;
+            }
+            let next = if let Some(i) = tabs.iter().position(|t| *t == cur) {
+                if tabs.len() <= 1 {
+                    return;
+                }
+                let n = tabs.len() as i32;
+                tabs[(i as i32 + dir).rem_euclid(n) as usize]
+            } else if dir < 0 {
+                *tabs.last().unwrap()
+            } else {
+                tabs[0]
+            };
             if next == Tab::Alerts {
                 self.notifs.mark_all_read();
                 self.alerts_scroll = 0.0;
@@ -3617,13 +3801,24 @@ impl Notch {
     }
 
     fn update_visibility(&mut self) {
+        // In Auto-hide (`Vis::OnDemand`), keep the compact media/lyrics pill visible whenever
+        // lyrics are enabled in the media player and a track is actively playing (except fullscreen),
+        // showing Live Lyrics when synced lyrics exist and falling back to the compact Music pill otherwise.
+        let auto_hide_lyrics_reveal = self.vis == Vis::OnDemand
+            && !self.overlap.fullscreen
+            && self.lyrics_open
+            && crate::prefs::get().lyrics_compact
+            && self.has_media
+            && self.playing;
         let inputs = Inputs {
             overlapped: self.overlap.overlapped,
             interacting: self.interacting(),
             edge_armed: self.edge_armed,
             starting: self.starting,
             fullscreen: self.overlap.fullscreen,
-            revealing: self.notif_peeking,
+            revealing: self.notif_peeking
+                || (!self.overlap.fullscreen && self.prayer_peeking)
+                || auto_hide_lyrics_reveal,
         };
         let hide = self.off || should_hide(self.vis, &inputs);
         if hide && self.shown {
@@ -3742,9 +3937,15 @@ impl Notch {
         self.publish_notch();
         self.sync_download_watch();
         self.sync_notif_watch();
-        let look = self.look;
+        if let Mode::Open(cur) = self.mode {
+            if !s.notch_tab_visible(cur) {
+                self.mode = Mode::Open(s.default_notch_tab());
+            }
+        }
+        let look = state::look(self.mode, state::activity(&self.live()));
         self.apply_size(Some(SpringParams::swap()));
         self.transition(look);
+        self.update_visibility();
         log::line("notch", &format!("pengaturan: perilaku={vis:?} cadangan={reserve} mati={}", self.off));
     }
 
@@ -3753,6 +3954,74 @@ impl Notch {
         if t != self.tier {
             self.tier = t;
             self.shell.apply_material(t);
+        }
+    }
+
+    fn prayer_snapshot(&self) -> (String, nacre_core::notch::prayer::PrayerSnapshot) {
+        let s = crate::prefs::get();
+        let now = nacre_platform::time::local_now();
+        let tz = nacre_platform::time::tz_offset_minutes();
+        let lat = s.prayer_lat_e4 as f64 / 10_000.0;
+        let lon = s.prayer_lon_e4 as f64 / 10_000.0;
+        let method = nacre_core::notch::prayer::CalcMethod::from_u8(s.prayer_method);
+        let sched = nacre_core::notch::prayer::compute_day(now.year, now.month, now.day, lat, lon, tz, method);
+        let snap = nacre_core::notch::prayer::snapshot(sched, now.hour, now.minute, now.second);
+        let city = if s.prayer_city.is_empty() {
+            "Jakarta".to_string()
+        } else {
+            s.prayer_city.as_str().to_string()
+        };
+        (city, snap)
+    }
+
+    fn show_prayer_alert(
+        &mut self,
+        prayer: nacre_core::notch::prayer::Prayer,
+        time_min: u16,
+        kind: nacre_core::notch::prayer::AlertKind,
+    ) {
+        self.prayer_alert = Some(views::PrayerAlertView { prayer, time_min, kind });
+        self.prayer_peeking = !self.overlap.fullscreen;
+        timer(self.hwnd, T_PRAYER_ALERT, PRAYER_ALERT_MS);
+        if crate::prefs::get().prayer_alert_sound {
+            nacre_platform::time::prayer_chime(kind == nacre_core::notch::prayer::AlertKind::Now);
+        }
+        self.refresh();
+        self.update_visibility();
+        log::line(
+            "prayer",
+            &format!(
+                "alert prayer={} kind={kind:?} time={}",
+                prayer.name(),
+                nacre_core::notch::prayer::format_hhmm(time_min)
+            ),
+        );
+    }
+
+    fn check_prayer_alerts(&mut self) {
+        let s = crate::prefs::get();
+        if !s.prayer_alert_10m && !s.prayer_alert_5m && !s.prayer_alert_now {
+            return;
+        }
+        let now = nacre_platform::time::local_now();
+        let tz = nacre_platform::time::tz_offset_minutes();
+        let lat = s.prayer_lat_e4 as f64 / 10_000.0;
+        let lon = s.prayer_lon_e4 as f64 / 10_000.0;
+        let method = nacre_core::notch::prayer::CalcMethod::from_u8(s.prayer_method);
+        let sched = nacre_core::notch::prayer::compute_day(now.year, now.month, now.day, lat, lon, tz, method);
+        let now_min = (now.hour.min(23) * 60 + now.minute.min(59)) as u16;
+        if let Some((pr, kind)) = nacre_core::notch::prayer::check_alert(
+            sched,
+            now_min,
+            s.prayer_alert_10m,
+            s.prayer_alert_5m,
+            s.prayer_alert_now,
+        ) {
+            let key = (now.year, now.month, now.day, pr, kind);
+            if self.prayer_last_fired != Some(key) {
+                self.prayer_last_fired = Some(key);
+                self.show_prayer_alert(pr, sched.times[pr.idx()], kind);
+            }
         }
     }
 
@@ -3926,15 +4195,25 @@ impl Notch {
                 self.refresh();
                 self.update_visibility();
             }
+            T_PRAYER_ALERT => {
+                kill(self.hwnd, T_PRAYER_ALERT);
+                self.prayer_alert = None;
+                self.prayer_peeking = false;
+                self.refresh();
+                self.update_visibility();
+            }
             T_PROGRESS => {
                 if self.mode == Mode::Open(Tab::Play) {
                     self.update_scrub_in_place();
                 }
             }
             T_MINUTE => {
+                self.check_prayer_alerts();
                 if sys::battery() != self.battery {
                     self.on_power();
-                } else if self.look.view == View::Compact(state::Activity::Glance) {
+                } else if self.look.view == View::Compact(state::Activity::Glance)
+                    || self.mode == Mode::Open(Tab::Prayer)
+                {
                     self.render();
                 }
                 timer(self.hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
@@ -4219,6 +4498,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     let _ = d.gtasks.commands.send(nacre_platform::gtasks::Cmd::Disconnect);
                 }
                 _ => {}
+            });
+            LRESULT(0)
+        }
+        WM_PRAYER_TEST => {
+            with(hwnd, |d| {
+                let (_, snap) = d.prayer_snapshot();
+                d.show_prayer_alert(snap.next, snap.next_time_min, nacre_core::notch::prayer::AlertKind::Before5);
             });
             LRESULT(0)
         }

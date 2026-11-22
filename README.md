@@ -51,15 +51,21 @@ all drawn with frosted glass materials and springy GPU‑composited animations.
 
 It is a single lightweight native program: no Electron, no WebView, no background telemetry services, no account required. At idle it uses roughly **15 MB** of private memory.
 
-### 🆕 What’s New in NOX v0.4.1
+### 🆕 What’s New in NOX v0.5.0
+
+- **Prayer / Jadwal Shalat Tab**: native 100% offline astronomical prayer schedule (default **Kemenag RI**, plus MWL, Makkah, ISNA, Egyptian) with an anti‑aliased solar arc, glowing sun orb, adaptive time‑of‑day OLED gradients, manual city search (70+ built‑in cities + online geocoding), optional Windows Location / IP auto‑detect, and **10‑minute, 5‑minute, & Adzan alerts** (Champagne Gold / Emerald Mist Auto‑hide peek + toggleable harmonic chime sound).
+- **Customizable Notch Tabs (Re‑arrange & Hide)**: reorder all 7 Notch tabs (`↑` / `↓`), hide unused tabs, and automatically open your #1 tab by default from *Settings → Notch → Notch Tabs*.
+- **Upgraded Gemini AI Tab**: two‑tone **Sapphire → Violet** bottom‑up OLED aura (brightens while streaming), gradient Send pill, frosted glass model badge & reading card, and **3 smart one‑click quick actions** (*Summarize*, *Translate ID ↔ EN*, *Polish*) that operate on your typed input or automatically fall back to your clipboard.
+- **Silky Lyrics Toggle & Bottom‑Up OLED Gradients**: critically‑damped zero‑pop lyrics expansion/collapse animation (unified GPU icon scaling, edge‑glued Pin/waveform, clipped title glide, choreographed bottom dots), full‑bleed bottom‑up OLED gradients across Media Player & Pomodoro, and **Auto‑hide lyrics control** (keeps compact Live Lyrics / Music pill visible in Auto‑hide while lyrics are enabled and playing, and hides completely when toggled off or paused).
+
+<details>
+<summary><b>In NOX v0.4.1</b></summary>
 
 - **NOX Rebrand & Liquid Glass Identity**: new `nox.` icon, renamed binaries (`nox.exe`, `nox-guard.exe`), config stored in `%APPDATA%\NOX`, and automatic seamless migration from legacy `%APPDATA%\ABRA` settings and credentials.
 - **Instant Native Notifications & Deep‑Link Activation**: reads Windows 11 notifications natively via WinRT `UserNotificationListener` (with automatic UI Automation Zero‑Config fallback), and activates notifications directly via Windows Toast COM (`INotificationActivationCallback`) to jump straight into the exact WhatsApp, Telegram, or Discord chat room instantaneously.
-- **Refined Notch & 4 Visibility Modes**: choose **Notch** (attached to top edge) or **Capsule** (floating) with **Fixed**, **Overlay**, **Smart** (auto‑hides when any window is maximized or overlaps the Notch), and **Auto‑hide** modes, pure OLED `#000000` edges, and dual‑layer GPU shadow.
-- **Live Lyrics & Adaptive Now Playing**: adaptive album‑art color tint, staggered 4‑layer Apple Music–style lyrics transitions, and [LRCLIB](https://lrclib.net) + local `.lrc` support.
-- **Productivity & Integrations**: Pomodoro timer with an adaptive Detached Timer Pill, **Google Tasks & Calendar** sync, **Ask Gemini AI** with live model selection, and a dedicated **Integrations** tab in Settings.
-- **120fps Smooth Settings**: GPU‑smooth inertial scrolling with a draggable animated scrollbar across all 9 Settings tabs (English & Indonesian).
-- **1‑Click Native Setup**: extract the release ZIP and double‑click `Install-NOX.cmd` to install into `%LOCALAPPDATA%\NOX`, register the Windows Sparse Package Identity (`Opankcs.NoxShell`), and launch NOX automatically.
+- **Refined Notch & 4 Visibility Modes**: **Notch** / **Capsule** shapes with **Fixed**, **Overlay**, **Smart**, and **Auto‑hide** modes, pure OLED `#000000` edges, and dual‑layer GPU shadow.
+- **Productivity & 120fps Settings**: Pomodoro timer with Detached Timer Pill, Google Tasks & Calendar sync, dedicated **Integrations** tab, 120fps smooth scrolling with draggable scrollbar, and 1‑click `Install-NOX.cmd`.
+</details>
 
 <details>
 <summary><b>Earlier milestones (0.4.0 & 0.3.0)</b></summary>
@@ -98,7 +104,7 @@ Use only the Notch with your normal taskbar, only the Deck, only the Rail — an
 
 > Requires **Windows 11** (build 22000 or newer), 64‑bit.
 
-Download **`NOX-v0.4.1-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
+Download **`NOX-v0.5.0-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
 
 | Mode | How to run | Best for |
 |---|---|---|
@@ -107,7 +113,7 @@ Download **`NOX-v0.4.1-win64.zip`** from the **[Releases](https://github.com/Nau
 
 ### Step‑by‑step (Recommended)
 
-1. Download **`NOX-v0.4.1-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
+1. Download **`NOX-v0.5.0-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
 2. Extract the entire ZIP to any folder (do not run directly from inside the ZIP preview).
 3. Double‑click **`Install-NOX.cmd`**.
    - If Windows SmartScreen warns about an unsigned app, click **More info → Run anyway** (only for official releases from this repository).
@@ -291,7 +297,7 @@ cargo test --workspace
 powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
 ```
 
-The packaging script builds the release workspace and generates `dist\NOX-v0.4.1-win64\` and `dist\NOX-v0.4.1-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
+The packaging script builds the release workspace and generates `dist\NOX-v0.5.0-win64\` and `dist\NOX-v0.5.0-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
 
 ### 4. Safe isolated testing
 

@@ -8,7 +8,7 @@
   <Identity
     Name="Opankcs.NoxShell"
     Publisher="CN=Opankcs"
-    Version="0.4.1.0"
+    Version="0.5.0.0"
     ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>NOX</DisplayName>
@@ -40,5 +40,6 @@
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
     <rescap:Capability Name="userNotificationListener" />
+    <DeviceCapability Name="location" />
   </Capabilities>
 </Package>

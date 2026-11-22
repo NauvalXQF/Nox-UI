@@ -128,45 +128,110 @@ impl Painter {
         rgb: [u8; 3],
         compact: bool,
     ) -> Option<SpriteVisual> {
-        let key = format!("glow3|{compact}|{rgb:?}");
+        let key = format!("glow4|{compact}|{rgb:?}");
         let surf = match self.cache.get(&key) {
             Some((s, _, _)) => s.clone(),
             None => {
-                const GW: u32 = 128;
-                const GH: u32 = 64;
-                let mut bgra = vec![0u8; (GW * GH * 4) as usize];
+                let (gw, gh): (u32, u32) = if compact { (128, 64) } else { (256, 128) };
+                let mut bgra = vec![0u8; (gw * gh * 4) as usize];
                 let smoothstep = |e0: f32, e1: f32, v: f32| {
                     let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
                     t * t * (3.0 - 2.0 * t)
                 };
+                // 2x2 Bayer matrix in [-0.375, +0.375] LSB to eliminate 8-bit gradient banding on dark OLED washes.
+                const BAYER2: [[f32; 2]; 2] = [[-0.375, 0.125], [0.375, -0.125]];
+                for yy in 0..gh {
+                    for xx in 0..gw {
+                        let nx = (xx as f32 + 0.5) / gw as f32;
+                        let ny = (yy as f32 + 0.5) / gh as f32;
+                        let (wash, max_a) = if compact {
+                            // Subtle bottom bloom that fades cleanly to pure #000000 at all outer edges.
+                            let ex = smoothstep(0.0, 0.14, nx) * smoothstep(1.0, 0.86, nx);
+                            let ey = smoothstep(0.18, 0.72, ny) * smoothstep(1.0, 0.86, ny);
+                            (0.36 * ex * ey, 0.44)
+                        } else {
+                            // Bottom-up OLED atmospheric wash: pure #000000 across the top ~28% bezel/ears,
+                            // smoothly blooming into rich album-art warmth along the entire bottom curve.
+                            let v_ramp = ((ny - 0.26) / 0.74).clamp(0.0, 1.0);
+                            let vert = v_ramp.powf(2.05);
+                            let h_mod = 0.80
+                                + 0.20 * (-((nx - 0.22) / 0.30).powi(2)).exp()
+                                + 0.13 * (-((nx - 0.86) / 0.28).powi(2)).exp();
+                            (0.44 * vert * h_mod, 0.48)
+                        };
+                        let dither = if wash > 0.001 { BAYER2[(yy & 1) as usize][(xx & 1) as usize] } else { 0.0 };
+                        let a = (wash.clamp(0.0, max_a) * 255.0 + dither).round().clamp(0.0, 255.0) as u32;
+                        let i = ((yy * gw + xx) * 4) as usize;
+                        bgra[i] = (rgb[2] as u32 * a / 255) as u8;
+                        bgra[i + 1] = (rgb[1] as u32 * a / 255) as u8;
+                        bgra[i + 2] = (rgb[0] as u32 * a / 255) as u8;
+                        bgra[i + 3] = a as u8;
+                    }
+                }
+                let sf = self.gfx.surface_from_bgra(gw, gh, &bgra).ok()?;
+                self.trim();
+                self.cache.insert(key, (sf.clone(), gw as i32, gh as i32));
+                sf
+            }
+        };
+        let go = || -> windows_core::Result<SpriteVisual> {
+            let b = self.comp.CreateSurfaceBrushWithSurface(&surf)?;
+            b.SetStretch(CompositionStretch::Fill)?;
+            b.SetBitmapInterpolationMode(CompositionBitmapInterpolationMode::Linear)?;
+            let v = self.comp.CreateSpriteVisual()?;
+            v.SetBrush(&b)?;
+            v.SetSize(Vector2 { X: w, Y: h })?;
+            v.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
+            if radius > 0.0 {
+                v.SetClip(&clip(&self.comp, w, h, radius)?)?;
+            }
+            parent.Children()?.InsertAtTop(&v)?;
+            Ok(v)
+        };
+        go().ok()
+    }
+
+    /// Two-tone bottom-up OLED atmospheric wash (smoothly blends `rgb_l` on the left into `rgb_r`
+    /// on the right while keeping the top bezel pure `#000000`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ambient_glow_duo(
+        &mut self,
+        parent: &ContainerVisual,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rgb_l: [u8; 3],
+        rgb_r: [u8; 3],
+    ) -> Option<SpriteVisual> {
+        let key = format!("glowduo1|{rgb_l:?}|{rgb_r:?}");
+        let surf = match self.cache.get(&key) {
+            Some((s, _, _)) => s.clone(),
+            None => {
+                const GW: u32 = 256;
+                const GH: u32 = 128;
+                let mut bgra = vec![0u8; (GW * GH * 4) as usize];
+                const BAYER2: [[f32; 2]; 2] = [[-0.375, 0.125], [0.375, -0.125]];
                 for yy in 0..GH {
                     for xx in 0..GW {
                         let nx = (xx as f32 + 0.5) / GW as f32;
                         let ny = (yy as f32 + 0.5) / GH as f32;
-                        let wash = if compact {
-                            // Subtle bottom bloom that fades cleanly to pure #000000 at all outer edges.
-                            let ex = smoothstep(0.0, 0.14, nx) * smoothstep(1.0, 0.86, nx);
-                            let ey = smoothstep(0.18, 0.72, ny) * smoothstep(1.0, 0.86, ny);
-                            0.36 * ex * ey
-                        } else {
-                            // Expanded OLED canvas glow: strictly fades to pure #000000 before the outer
-                            // perimeter so the notch silhouette stays razor-sharp against any backdrop.
-                            let ex = smoothstep(0.0, 0.16, nx) * smoothstep(1.0, 0.84, nx);
-                            let ey = smoothstep(0.06, 0.34, ny) * smoothstep(1.0, 0.80, ny);
-                            let perim = ex * ey;
-                            let dx = (nx - 0.24) * 1.45;
-                            let dy = (ny - 0.52) * 1.65;
-                            let art_halo = (1.0 - (dx * dx + dy * dy).sqrt().min(1.0)).powi(2);
-                            let cx = (nx - 0.52) * 1.35;
-                            let cy = (ny - 0.60) * 1.75;
-                            let core = (1.0 - (cx * cx + cy * cy).sqrt().min(1.0)).powi(2);
-                            (0.38 * art_halo + 0.22 * core) * perim
-                        };
-                        let a = (wash.clamp(0.0, 0.44) * 255.0).round() as u32;
+                        let v_ramp = ((ny - 0.28) / 0.72).clamp(0.0, 1.0);
+                        let vert = v_ramp.powf(2.05);
+                        let h_mod = 0.82
+                            + 0.18 * (-((nx - 0.24) / 0.34).powi(2)).exp()
+                            + 0.16 * (-((nx - 0.80) / 0.32).powi(2)).exp();
+                        let wash = 0.42 * vert * h_mod;
+                        let mix = nx * nx * (3.0 - 2.0 * nx);
+                        let rr = rgb_l[0] as f32 + (rgb_r[0] as f32 - rgb_l[0] as f32) * mix;
+                        let gg = rgb_l[1] as f32 + (rgb_r[1] as f32 - rgb_l[1] as f32) * mix;
+                        let bb = rgb_l[2] as f32 + (rgb_r[2] as f32 - rgb_l[2] as f32) * mix;
+                        let dither = if wash > 0.001 { BAYER2[(yy & 1) as usize][(xx & 1) as usize] } else { 0.0 };
+                        let a = (wash.clamp(0.0, 0.46) * 255.0 + dither).round().clamp(0.0, 255.0) as u32;
                         let i = ((yy * GW + xx) * 4) as usize;
-                        bgra[i] = (rgb[2] as u32 * a / 255) as u8;
-                        bgra[i + 1] = (rgb[1] as u32 * a / 255) as u8;
-                        bgra[i + 2] = (rgb[0] as u32 * a / 255) as u8;
+                        bgra[i] = ((bb * a as f32) / 255.0).round().clamp(0.0, 255.0) as u8;
+                        bgra[i + 1] = ((gg * a as f32) / 255.0).round().clamp(0.0, 255.0) as u8;
+                        bgra[i + 2] = ((rr * a as f32) / 255.0).round().clamp(0.0, 255.0) as u8;
                         bgra[i + 3] = a as u8;
                     }
                 }
@@ -184,9 +249,6 @@ impl Painter {
             v.SetBrush(&b)?;
             v.SetSize(Vector2 { X: w, Y: h })?;
             v.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
-            if radius > 0.0 {
-                v.SetClip(&clip(&self.comp, w, h, radius)?)?;
-            }
             parent.Children()?.InsertAtTop(&v)?;
             Ok(v)
         };
@@ -310,6 +372,198 @@ impl Painter {
             Ok(v)
         };
         go().ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gradient_bar(
+        &self,
+        parent: &ContainerVisual,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        c0: [u8; 3],
+        c1: [u8; 3],
+    ) -> Option<SpriteVisual> {
+        let go = || -> windows_core::Result<SpriteVisual> {
+            let g = self.comp.CreateLinearGradientBrush()?;
+            g.SetStartPoint(Vector2 { X: 0.0, Y: 0.5 })?;
+            g.SetEndPoint(Vector2 { X: 1.0, Y: 0.5 })?;
+            let stops = g.ColorStops()?;
+            stops.Append(&self.comp.CreateColorGradientStopWithOffsetAndColor(
+                0.0,
+                Color { A: 255, R: c0[0], G: c0[1], B: c0[2] },
+            )?)?;
+            stops.Append(&self.comp.CreateColorGradientStopWithOffsetAndColor(
+                1.0,
+                Color { A: 255, R: c1[0], G: c1[1], B: c1[2] },
+            )?)?;
+            let v = self.comp.CreateSpriteVisual()?;
+            v.SetSize(Vector2 { X: w, Y: h })?;
+            v.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
+            v.SetBrush(&g)?;
+            if radius > 0.0 {
+                v.SetClip(&clip(&self.comp, w, h, radius)?)?;
+            }
+            parent.Children()?.InsertAtTop(&v)?;
+            Ok(v)
+        };
+        go().ok()
+    }
+
+    /// Renders the high-DPI anti-aliased solar prayer arc with luminous elapsed curtain,
+    /// 5 milestone dots, and a softly glowing sun orb at `arc_progress`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prayer_arc(
+        &mut self,
+        parent: &ContainerVisual,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        arc_progress: f32,
+        dot_us: [f32; 5],
+        accent: [u8; 3],
+    ) -> Option<SpriteVisual> {
+        let pw = w.ceil().max(16.0) as u32;
+        let ph = h.ceil().max(16.0) as u32;
+        let prog_q = (arc_progress.clamp(0.0, 1.0) * 200.0).round() as i32;
+        let dots_q: [i32; 5] = dot_us.map(|u| (u.clamp(0.0, 1.0) * 100.0).round() as i32);
+        let key = format!("parc1|{pw}|{ph}|{prog_q}|{dots_q:?}|{accent:?}");
+        let surf = match self.cache.get(&key) {
+            Some((s, _, _)) => s.clone(),
+            None => {
+                let mut bgra = vec![0u8; (pw * ph * 4) as usize];
+                let d = self.dpi;
+                let pad_x = 11.0 * d;
+                let span_x = (pw as f32 - 2.0 * pad_x).max(8.0);
+                let y_base = ph as f32 - 6.0 * d;
+                let y_peak = 16.0 * d;
+                let arc_h = (y_base - y_peak).max(12.0);
+
+                let arc_y = |u: f32| y_base - arc_h * (4.0 * u * (1.0 - u));
+                let arc_dy_dx = |u: f32| -arc_h * (4.0 - 8.0 * u) / span_x;
+
+                let orb_u = arc_progress.clamp(0.0, 1.0);
+                let orb_x = pad_x + orb_u * span_x;
+                let orb_y = arc_y(orb_u);
+
+                // Lift accent slightly for crisp luminous curve stroke.
+                let hi_r = (accent[0] as f32 + (255.0 - accent[0] as f32) * 0.22).min(255.0);
+                let hi_g = (accent[1] as f32 + (255.0 - accent[1] as f32) * 0.22).min(255.0);
+                let hi_b = (accent[2] as f32 + (255.0 - accent[2] as f32) * 0.22).min(255.0);
+
+                let dots_xy: [(f32, f32, f32); 5] = std::array::from_fn(|i| {
+                    let u = dot_us[i].clamp(0.0, 1.0);
+                    (pad_x + u * span_x, arc_y(u), u)
+                });
+
+                let smoothstep = |e0: f32, e1: f32, v: f32| {
+                    let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
+                    t * t * (3.0 - 2.0 * t)
+                };
+
+                let stroke_l = 1.25 * d;
+                let stroke_r = 0.95 * d;
+                let dot_r = 2.6 * d;
+                let orb_core_r = 3.6 * d;
+                let orb_halo_r = 14.0 * d;
+
+                for yy in 0..ph {
+                    let fy = yy as f32 + 0.5;
+                    for xx in 0..pw {
+                        let fx = xx as f32 + 0.5;
+                        let mut cr = 0.0f32;
+                        let mut cg = 0.0f32;
+                        let mut cb = 0.0f32;
+                        let mut ca = 0.0f32;
+
+                        let blend = |cr: &mut f32, cg: &mut f32, cb: &mut f32, ca: &mut f32, r: f32, g: f32, b: f32, a: f32| {
+                            let a = a.clamp(0.0, 1.0);
+                            if a <= 0.001 {
+                                return;
+                            }
+                            let inv = 1.0 - a;
+                            *cr = r * a + *cr * inv;
+                            *cg = g * a + *cg * inv;
+                            *cb = b * a + *cb * inv;
+                            *ca = a + *ca * inv;
+                        };
+
+                        let u = (fx - pad_x) / span_x;
+                        if (0.0..=1.0).contains(&u) {
+                            let cy = arc_y(u);
+                            // 1. Soft atmospheric luminous curtain beneath elapsed portion of the arc.
+                            if fx <= orb_x + 0.5 && fy >= cy && fy <= y_base {
+                                let depth = ((fy - cy) / (y_base - cy).max(1.0)).clamp(0.0, 1.0);
+                                let v_fade = (1.0 - depth).powf(1.55);
+                                let h_edge = smoothstep(orb_x + 0.5, orb_x - 1.5, fx);
+                                let h_ramp = 0.35 + 0.65 * (u / orb_u.max(0.05)).clamp(0.0, 1.0);
+                                let a = 0.40 * v_fade * h_edge * h_ramp;
+                                blend(&mut cr, &mut cg, &mut cb, &mut ca, accent[0] as f32, accent[1] as f32, accent[2] as f32, a);
+                            }
+
+                            // 2. Perpendicular anti-aliased solar curve stroke.
+                            let slope = arc_dy_dx(u);
+                            let dist = (fy - cy).abs() / (1.0 + slope * slope).sqrt();
+                            if fx <= orb_x {
+                                let a = smoothstep(stroke_l + 0.9, stroke_l - 0.5, dist);
+                                blend(&mut cr, &mut cg, &mut cb, &mut ca, hi_r, hi_g, hi_b, a * 0.96);
+                            } else {
+                                let a = smoothstep(stroke_r + 0.85, stroke_r - 0.45, dist);
+                                blend(&mut cr, &mut cg, &mut cb, &mut ca, 108.0, 112.0, 120.0, a * 0.56);
+                            }
+                        }
+
+                        // 3. 5 prayer milestone dots along the arc.
+                        for &(dx, dy, du) in &dots_xy {
+                            let dist = ((fx - dx).powi(2) + (fy - dy).powi(2)).sqrt();
+                            if dist <= dot_r + 1.2 {
+                                let a = smoothstep(dot_r + 0.8, dot_r - 0.5, dist);
+                                if du <= orb_u + 0.005 {
+                                    blend(&mut cr, &mut cg, &mut cb, &mut ca, hi_r, hi_g, hi_b, a * 0.95);
+                                    let inner = smoothstep(dot_r * 0.55 + 0.5, dot_r * 0.55 - 0.4, dist);
+                                    blend(&mut cr, &mut cg, &mut cb, &mut ca, 240.0, 246.0, 255.0, inner * 0.85);
+                                } else {
+                                    blend(&mut cr, &mut cg, &mut cb, &mut ca, 175.0, 178.0, 184.0, a * 0.72);
+                                }
+                            }
+                        }
+
+                        // 4. Glowing solar orb at current time-of-day position.
+                        let od = ((fx - orb_x).powi(2) + (fy - orb_y).powi(2)).sqrt();
+                        if od <= orb_halo_r {
+                            let nt = od / orb_halo_r;
+                            // Warm atmospheric outer bloom + golden inner aura
+                            let halo = (-nt * nt * 4.4).exp() * 0.62;
+                            let halo_r = 255.0 * 0.72 + accent[0] as f32 * 0.28;
+                            let halo_g = 224.0 * 0.72 + accent[1] as f32 * 0.28;
+                            let halo_b = 158.0 * 0.72 + accent[2] as f32 * 0.28;
+                            blend(&mut cr, &mut cg, &mut cb, &mut ca, halo_r, halo_g, halo_b, halo);
+
+                            let mid = (-(od / (orb_core_r * 1.9)).powi(2) * 2.2).exp() * 0.70;
+                            blend(&mut cr, &mut cg, &mut cb, &mut ca, 255.0, 246.0, 220.0, mid);
+
+                            let core = smoothstep(orb_core_r + 0.9, orb_core_r - 0.6, od);
+                            blend(&mut cr, &mut cg, &mut cb, &mut ca, 255.0, 255.0, 255.0, core);
+                        }
+
+                        let idx = ((yy * pw + xx) * 4) as usize;
+                        // Write premultiplied BGRA (cr/cg/cb are already alpha-blended over black).
+                        bgra[idx] = cb.round().clamp(0.0, 255.0) as u8;
+                        bgra[idx + 1] = cg.round().clamp(0.0, 255.0) as u8;
+                        bgra[idx + 2] = cr.round().clamp(0.0, 255.0) as u8;
+                        bgra[idx + 3] = (ca * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+                let sf = self.gfx.surface_from_bgra(pw, ph, &bgra).ok()?;
+                self.trim();
+                self.cache.insert(key, (sf.clone(), pw as i32, ph as i32));
+                sf
+            }
+        };
+        self.place(parent, &surf, x, y, pw as f32, ph as f32, 1.0)
     }
 
     #[allow(clippy::too_many_arguments)]

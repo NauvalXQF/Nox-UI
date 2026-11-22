@@ -28,9 +28,11 @@ use windows_numerics::{Vector2, Vector3};
 
 const WM_CLOSE_SELF: u32 = WM_APP + 50;
 const WM_GEMINI_MODELS: u32 = WM_APP + 51;
+const WM_PRAYER_LOC: u32 = WM_APP + 52;
 const T_ANIM: usize = 10;
 const T_SB_IDLE: usize = 11;
 static FETCHED_GEMINI_RESULT: Mutex<Option<Result<Vec<String>, String>>> = Mutex::new(None);
+static PRAYER_LOC_RESULT: Mutex<Option<Result<nacre_platform::prayer_loc::GeoResult, String>>> = Mutex::new(None);
 const W: f32 = 780.0;
 const H: f32 = 560.0;
 const SIDEBAR_W: f32 = 214.0;
@@ -94,6 +96,17 @@ enum Action {
     NotchSend,
     NotchNotifPeek,
     NotchNotifs,
+    NotchTabMove(nacre_core::notch::state::Tab, i8),
+    NotchTabToggle(nacre_core::notch::state::Tab),
+    NotchTabReset,
+    PrayerAutoLoc,
+    PrayerDetectLoc,
+    PrayerMethod(u8),
+    PrayerAlert10m,
+    PrayerAlert5m,
+    PrayerAlertNow,
+    PrayerAlertSound,
+    PrayerTestAlert,
     NotifSetup,
     GoogleTasksToggle,
     GeminiModel(u8),
@@ -165,6 +178,8 @@ enum RowDef {
     Thumbs(&'static str, Vec<(&'static str, Thumb, Action)>, usize),
     Radios(Vec<(&'static str, Action)>, usize),
     Text(&'static str, String, String, u8),
+    /// `(label, index_1based, tab, visible, is_default, can_up, can_down, can_hide)`
+    TabOrder(&'static str, usize, nacre_core::notch::state::Tab, bool, bool, bool, bool, bool),
 }
 
 #[derive(Clone, Copy)]
@@ -177,7 +192,7 @@ const ACCENT_NAMES: [&str; 9] = ["Multiwarna", "Biru", "Ungu", "Merah Muda", "Me
 
 fn row_label(r: &RowDef) -> &'static str {
     match r {
-        RowDef::Toggle(l, ..) | RowDef::Seg(l, ..) | RowDef::Slider(l, ..) | RowDef::Pick(l, ..) | RowDef::Info(l, ..) | RowDef::Swatches(l, ..) | RowDef::Thumbs(l, ..) | RowDef::Text(l, ..) => l,
+        RowDef::Toggle(l, ..) | RowDef::Seg(l, ..) | RowDef::Slider(l, ..) | RowDef::Pick(l, ..) | RowDef::Info(l, ..) | RowDef::Swatches(l, ..) | RowDef::Thumbs(l, ..) | RowDef::Text(l, ..) | RowDef::TabOrder(l, ..) => l,
         RowDef::Radios(..) => "",
     }
 }
@@ -235,6 +250,8 @@ struct Win {
     fetched_models: Vec<String>,
     models_status: String,
     fetching_models: bool,
+    prayer_loc_status: String,
+    prayer_loc_busy: bool,
     frame: Option<windows::UI::Composition::SpriteVisual>,
     frame_key: (i32, i32, bool),
 }
@@ -306,6 +323,8 @@ fn create(comp: &Compositor) -> windows_core::Result<()> {
         fetched_models: Vec::new(),
         models_status: String::new(),
         fetching_models: false,
+        prayer_loc_status: String::new(),
+        prayer_loc_busy: false,
         frame: None,
         frame_key: (0, 0, false),
     });
@@ -633,6 +652,28 @@ impl Win {
                 let m = nacre_core::settings::ShortText::new(&self.edit_buf);
                 prefs::update(|s| s.gemini_custom_model = m);
             }
+            6 => {
+                let q = self.edit_buf.trim().to_string();
+                if !q.is_empty() && !self.prayer_loc_busy {
+                    self.prayer_loc_busy = true;
+                    self.prayer_loc_status = prefs::tr("Mencari…").to_string();
+                    let hw = self.popup.hwnd.0 as isize;
+                    std::thread::spawn(move || {
+                        let res = nacre_platform::prayer_loc::search_city(&q);
+                        if let Ok(mut g) = PRAYER_LOC_RESULT.lock() {
+                            *g = Some(res);
+                        }
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(HWND(hw as *mut core::ffi::c_void)),
+                                WM_PRAYER_LOC,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
+                    });
+                }
+            }
             _ => {}
         }
         self.render();
@@ -849,6 +890,52 @@ impl Win {
                     self.text(c, "\u{2303}", bx + vw - 14.0 * d, by + (bh - 16.0 * d) / 2.0, 10.0, 600, look.fg, 0.6, 1);
                     self.region(x0, y, cw, rh, *act);
                 }
+                RowDef::TabOrder(label, num, tab, visible, is_default, can_up, can_down, can_hide) => {
+                    let lbl_txt = format!("{num}. {label}");
+                    let lbl_op = if *visible { 0.95 } else { 0.42 };
+                    let lw = measure(&lbl_txt, &Style { px: (13.5 * d).round() as i32, weight: 400 }).0 as f32;
+                    self.text(c, &lbl_txt, lx, y + (rh - 17.0 * d) / 2.0, 13.5, 400, look.fg, lbl_op, 0);
+                    if *is_default {
+                        let badge = prefs::tr("Utama");
+                        let bw = measure(badge, &Style { px: (10.5 * d).round() as i32, weight: 600 }).0 as f32 + 14.0 * d;
+                        let bh = 18.0 * d;
+                        let bx = lx + lw + 10.0 * d;
+                        let by = y + (rh - bh) / 2.0;
+                        self.rect(c, bx, by, bw, bh, bh / 2.0, col(accent, 42));
+                        self.text(c, badge, bx + bw / 2.0, by + (bh - 13.0 * d) / 2.0 - 0.5, 10.5, 600, accent, 1.0, 1);
+                    }
+
+                    // Right-side controls: [↑] [↓] [Toggle]
+                    let (tw, th) = (46.0 * d, 22.0 * d);
+                    let (tx, ty) = (rx - tw, y + (rh - th) / 2.0);
+                    let toggle_alpha = if *visible && !*can_hide { 145 } else { 255 };
+                    let track_col = if *visible { col(accent, toggle_alpha) } else { col(look.fg, 60) };
+                    self.rect(c, tx, ty, tw, th, th / 2.0, track_col);
+                    let knob = th - 4.0 * d;
+                    let kw = knob * 1.55;
+                    let kx = if *visible { tx + tw - kw - 2.0 * d } else { tx + 2.0 * d };
+                    self.rect(c, kx, ty + 2.0 * d, kw, knob, knob / 2.0, Color { A: if *visible && !*can_hide { 200 } else { 255 }, R: 255, G: 255, B: 255 });
+                    if *can_hide || !*visible {
+                        self.region(tx - 4.0 * d, y, tw + 8.0 * d, rh, Action::NotchTabToggle(*tab));
+                    }
+
+                    let (bw, bh, gap) = (26.0 * d, 24.0 * d, 6.0 * d);
+                    let by = y + (rh - bh) / 2.0;
+                    let dn_x = tx - 10.0 * d - bw;
+                    let up_x = dn_x - gap - bw;
+
+                    self.rect(c, up_x, by, bw, bh, 7.0 * d, col(look.fg, if *can_up { 30 } else { 12 }));
+                    self.text(c, "\u{2191}", up_x + bw / 2.0, by + (bh - 15.0 * d) / 2.0 - 0.5, 12.0, 600, look.fg, if *can_up { 0.92 } else { 0.25 }, 1);
+                    if *can_up {
+                        self.region(up_x, y, bw, rh, Action::NotchTabMove(*tab, -1));
+                    }
+
+                    self.rect(c, dn_x, by, bw, bh, 7.0 * d, col(look.fg, if *can_down { 30 } else { 12 }));
+                    self.text(c, "\u{2193}", dn_x + bw / 2.0, by + (bh - 15.0 * d) / 2.0 - 0.5, 12.0, 600, look.fg, if *can_down { 0.92 } else { 0.25 }, 1);
+                    if *can_down {
+                        self.region(dn_x, y, bw, rh, Action::NotchTabMove(*tab, 1));
+                    }
+                }
             }
             y += rh;
         }
@@ -995,6 +1082,77 @@ impl Win {
                         RowDef::Toggle(prefs::tr("Cari lirik online (LRCLIB)"), s.lyrics_online, Action::LyricsOnline),
                         RowDef::Pick(prefs::tr("Folder lirik (.lrc)"), prefs::tr("Buka").to_string(), Action::LyricsDir),
                     ],
+                ));
+                groups.push((
+                    Some(prefs::tr("Jadwal Shalat")),
+                    {
+                        let loc_lbl = if !self.prayer_loc_status.is_empty() {
+                            self.prayer_loc_status.clone()
+                        } else {
+                            prefs::tr("Deteksi sekarang").to_string()
+                        };
+                        vec![
+                            RowDef::Text(
+                                prefs::tr("Kota"),
+                                s.prayer_city.as_str().to_string(),
+                                prefs::tr("Ketik nama kota (Enter)…").to_string(),
+                                6,
+                            ),
+                            RowDef::Toggle(prefs::tr("Izinkan akses lokasi Windows"), s.prayer_auto_loc, Action::PrayerAutoLoc),
+                            RowDef::Pick(prefs::tr("Deteksi lokasi otomatis"), loc_lbl, Action::PrayerDetectLoc),
+                            RowDef::Seg(
+                                prefs::tr("Metode hisab"),
+                                vec![
+                                    (prefs::tr("Kemenag"), Action::PrayerMethod(0)),
+                                    ("MWL", Action::PrayerMethod(1)),
+                                    (prefs::tr("Makkah"), Action::PrayerMethod(2)),
+                                    ("ISNA", Action::PrayerMethod(3)),
+                                    (prefs::tr("Mesir"), Action::PrayerMethod(4)),
+                                ],
+                                (s.prayer_method as usize).min(4),
+                            ),
+                            RowDef::Toggle(prefs::tr("Pengingat 10 menit sebelum adzan"), s.prayer_alert_10m, Action::PrayerAlert10m),
+                            RowDef::Toggle(prefs::tr("Pengingat 5 menit sebelum adzan"), s.prayer_alert_5m, Action::PrayerAlert5m),
+                            RowDef::Toggle(prefs::tr("Pengingat saat tiba waktu adzan"), s.prayer_alert_now, Action::PrayerAlertNow),
+                            RowDef::Toggle(prefs::tr("Suara pengingat adzan (chime)"), s.prayer_alert_sound, Action::PrayerAlertSound),
+                            RowDef::Pick(prefs::tr("Uji pengingat adzan"), prefs::tr("Uji sekarang").to_string(), Action::PrayerTestAlert),
+                        ]
+                    },
+                ));
+                groups.push((
+                    Some(prefs::tr("Tab Notch")),
+                    {
+                        use nacre_core::notch::state::Tab;
+                        let vis_count = s.visible_notch_tabs().len();
+                        let default_tab = s.default_notch_tab();
+                        let mut rows: Vec<RowDef> = s
+                            .notch_tab_order
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .map(|(idx, tab)| {
+                                let vis = s.notch_tab_visible(tab);
+                                RowDef::TabOrder(
+                                    prefs::tr(tab.title()),
+                                    idx + 1,
+                                    tab,
+                                    vis,
+                                    vis && tab == default_tab,
+                                    idx > 0,
+                                    idx + 1 < s.notch_tab_order.len(),
+                                    vis_count > 1,
+                                )
+                            })
+                            .collect();
+                        if s.notch_tab_order != Tab::ALL || s.notch_tab_mask != nacre_core::settings::ALL_NOTCH_TABS_MASK {
+                            rows.push(RowDef::Pick(
+                                prefs::tr("Urutan tab"),
+                                prefs::tr("Kembalikan bawaan").to_string(),
+                                Action::NotchTabReset,
+                            ));
+                        }
+                        rows
+                    },
                 ));
                 groups.push((
                     Some(prefs::tr("Aktivitas")),
@@ -1860,6 +2018,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                                 3 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_ID).unwrap_or_default(),
                                 4 => nacre_platform::cred::read_secret(nacre_platform::cred::TARGET_GTASKS_CLIENT_SECRET).unwrap_or_default(),
                                 5 => s.gemini_custom_model.as_str().to_string(),
+                                6 => s.prayer_city.as_str().to_string(),
                                 _ => String::new(),
                             };
                             w.edit = Some(f);
@@ -1875,6 +2034,81 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::NotchSend) => prefs::update(|s| s.notch_send = !s.notch_send),
                 Some(Action::NotchNotifPeek) => prefs::update(|s| s.notch_notif_peek = !s.notch_notif_peek),
                 Some(Action::NotchNotifs) => prefs::update(|s| s.notch_notifs = !s.notch_notifs),
+                Some(Action::NotchTabMove(tab, delta)) => prefs::update(|s| s.move_notch_tab(tab, delta as i32)),
+                Some(Action::NotchTabToggle(tab)) => prefs::update(|s| s.toggle_notch_tab(tab)),
+                Some(Action::NotchTabReset) => prefs::update(|s| s.reset_notch_tabs()),
+                Some(Action::PrayerMethod(m)) => prefs::update(|s| s.prayer_method = m.min(4)),
+                Some(Action::PrayerAlert10m) => prefs::update(|s| s.prayer_alert_10m = !s.prayer_alert_10m),
+                Some(Action::PrayerAlert5m) => prefs::update(|s| s.prayer_alert_5m = !s.prayer_alert_5m),
+                Some(Action::PrayerAlertNow) => prefs::update(|s| s.prayer_alert_now = !s.prayer_alert_now),
+                Some(Action::PrayerAlertSound) => prefs::update(|s| s.prayer_alert_sound = !s.prayer_alert_sound),
+                Some(Action::PrayerTestAlert) => crate::notch::trigger_prayer_test_alert(),
+                Some(Action::PrayerAutoLoc) => {
+                    let mut turned_on = false;
+                    prefs::update(|s| {
+                        s.prayer_auto_loc = !s.prayer_auto_loc;
+                        turned_on = s.prayer_auto_loc;
+                    });
+                    if turned_on {
+                        let already = with_win(|w| {
+                            if w.prayer_loc_busy {
+                                return true;
+                            }
+                            w.prayer_loc_busy = true;
+                            w.prayer_loc_status = prefs::tr("Mencari…").to_string();
+                            w.render();
+                            false
+                        })
+                        .unwrap_or(true);
+                        if !already {
+                            let hw = hwnd.0 as isize;
+                            std::thread::spawn(move || {
+                                let res = nacre_platform::prayer_loc::detect_location(true);
+                                if let Ok(mut g) = PRAYER_LOC_RESULT.lock() {
+                                    *g = Some(res);
+                                }
+                                unsafe {
+                                    let _ = PostMessageW(
+                                        Some(HWND(hw as *mut core::ffi::c_void)),
+                                        WM_PRAYER_LOC,
+                                        WPARAM(0),
+                                        LPARAM(0),
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                Some(Action::PrayerDetectLoc) => {
+                    let use_win = prefs::get().prayer_auto_loc;
+                    let already = with_win(|w| {
+                        if w.prayer_loc_busy {
+                            return true;
+                        }
+                        w.prayer_loc_busy = true;
+                        w.prayer_loc_status = prefs::tr("Mencari…").to_string();
+                        w.render();
+                        false
+                    })
+                    .unwrap_or(true);
+                    if !already {
+                        let hw = hwnd.0 as isize;
+                        std::thread::spawn(move || {
+                            let res = nacre_platform::prayer_loc::detect_location(use_win);
+                            if let Ok(mut g) = PRAYER_LOC_RESULT.lock() {
+                                *g = Some(res);
+                            }
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(HWND(hw as *mut core::ffi::c_void)),
+                                    WM_PRAYER_LOC,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        });
+                    }
+                }
                 Some(Action::GeminiModel(m)) => prefs::update(|s| {
                     s.gemini_model = m;
                     s.gemini_custom_model = nacre_core::settings::ShortText::EMPTY;
@@ -2089,6 +2323,46 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
                 w.render();
             });
+            LRESULT(0)
+        }
+        WM_PRAYER_LOC => {
+            let res = PRAYER_LOC_RESULT.lock().ok().and_then(|mut g| g.take());
+            match res {
+                Some(Ok(geo)) => {
+                    let lat_e4 = (geo.lat * 10_000.0).round() as i32;
+                    let lon_e4 = (geo.lon * 10_000.0).round() as i32;
+                    let city = nacre_core::settings::ShortText::new(&geo.city);
+                    let badge = match geo.source {
+                        "windows" => format!("{} (GPS)", geo.city),
+                        "ip" => format!("{} (IP)", geo.city),
+                        _ => geo.city.clone(),
+                    };
+                    prefs::update(|s| {
+                        s.prayer_city = city;
+                        s.prayer_lat_e4 = lat_e4;
+                        s.prayer_lon_e4 = lon_e4;
+                    });
+                    with_win(|w| {
+                        w.prayer_loc_busy = false;
+                        w.prayer_loc_status = badge;
+                        w.render();
+                    });
+                }
+                Some(Err(e)) => {
+                    let short: String = e.chars().take(32).collect();
+                    with_win(|w| {
+                        w.prayer_loc_busy = false;
+                        w.prayer_loc_status = short;
+                        w.render();
+                    });
+                }
+                None => {
+                    with_win(|w| {
+                        w.prayer_loc_busy = false;
+                        w.render();
+                    });
+                }
+            }
             LRESULT(0)
         }
         WM_PREFS => {

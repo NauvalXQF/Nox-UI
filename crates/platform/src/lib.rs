@@ -27,6 +27,7 @@ pub mod log;
 pub mod notifications;
 pub mod osd;
 pub mod pick;
+pub mod prayer_loc;
 pub mod privacy;
 pub mod process;
 pub mod recent;

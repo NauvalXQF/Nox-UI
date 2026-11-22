@@ -6,11 +6,49 @@ pub enum Tab {
     Todo,
     Gemini,
     Timer,
+    Prayer,
 }
 
 impl Tab {
     pub const MAIN: [Tab; 5] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini];
-    pub const ALL: [Tab; 6] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini, Tab::Timer];
+    pub const ALL: [Tab; 7] = [Tab::Play, Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini, Tab::Timer, Tab::Prayer];
+
+    pub const fn bit(self) -> u8 {
+        match self {
+            Tab::Play => 0,
+            Tab::Alerts => 1,
+            Tab::Shelf => 2,
+            Tab::Todo => 3,
+            Tab::Gemini => 4,
+            Tab::Timer => 5,
+            Tab::Prayer => 6,
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Tab::Play => "play",
+            Tab::Alerts => "alerts",
+            Tab::Shelf => "shelf",
+            Tab::Todo => "todo",
+            Tab::Gemini => "gemini",
+            Tab::Timer => "timer",
+            Tab::Prayer => "prayer",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<Tab> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "play" | "putar" => Some(Tab::Play),
+            "alerts" | "notifikasi" | "notif" => Some(Tab::Alerts),
+            "shelf" | "rak" => Some(Tab::Shelf),
+            "todo" | "to-do" => Some(Tab::Todo),
+            "gemini" => Some(Tab::Gemini),
+            "timer" | "pomodoro" => Some(Tab::Timer),
+            "prayer" | "shalat" | "sholat" | "adzan" => Some(Tab::Prayer),
+            _ => None,
+        }
+    }
 
     pub fn title(self) -> &'static str {
         match self {
@@ -20,6 +58,7 @@ impl Tab {
             Tab::Todo => "To-Do",
             Tab::Gemini => "Gemini",
             Tab::Timer => "Timer",
+            Tab::Prayer => "Jadwal Shalat",
         }
     }
 }
@@ -52,6 +91,10 @@ pub enum Event {
 }
 
 pub fn step(mode: Mode, ev: Event, open_on: OpenOn, hovering: bool) -> Mode {
+    step_with_default(mode, ev, open_on, hovering, Tab::Play)
+}
+
+pub fn step_with_default(mode: Mode, ev: Event, open_on: OpenOn, hovering: bool, default_tab: Tab) -> Mode {
     let rest = if hovering { Mode::Peek } else { Mode::Rest };
     match (mode, ev) {
         (_, Event::DragEnter) => Mode::Drop,
@@ -60,8 +103,8 @@ pub fn step(mode: Mode, ev: Event, open_on: OpenOn, hovering: bool) -> Mode {
         (Mode::Drop, _) => Mode::Drop,
         (Mode::Rest, Event::Enter) => Mode::Peek,
         (Mode::Peek, Event::Leave) => Mode::Rest,
-        (Mode::Peek, Event::Dwell) if open_on == OpenOn::Hover => Mode::Open(Tab::Play),
-        (Mode::Rest | Mode::Peek, Event::Click) => Mode::Open(Tab::Play),
+        (Mode::Peek, Event::Dwell) if open_on == OpenOn::Hover => Mode::Open(default_tab),
+        (Mode::Rest | Mode::Peek, Event::Click) => Mode::Open(default_tab),
         (Mode::Open(_), Event::SelectTab(t)) => Mode::Open(t),
         (Mode::Open(_), Event::Leave) => Mode::Rest,
         (Mode::Open(_), Event::Escape) => rest,
@@ -72,6 +115,7 @@ pub fn step(mode: Mode, ev: Event, open_on: OpenOn, hovering: bool) -> Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     Notification,
+    PrayerAlert,
     TimerEnding,
     Download,
     Player,
@@ -86,6 +130,7 @@ pub enum Activity {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Live {
     pub notification: bool,
+    pub prayer_alert: bool,
     pub media: bool,
     pub playing: bool,
     pub lyric_line: bool,
@@ -99,6 +144,9 @@ pub struct Live {
 }
 
 pub fn activity(l: &Live) -> Option<Activity> {
+    if l.prayer_alert {
+        return Some(Activity::PrayerAlert);
+    }
     if l.notification {
         return Some(Activity::Notification);
     }
@@ -330,6 +378,7 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
     let (mut w, mut h, mut r): (f32, f32, f32) = match l.view {
         View::Rest => (184.0, 30.0, 15.0),
         View::Compact(Activity::Notification) => (360.0, 46.0, 20.0),
+        View::Compact(Activity::PrayerAlert) => (350.0, 46.0, 20.0),
         View::Compact(Activity::Lyrics) => (360.0, 36.0, 18.0),
         View::Compact(Activity::Glance) => (220.0, 30.0, 15.0),
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
@@ -432,7 +481,8 @@ mod tests {
 
     #[test]
     fn activity_priority() {
-        let base = Live { notification: false, media: true, playing: true, lyric_line: true, lyrics_on: true, timer_left_s: Some(30), charging_fresh: true, shelf: 2, glance: true, download: true, wide_music: false };
+        let base = Live { notification: false, prayer_alert: false, media: true, playing: true, lyric_line: true, lyrics_on: true, timer_left_s: Some(30), charging_fresh: true, shelf: 2, glance: true, download: true, wide_music: false };
+        assert_eq!(activity(&Live { prayer_alert: true, notification: true, ..base }), Some(Activity::PrayerAlert));
         assert_eq!(activity(&Live { notification: true, ..base }), Some(Activity::Notification));
         assert_eq!(activity(&base), Some(Activity::TimerEnding));
         assert_eq!(activity(&Live { timer_left_s: Some(300), ..base }), Some(Activity::Download), "unduhan di atas lirik dan musik");
@@ -478,7 +528,7 @@ mod tests {
         let open_compact_exp = size_with(look(Mode::Open(Tab::Play), Some(Activity::Music)), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: true });
         assert_eq!((open_compact.w, open_compact.h), (395.0, 186.0));
         assert_eq!(open_compact_exp.h - open_compact.h, NAV_EXPAND_H_DP);
-        for t in [Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini, Tab::Timer] {
+        for t in [Tab::Alerts, Tab::Shelf, Tab::Todo, Tab::Gemini, Tab::Timer, Tab::Prayer] {
             let z = size_with(look(Mode::Open(t), None), 1.0, SizeContext { lyrics_open: false, shelf_empty: true, nav_expanded: false });
             assert_eq!((z.w, z.h), (395.0, 186.0), "tab {t:?} seragam dengan Alerts");
         }

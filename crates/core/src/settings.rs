@@ -273,6 +273,7 @@ pub struct Settings {
     pub greet_name: ShortText,
     pub greet_text: ShortText,
     pub lyrics_compact: bool,
+    pub lyrics_panel_open: bool,
     pub lyrics_online: bool,
     pub notch_downloads: bool,
     pub notch_send: bool,
@@ -285,11 +286,24 @@ pub struct Settings {
     pub notch_autohide_delay: u16,
     pub notch_notif_peek: bool,
     pub notch_notifs: bool,
+    pub notch_tab_order: [crate::notch::state::Tab; 7],
+    pub notch_tab_mask: u8,
+    pub prayer_city: ShortText,
+    pub prayer_lat_e4: i32,
+    pub prayer_lon_e4: i32,
+    pub prayer_method: u8,
+    pub prayer_auto_loc: bool,
+    pub prayer_alert_10m: bool,
+    pub prayer_alert_5m: bool,
+    pub prayer_alert_now: bool,
+    pub prayer_alert_sound: bool,
     pub gemini_model: u8,
     pub gemini_custom_model: ShortText,
     pub widget_style: u8,
     pub battery_pct: u8,
 }
+
+pub const ALL_NOTCH_TABS_MASK: u8 = 0b0111_1111;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -335,6 +349,7 @@ impl Default for Settings {
             greet_name: ShortText::EMPTY,
             greet_text: ShortText::EMPTY,
             lyrics_compact: true,
+            lyrics_panel_open: true,
             lyrics_online: true,
             notch_downloads: true,
             notch_send: true,
@@ -347,6 +362,17 @@ impl Default for Settings {
             notch_autohide_delay: 100,
             notch_notif_peek: true,
             notch_notifs: true,
+            notch_tab_order: crate::notch::state::Tab::ALL,
+            notch_tab_mask: ALL_NOTCH_TABS_MASK,
+            prayer_city: ShortText::new("Jakarta"),
+            prayer_lat_e4: -62088,
+            prayer_lon_e4: 1068456,
+            prayer_method: 0,
+            prayer_auto_loc: false,
+            prayer_alert_10m: true,
+            prayer_alert_5m: true,
+            prayer_alert_now: true,
+            prayer_alert_sound: true,
             gemini_model: 0,
             gemini_custom_model: ShortText::EMPTY,
             widget_style: 0,
@@ -430,6 +456,11 @@ impl Settings {
                 "lyrics_compact" => {
                     if let Some(b) = parse_bool(v) {
                         s.lyrics_compact = b;
+                    }
+                }
+                "lyrics_panel_open" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.lyrics_panel_open = b;
                     }
                 }
                 "lyrics_online" => {
@@ -535,6 +566,74 @@ impl Settings {
                         s.notch_notifs = b;
                     }
                 }
+                "notch_tab_order" => {
+                    use crate::notch::state::Tab;
+                    let mut out = [Tab::Play; 7];
+                    let mut n = 0usize;
+                    for tok in v.split(',') {
+                        if let Some(t) = Tab::from_id(tok) {
+                            if !out[..n].contains(&t) && n < 7 {
+                                out[n] = t;
+                                n += 1;
+                            }
+                        }
+                    }
+                    for t in Tab::ALL {
+                        if !out[..n].contains(&t) && n < 7 {
+                            out[n] = t;
+                            n += 1;
+                        }
+                    }
+                    if n == 7 {
+                        s.notch_tab_order = out;
+                    }
+                }
+                "notch_tab_hidden" => {
+                    use crate::notch::state::Tab;
+                    let mut mask = ALL_NOTCH_TABS_MASK;
+                    for tok in v.split(',') {
+                        if let Some(t) = Tab::from_id(tok) {
+                            mask &= !(1u8 << t.bit());
+                        }
+                    }
+                    if mask != 0 {
+                        s.notch_tab_mask = mask;
+                    }
+                }
+                "prayer_city" => {
+                    let st = ShortText::new(v);
+                    if !st.is_empty() {
+                        s.prayer_city = st;
+                    }
+                }
+                "prayer_lat_e4" => s.prayer_lat_e4 = v.parse::<i32>().map(|n| n.clamp(-900_000, 900_000)).unwrap_or(s.prayer_lat_e4),
+                "prayer_lon_e4" => s.prayer_lon_e4 = v.parse::<i32>().map(|n| n.clamp(-1_800_000, 1_800_000)).unwrap_or(s.prayer_lon_e4),
+                "prayer_method" => s.prayer_method = v.parse::<u8>().map(|n| n.min(4)).unwrap_or(s.prayer_method),
+                "prayer_auto_loc" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.prayer_auto_loc = b;
+                    }
+                }
+                "prayer_alert_10m" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.prayer_alert_10m = b;
+                    }
+                }
+                "prayer_alert_5m" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.prayer_alert_5m = b;
+                    }
+                }
+                "prayer_alert_now" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.prayer_alert_now = b;
+                    }
+                }
+                "prayer_alert_sound" => {
+                    if let Some(b) = parse_bool(v) {
+                        s.prayer_alert_sound = b;
+                    }
+                }
                 "gemini_model" => s.gemini_model = v.parse::<u8>().map(|n| n.min(3)).unwrap_or(s.gemini_model),
                 "gemini_custom_model" => s.gemini_custom_model = ShortText::new(v),
                 "widget_style" => s.widget_style = v.parse::<u8>().map(|n| n.min(1)).unwrap_or(s.widget_style),
@@ -553,9 +652,60 @@ impl Settings {
         s
     }
 
+    pub fn notch_tab_visible(&self, tab: crate::notch::state::Tab) -> bool {
+        (self.notch_tab_mask & (1u8 << tab.bit())) != 0
+    }
+
+    pub fn visible_notch_tabs(&self) -> Vec<crate::notch::state::Tab> {
+        let v: Vec<_> = self.notch_tab_order.iter().copied().filter(|&t| self.notch_tab_visible(t)).collect();
+        if v.is_empty() {
+            vec![self.notch_tab_order[0]]
+        } else {
+            v
+        }
+    }
+
+    pub fn default_notch_tab(&self) -> crate::notch::state::Tab {
+        self.visible_notch_tabs()[0]
+    }
+
+    pub fn move_notch_tab(&mut self, tab: crate::notch::state::Tab, delta: i32) {
+        let Some(i) = self.notch_tab_order.iter().position(|&t| t == tab) else { return };
+        let j = i as i32 + delta;
+        if j >= 0 && (j as usize) < self.notch_tab_order.len() {
+            self.notch_tab_order.swap(i, j as usize);
+        }
+    }
+
+    pub fn toggle_notch_tab(&mut self, tab: crate::notch::state::Tab) {
+        let bit = 1u8 << tab.bit();
+        if (self.notch_tab_mask & bit) != 0 {
+            let next = self.notch_tab_mask & !bit;
+            if next != 0 {
+                self.notch_tab_mask = next;
+            }
+        } else {
+            self.notch_tab_mask |= bit;
+        }
+    }
+
+    pub fn reset_notch_tabs(&mut self) {
+        self.notch_tab_order = crate::notch::state::Tab::ALL;
+        self.notch_tab_mask = ALL_NOTCH_TABS_MASK;
+    }
+
     pub fn serialize(&self) -> String {
+        let tab_order = self.notch_tab_order.iter().map(|t| t.id()).collect::<Vec<_>>().join(",");
+        let tab_hidden = self
+            .notch_tab_order
+            .iter()
+            .copied()
+            .filter(|&t| !self.notch_tab_visible(t))
+            .map(|t| t.id())
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -604,6 +754,7 @@ impl Settings {
             self.greet_name.as_str(),
             self.greet_text.as_str(),
             self.lyrics_compact,
+            self.lyrics_panel_open,
             self.lyrics_online,
             self.notch_downloads,
             self.notch_send,
@@ -612,6 +763,17 @@ impl Settings {
             self.notch_autohide_delay,
             self.notch_notif_peek,
             self.notch_notifs,
+            tab_order,
+            tab_hidden,
+            self.prayer_city.as_str(),
+            self.prayer_lat_e4,
+            self.prayer_lon_e4,
+            self.prayer_method,
+            self.prayer_auto_loc,
+            self.prayer_alert_10m,
+            self.prayer_alert_5m,
+            self.prayer_alert_now,
+            self.prayer_alert_sound,
             self.gemini_model,
             self.gemini_custom_model.as_str(),
             self.widget_style,
@@ -895,5 +1057,58 @@ dock_margin=900");
         assert_eq!(Settings::parse(&Settings::parse("battery_pct=2").serialize()).battery_pct, 2);
         assert_eq!(Settings::parse("battery_pct=9").battery_pct, 2);
         assert_eq!(Settings::default().battery_pct, 2);
+    }
+
+    #[test]
+    fn notch_tabs_and_lyrics_panel_round_trip() {
+        use crate::notch::state::Tab;
+        let mut s = Settings::default();
+        assert_eq!(s.notch_tab_order, Tab::ALL);
+        assert_eq!(s.visible_notch_tabs(), Tab::ALL.to_vec());
+        assert_eq!(s.default_notch_tab(), Tab::Play);
+        assert!(s.lyrics_panel_open);
+
+        s.move_notch_tab(Tab::Gemini, -1);
+        s.move_notch_tab(Tab::Gemini, -1);
+        s.move_notch_tab(Tab::Gemini, -1);
+        s.move_notch_tab(Tab::Gemini, -1);
+        assert_eq!(s.notch_tab_order[0], Tab::Gemini);
+        assert_eq!(s.default_notch_tab(), Tab::Gemini);
+
+        s.toggle_notch_tab(Tab::Shelf);
+        s.toggle_notch_tab(Tab::Todo);
+        assert!(!s.notch_tab_visible(Tab::Shelf));
+        assert!(!s.notch_tab_visible(Tab::Todo));
+        assert_eq!(s.visible_notch_tabs().len(), 5);
+
+        s.lyrics_panel_open = false;
+        s.prayer_city = ShortText::new("Semarang");
+        s.prayer_lat_e4 = -69667;
+        s.prayer_lon_e4 = 1104167;
+        s.prayer_alert_sound = false;
+        let rt = Settings::parse(&s.serialize());
+        assert_eq!(rt.notch_tab_order, s.notch_tab_order);
+        assert_eq!(rt.notch_tab_mask, s.notch_tab_mask);
+        assert!(!rt.lyrics_panel_open);
+        assert_eq!(rt.prayer_city.as_str(), "Semarang");
+        assert_eq!((rt.prayer_lat_e4, rt.prayer_lon_e4, rt.prayer_alert_sound), (-69667, 1104167, false));
+
+        // Hiding every tab must keep at least 1 visible tab.
+        let mut only = Settings::default();
+        for t in Tab::ALL {
+            only.toggle_notch_tab(t);
+        }
+        assert_eq!(only.visible_notch_tabs().len(), 1);
+
+        // Corrupt / duplicate / partial tab order is safely normalized to all 7 unique tabs.
+        let norm = Settings::parse("notch_tab_order=timer,timer,bogus,gemini\nnotch_tab_hidden=play,alerts,shelf,todo,gemini,timer,prayer\n");
+        assert_eq!(norm.notch_tab_order[0], Tab::Timer);
+        assert_eq!(norm.notch_tab_order[1], Tab::Gemini);
+        assert_eq!(norm.notch_tab_order.len(), 7);
+        assert_eq!(norm.notch_tab_mask, ALL_NOTCH_TABS_MASK, "all-hidden config falls back to all visible");
+
+        s.reset_notch_tabs();
+        assert_eq!(s.notch_tab_order, Tab::ALL);
+        assert_eq!(s.notch_tab_mask, ALL_NOTCH_TABS_MASK);
     }
 }
