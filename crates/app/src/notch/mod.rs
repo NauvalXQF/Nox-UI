@@ -1060,17 +1060,21 @@ impl Notch {
         if let Some(lg) = &pl.left_group {
             let _ = lg.SetOffset(Vector3 { X: cur_mx - pl.base_mx, Y: 0.0, Z: 0.0 });
         }
+        if let Some((base_cx, ec)) = &pl.empty_center {
+            let _ = ec.SetOffset(Vector3 { X: (cur_mx + cur_mw / 2.0) - *base_cx, Y: 0.0, Z: 0.0 });
+        }
         if let Some(tc) = &pl.title_clip {
             let live_tw = (cur_mw - 70.0 * self.dpi - (1.0 - lp) * 34.0 * self.dpi).max(40.0 * self.dpi);
             let _ = tc.SetSize(Vector2 { X: live_tw.ceil(), Y: pl.title_clip_h });
         }
 
         // Smoothly stretch/contract scrub bar + timestamps in lockstep with `sp_w` & `lp`.
+        // Guarded on `scrub.is_some()` so empty ("Not Playing") state never recurses into `render()`.
         let sy = top + 58.0 * self.dpi + (36.0 + 8.0 * lp) * self.dpi;
         if let Some(scrub) = self.live_vis.scrub.as_mut() {
             scrub.set_bounds(cur_mx, cur_mx + cur_mw, sy, 37.0 * self.dpi, 43.0 * self.dpi, 40.0 * self.dpi);
+            self.update_scrub_in_place();
         }
-        self.update_scrub_in_place();
 
         // Continuously glide all 5 transport controls (X, Y, GPU Scale, and Quote opacity)
         // so both settled endpoints match static layout to 0.00px with zero size or brightness pops.

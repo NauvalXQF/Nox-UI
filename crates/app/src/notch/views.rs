@@ -358,6 +358,7 @@ pub struct PlayLayoutLive {
     pub base_mx: f32,
     pub base_cy: f32,
     pub left_group: Option<ContainerVisual>,
+    pub empty_center: Option<(f32, ContainerVisual)>,
     pub title_clip: Option<ContainerVisual>,
     pub title_clip_h: f32,
     pub ctrl_groups: Vec<(Action, f32, ContainerVisual)>,
@@ -2742,16 +2743,27 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
     let mw = mw_full + (mw_split - mw_full) * lp;
     let div_x = mx + mw + p.px(14.0);
 
+    let mut empty_center = None;
     let mc = match &d.media {
         Some(m) => music_column(p, c, mx, top, mw, h, m, lp, d.play_gliding, d.muted, d.scrub_hover, d.art_scale, regions, live),
         None => {
-            p.sym(c, Sym::Note, mx + mw / 2.0, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
-            p.text(c, tr("Tidak diputar"), mx + mw / 2.0, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
             let qx = mx + mw / 2.0;
             let qy = top + h - p.px(14.0);
-            let n0 = kids(c);
-            p.sym(c, Sym::Quote, qx, qy, 20.5, WHITE, 0.52 + 0.43 * lp);
-            regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
+            if let Ok(ec) = p.comp.CreateContainerVisual() {
+                let _ = c.Children().and_then(|k| k.InsertAtTop(&ec));
+                p.sym(&ec, Sym::Note, qx, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
+                p.text(&ec, tr("Tidak diputar"), qx, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
+                let n0 = kids(&ec);
+                p.sym(&ec, Sym::Quote, qx, qy, 20.5, WHITE, 0.52 + 0.43 * lp);
+                regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(&ec, n0), hover_bg: None });
+                empty_center = Some((qx, ec));
+            } else {
+                p.sym(c, Sym::Note, qx, top + h / 2.0 - p.px(14.0), 26.0, WHITE, 0.34);
+                p.text(c, tr("Tidak diputar"), qx, top + h / 2.0 + p.px(8.0), 12.5, 500, WHITE, 0.56, Anchor::Center, mw - p.px(12.0));
+                let n0 = kids(c);
+                p.sym(c, Sym::Quote, qx, qy, 20.5, WHITE, 0.52 + 0.43 * lp);
+                regions.push(Region { x: qx - p.px(16.0), y: qy - p.px(14.0), w: p.px(32.0), h: p.px(28.0), action: Action::ToggleLyrics, vis: group_since(c, n0), hover_bg: None });
+            }
             None
         }
     };
@@ -2820,6 +2832,7 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
         base_mx: mx,
         base_cy,
         left_group,
+        empty_center,
         title_clip,
         title_clip_h,
         ctrl_groups,
