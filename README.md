@@ -51,10 +51,6 @@ all drawn with frosted glass materials and springy GPU‑composited animations.
 
 It is a single lightweight native program: no Electron, no WebView, no background telemetry services, no account required. At idle it uses roughly **15 MB** of private memory.
 
-<p align="center">
-  <img src="assets/screenshots/desktop.png" alt="NOX desktop: Deck, Rail, Notch and widgets" width="900">
-</p>
-
 ### 🆕 What’s New in NOX v0.4.1
 
 - **NOX Rebrand & Liquid Glass Identity**: new `nox.` icon, renamed binaries (`nox.exe`, `nox-guard.exe`), config stored in `%APPDATA%\NOX`, and automatic seamless migration from legacy `%APPDATA%\ABRA` settings and credentials.
@@ -144,32 +140,14 @@ Download **`NOX-v0.4.1-win64.zip`** from the **[Releases](https://github.com/Nau
 
 The interactive glass island at the top center of your screen. Choose **Notch** (attached to the top edge) or **Capsule** (floating) and visibility behavior (**Fixed · Overlay · Smart · Auto‑hide**) in *Settings → Notch*.
 
-<p align="center">
-  <img src="assets/screenshots/visor-capsule.png" alt="NOX Notch in Capsule shape" width="480">
-</p>
-
 - **Hover** to peek, **rest the cursor ~0.3 s** (or click) to expand the panel. Scroll the mouse wheel to switch tabs.
 - **When idle**: greeting with time, date, and battery; **music & lyrics** while a song is loaded; or a compact pill.
 
-<p align="center">
-  <img src="assets/screenshots/notch-idle-greeting.png" alt="Notch idle: greeting" width="300">
-  <img src="assets/screenshots/notch-music-lyrics.png" alt="Notch idle: music and lyrics" width="480">
-</p>
-
 - **Play & Live Lyrics**: song card (adaptive album‑art tint, title, seekable progress, controls) and staggered synced lyrics. Put custom `Artist - Title.lrc` files in `%APPDATA%\NOX\lyrics`, or let NOX fetch them from [LRCLIB](https://lrclib.net).
-
-<p align="center">
-  <img src="assets/screenshots/notch-play.png" alt="Notch Play tab with song card and lyrics" width="560">
-</p>
 
 - **Notifications & Instant Deep‑Link**: incoming Windows 11 notifications pop seamlessly into the Notch; clicking a notification (WhatsApp, Telegram, Discord, etc.) activates its native Windows Toast COM callback to jump straight into the exact conversation without delay.
 - **Downloads**: Microsoft Store, Steam, and browser downloads with a live progress ring.
 - **Shelf & Send to Phone (Android & iPhone, no app)**: drag files onto the Notch and drop them on **Keep on Shelf** · **Send** · **Copy to…** · **Open with…**. Scan the QR code from your phone on the **same Wi‑Fi** to download immediately.
-
-<p align="center">
-  <img src="assets/screenshots/notch-drop-zones.png" alt="Drop zones when dragging files onto the Notch" width="480">
-  <img src="assets/screenshots/notch-send-qr.png" alt="Send to phone: QR code and progress" width="480">
-</p>
 
 - **Timer, Tasks & Calendar**: Pomodoro timer with a floating Detached Timer Pill when minimized, plus upcoming events and **Google Tasks & Calendar** sync.
 - **Ask Gemini AI**: ask quick questions directly from the Notch using your own Gemini API key (*Settings → Integrations*).
@@ -204,15 +182,7 @@ The interactive glass island at the top center of your screen. Choose **Notch** 
 - **Wi‑Fi / Bluetooth**: click the round icon to toggle; click the card to open the network / device picker. Bluetooth **headphones and speakers connect in one click**.
 - **Display / Sound sliders**, **sound output** switcher, Playing, Dark Mode, Scene, Overview, Screenshot, and more.
 
-<p align="center">
-  <img src="assets/screenshots/quick-panel.png" alt="Quick Panel" width="320">
-</p>
-
 - **Edit Controls…**: remove with **−**, drag to rearrange, drag the glass corner handle to resize horizontally/vertically/diagonally, or add controls from the searchable gallery.
-
-<p align="center">
-  <img src="assets/screenshots/quick-panel-edit.png" alt="Quick Panel in Edit Controls mode" width="820">
-</p>
 </details>
 
 <details open>
@@ -221,11 +191,6 @@ The interactive glass island at the top center of your screen. Choose **Notch** 
 - Open the gallery from *Settings → Widgets → Add widgets*, or right‑click a widget → *Edit Widgets…*.
 - **Click** or **drag** widgets onto the desktop with snap‑to‑grid placement.
 - Material: **Original** (solid light/dark cards) or **Crystal** (frosted glass) in *Settings → Widgets*.
-
-<p align="center">
-  <img src="assets/screenshots/widgets-desktop.png" alt="Widgets in Original material" width="360">
-  <img src="assets/screenshots/widgets-crystal.png" alt="Widgets in Crystal material" width="360">
-</p>
 </details>
 
 <details open>
@@ -233,10 +198,6 @@ The interactive glass island at the top center of your screen. Choose **Notch** 
 
 - Press `Ctrl` + `Space` to search **Apps**, **Files**, **Actions**, and **Clipboard** (switch tabs with `Ctrl` + `1`…`4`).
 - Built‑in calculator, recent files with thumbnails, file‑type filters, custom quick actions, and optional in‑memory clipboard history.
-
-<p align="center">
-  <img src="assets/screenshots/quick-search.png" alt="Quick Search" width="560">
-</p>
 </details>
 
 <details open>
@@ -247,10 +208,6 @@ The interactive glass island at the top center of your screen. Choose **Notch** 
 - **App Grid** (`Ctrl` + `Shift` + `Space` or Deck button): full‑screen grid of installed apps.
 - **Screen Corners**: move the pointer to a screen corner to trigger an action.
 - **Volume & brightness HUD**: glass card showing your active output device.
-
-<p align="center">
-  <img src="assets/screenshots/apps.png" alt="App Grid" width="560">
-</p>
 </details>
 
 <details open>
@@ -260,10 +217,6 @@ The interactive glass island at the top center of your screen. Choose **Notch** 
 - *Settings → Integrations*: configure **Google Tasks & Calendar** OAuth and **Ask Gemini AI** (with live model selector).
 - 9 tabs in a floating glass sidebar with search, back/forward navigation, 120fps smooth scrolling with draggable scrollbar, and **English / Indonesian** UI.
 - **Quick shortcuts**: `` Alt+` `` cycles windows of the same app, `Ctrl+Alt+H` hides, `Ctrl+Alt+M` minimizes, `Ctrl+Alt+Q` quits the active app (*Settings → General*).
-
-<p align="center">
-  <img src="assets/screenshots/settings.png" alt="NOX Settings" width="640">
-</p>
 </details>
 
 ### Keyboard shortcuts
@@ -352,7 +305,6 @@ $env:NACRE_CONFIG_DIR = "$PWD\target\cfg-test"
 Useful flags: `--keep-taskbar`, `--no-dock`, `--no-island`, `--no-hud`, `--open-settings`, `--open-widgets`, `--exit-after <seconds>`, `--add-app <path>`, `--set-icon <app|start|launchpad> <image>`.
 
 > With Scene enabled, NOX moves your real windows. Let test instances exit normally (`--exit-after`) rather than force‑killing them.
-
 </details>
 
 ### Project layout
