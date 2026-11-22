@@ -9,13 +9,13 @@ use windows::UI::Composition::{
     CompositionSpriteShape, CompositionVisualSurface, Compositor, ContainerVisual, DropShadow,
     ShapeVisual, SpriteVisual,
 };
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow,
-    HTTRANSPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
-    WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
+    SetWindowPos, ShowWindow, HTTRANSPARENT, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_HIDE, SW_SHOWNOACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows_core::Interface;
 use windows_numerics::{Vector2, Vector3};
@@ -28,7 +28,8 @@ unsafe extern "system" fn shadow_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 }
 
 pub const ONYX: (u8, u8, u8) = (0, 0, 0);
-const INNER_RIM_BLACK: Color = Color { A: 20, R: 255, G: 255, B: 255 }; // rgba(255,255,255,0.08)
+/// Seamless pure-black outer edge: zero gray hairline separating the `#000000` body from its shadow.
+const INNER_RIM_BLACK: Color = Color { A: 0, R: 0, G: 0, B: 0 };
 
 pub fn glass_params(radius: f32) -> GlassParams {
     let look = crate::prefs::look(crate::prefs::Role::Notch);
@@ -42,7 +43,7 @@ pub fn glass_params(radius: f32) -> GlassParams {
     g.rim = if is_black() {
         INNER_RIM_BLACK
     } else {
-        Color { A: 48, R: 255, G: 255, B: 255 }
+        Color { A: 18, R: 255, G: 255, B: 255 }
     };
     g.highlight = 0.0;
     g
@@ -58,8 +59,10 @@ pub struct Shell {
     _sh_surface: Surface,
     sh_stage: ContainerVisual,
     pub stage: ContainerVisual,
-    shadow_host: SpriteVisual,
-    drop_shadow: DropShadow,
+    elev_host: SpriteVisual,
+    elev_shadow: DropShadow,
+    contact_host: SpriteVisual,
+    contact_shadow: DropShadow,
     mask_vis: ShapeVisual,
     mask_surface: CompositionVisualSurface,
     shell_root: ContainerVisual,
@@ -128,6 +131,9 @@ impl Shell {
                 Some(hi),
                 None,
             )?;
+            // Crucial for WS_EX_LAYERED + WS_EX_NOREDIRECTIONBITMAP: enable full alpha compositing
+            // while keeping WS_EX_TRANSPARENT 100% click-through across all desktop processes.
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
             let _ = SetWindowPos(h, Some(owner_hwnd), wx, 0, canvas.0, canvas.1, SWP_NOACTIVATE);
             h
         };
@@ -141,7 +147,7 @@ impl Shell {
         stage.SetSize(sz)?;
         root.Children()?.InsertAtTop(&stage)?;
 
-        // Shared single CompositionPathGeometry for clip, inner rim, and GPU DropShadow mask.
+        // Shared single CompositionPathGeometry for clip, inner rim, and Dual-Layer GPU DropShadow mask.
         let path_geo = comp.CreatePathGeometry()?;
         let shell_clip: CompositionGeometricClip = comp.CreateGeometricClip()?;
         shell_clip.SetGeometry(&path_geo)?;
@@ -155,19 +161,34 @@ impl Shell {
         let mask_surface = comp.CreateVisualSurface()?;
         mask_surface.SetSourceVisual(&mask_vis)?;
         mask_surface.SetSourceSize(sz)?;
-        let mask_brush = comp.CreateSurfaceBrushWithSurface(&mask_surface)?;
 
-        let drop_shadow = comp.CreateDropShadow()?;
-        drop_shadow.SetColor(Color { A: 255, R: 0, G: 0, B: 0 })?;
-        drop_shadow.SetBlurRadius(14.0)?;
-        drop_shadow.SetOffset(Vector3 { X: 0.0, Y: 4.0, Z: 0.0 })?;
-        drop_shadow.SetOpacity(0.38)?;
-        drop_shadow.SetMask(&mask_brush)?;
+        // Layer 1 (outer): Broad, soft Elevation Drop Shadow floating above bars and desktop windows.
+        let elev_mask = comp.CreateSurfaceBrushWithSurface(&mask_surface)?;
+        let elev_shadow = comp.CreateDropShadow()?;
+        elev_shadow.SetColor(Color { A: 255, R: 0, G: 0, B: 0 })?;
+        elev_shadow.SetBlurRadius(20.0)?;
+        elev_shadow.SetOffset(Vector3 { X: 0.0, Y: 6.0, Z: 0.0 })?;
+        elev_shadow.SetOpacity(0.56)?;
+        elev_shadow.SetMask(&elev_mask)?;
 
-        let shadow_host = comp.CreateSpriteVisual()?;
-        shadow_host.SetSize(sz)?;
-        shadow_host.SetShadow(&drop_shadow)?;
-        sh_stage.Children()?.InsertAtTop(&shadow_host)?;
+        let elev_host = comp.CreateSpriteVisual()?;
+        elev_host.SetSize(sz)?;
+        elev_host.SetShadow(&elev_shadow)?;
+        sh_stage.Children()?.InsertAtTop(&elev_host)?;
+
+        // Layer 2 (inner): Tight, dense Contact Shadow hugging the pure-black silhouette edge.
+        let contact_mask = comp.CreateSurfaceBrushWithSurface(&mask_surface)?;
+        let contact_shadow = comp.CreateDropShadow()?;
+        contact_shadow.SetColor(Color { A: 255, R: 0, G: 0, B: 0 })?;
+        contact_shadow.SetBlurRadius(5.0)?;
+        contact_shadow.SetOffset(Vector3 { X: 0.0, Y: 2.0, Z: 0.0 })?;
+        contact_shadow.SetOpacity(0.85)?;
+        contact_shadow.SetMask(&contact_mask)?;
+
+        let contact_host = comp.CreateSpriteVisual()?;
+        contact_host.SetSize(sz)?;
+        contact_host.SetShadow(&contact_shadow)?;
+        sh_stage.Children()?.InsertAtTop(&contact_host)?;
 
         let shell_root = comp.CreateContainerVisual()?;
         shell_root.SetSize(sz)?;
@@ -192,12 +213,13 @@ impl Shell {
         content.SetSize(sz)?;
         shell_root.Children()?.InsertAtTop(&content)?;
 
-        // Subtle inner edge rim (~1px visible after shell_root geometric clip), open at top bezel.
+        // Ultra-subtle inner hairline (disabled completely in pure-black OLED mode so the outer
+        // silhouette flows seamlessly into the contact shadow with zero light-gray rim).
         let rim_geo = comp.CreatePathGeometry()?;
         let rim_shape = comp.CreateSpriteShapeWithGeometry(&rim_geo)?;
         let rim_brush = comp.CreateColorBrushWithColor(INNER_RIM_BLACK)?;
         rim_shape.SetStrokeBrush(&rim_brush)?;
-        rim_shape.SetStrokeThickness(1.6)?;
+        rim_shape.SetStrokeThickness(1.0)?;
         let rim = comp.CreateShapeVisual()?;
         rim.SetSize(sz)?;
         rim.Shapes()?.Append(&rim_shape)?;
@@ -209,8 +231,10 @@ impl Shell {
             _sh_surface: sh_surface,
             sh_stage,
             stage,
-            shadow_host,
-            drop_shadow,
+            elev_host,
+            elev_shadow,
+            contact_host,
+            contact_shadow,
             mask_vis,
             mask_surface,
             shell_root,
@@ -237,7 +261,8 @@ impl Shell {
         let _ = self._sh_surface.root.SetSize(sz);
         let _ = self.sh_stage.SetSize(sz);
         let _ = self.stage.SetSize(sz);
-        let _ = self.shadow_host.SetSize(sz);
+        let _ = self.elev_host.SetSize(sz);
+        let _ = self.contact_host.SetSize(sz);
         let _ = self.mask_vis.SetSize(sz);
         let _ = self.mask_surface.SetSourceSize(sz);
         let _ = self.shell_root.SetSize(sz);
@@ -274,6 +299,7 @@ impl Shell {
                 self.backdrop.SetBrush(&b)?;
                 self.tint.SetOpacity(0.0)?;
                 self.rim_brush.SetColor(INNER_RIM_BLACK)?;
+                self.rim.SetOpacity(0.0)?;
                 return Ok(());
             }
             let base: CompositionBrush = match tier {
@@ -291,6 +317,7 @@ impl Shell {
             self.tint_brush.SetColor(g.tint)?;
             self.tint.SetOpacity(if tier == Tier::Solid { 0.0 } else { 1.0 })?;
             self.rim_brush.SetColor(g.rim)?;
+            self.rim.SetOpacity(1.0)?;
             Ok(())
         };
         if let Err(e) = go() {
@@ -316,10 +343,22 @@ impl Shell {
         }
     }
 
-    pub fn set_shadow(&self, blur_px: f32, dy_px: f32, opacity: f32) {
-        let _ = self.drop_shadow.SetBlurRadius(blur_px.clamp(0.0, 96.0));
-        let _ = self.drop_shadow.SetOffset(Vector3 { X: 0.0, Y: dy_px, Z: 0.0 });
-        let _ = self.drop_shadow.SetOpacity(opacity.clamp(0.0, 1.0));
+    pub fn set_dual_shadow(
+        &self,
+        elev_blur_px: f32,
+        elev_dy_px: f32,
+        elev_opacity: f32,
+        contact_blur_px: f32,
+        contact_dy_px: f32,
+        contact_opacity: f32,
+    ) {
+        let _ = self.elev_shadow.SetBlurRadius(elev_blur_px.clamp(0.0, 96.0));
+        let _ = self.elev_shadow.SetOffset(Vector3 { X: 0.0, Y: elev_dy_px, Z: 0.0 });
+        let _ = self.elev_shadow.SetOpacity(elev_opacity.clamp(0.0, 1.0));
+
+        let _ = self.contact_shadow.SetBlurRadius(contact_blur_px.clamp(0.0, 48.0));
+        let _ = self.contact_shadow.SetOffset(Vector3 { X: 0.0, Y: contact_dy_px, Z: 0.0 });
+        let _ = self.contact_shadow.SetOpacity(contact_opacity.clamp(0.0, 1.0));
     }
 
     pub fn set_stage_y(&self, y: f32) {

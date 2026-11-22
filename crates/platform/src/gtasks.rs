@@ -89,10 +89,12 @@ fn now_s() -> i64 {
 
 fn client_creds() -> Option<(String, String)> {
     let cid = cred::read_secret(cred::TARGET_GTASKS_CLIENT_ID)
+        .or_else(|| std::env::var("NOX_GOOGLE_CLIENT_ID").ok())
         .or_else(|| std::env::var("ABRA_GOOGLE_CLIENT_ID").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
     let csec = cred::read_secret(cred::TARGET_GTASKS_CLIENT_SECRET)
+        .or_else(|| std::env::var("NOX_GOOGLE_CLIENT_SECRET").ok())
         .or_else(|| std::env::var("ABRA_GOOGLE_CLIENT_SECRET").ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -277,7 +279,7 @@ fn oauth_connect(cid: &str, csec: &str) -> Result<Tokens, String> {
                 }
                 let ok = got_code.is_some() && got_state.as_deref() == Some(state.as_str());
                 let html = if ok {
-                    "<html><body style='font-family:Segoe UI,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh'><div><h2>ABRA terhubung ke Google Tasks &amp; Calendar</h2><p>Anda dapat menutup tab ini sekarang.</p></div></body></html>"
+                    "<html><body style='font-family:Segoe UI,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh'><div><h2>NOX terhubung ke Google Tasks &amp; Calendar</h2><p>Anda dapat menutup tab ini sekarang.</p></div></body></html>"
                 } else {
                     "<html><body style='font-family:Segoe UI,sans-serif;background:#111;color:#f66;display:flex;align-items:center;justify-content:center;height:100vh'><div><h2>Otorisasi dibatalkan / gagal</h2></div></body></html>"
                 };

@@ -215,11 +215,11 @@ fn apply_prefs() {
         let b = BAR.with(|c| c.borrow_mut().take());
         if let Some(b) = b {
             b.menu.hide();
+            shell::appbar::release_top_if_owner(b.popup.hwnd);
             unsafe {
                 let _ = DestroyWindow(b.popup.hwnd);
             }
         }
-        shell::appbar::release_top();
         log::line("menubar", "dihancurkan");
         services::post_island(crate::prefs::WM_PREFS);
     } else if want {
@@ -232,11 +232,11 @@ fn apply_prefs() {
             let b = BAR.with(|c| c.borrow_mut().take());
             if let Some(b) = b {
                 b.menu.hide();
+                shell::appbar::release_top_if_owner(b.popup.hwnd);
                 unsafe {
                     let _ = DestroyWindow(b.popup.hwnd);
                 }
             }
-            shell::appbar::release_top();
             apply_prefs();
             return;
         }
@@ -666,7 +666,7 @@ impl Bar {
 
     fn app_label(&self) -> String {
         if self.app.is_empty() {
-            "ABRA".to_string()
+            "NOX".to_string()
         } else {
             self.app.clone()
         }
@@ -1165,7 +1165,7 @@ impl Bar {
                     a(808, &prefs::tr("Overview")).with_accel("Ctrl+↑"),
                     a(809, &prefs::tr("Apps")).with_accel("Ctrl+Shift+Space"),
                     Item::separator(),
-                    a(810, &prefs::tr("Pengaturan ABRA…")),
+                    a(810, &prefs::tr("Pengaturan NOX…")),
                     a(811, &prefs::tr("Pengaturan Sistem…")),
                 ]
             }
@@ -1175,7 +1175,7 @@ impl Bar {
                 a(101, &prefs::tr("Pengaturan Sistem…")),
                 a(102, &prefs::tr("Toko Microsoft…")),
                 Item::separator(),
-                a(103, &prefs::tr("Pengaturan ABRA…")),
+                a(103, &prefs::tr("Pengaturan NOX…")),
                 a(105, &prefs::tr("Apps")).with_accel("Ctrl+Shift+Space"),
                 a(106, &prefs::tr("Overview")).with_accel("Ctrl+↑"),
                 a(104, &prefs::tr("Paksa Keluar…")),
@@ -1358,7 +1358,7 @@ fn confirm_power(question: &'static str, file: &'static str, params: &'static st
     let text = prefs::tr(question).to_string();
     std::thread::spawn(move || unsafe {
         use windows::core::HSTRING;
-        let r = MessageBoxW(None, &HSTRING::from(text), w!("ABRA"), MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND);
+        let r = MessageBoxW(None, &HSTRING::from(text), w!("NOX"), MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND);
         if r == IDYES {
             launch::run(file, params);
         }

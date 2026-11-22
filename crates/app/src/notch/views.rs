@@ -128,28 +128,32 @@ pub struct Data<'a> {
     pub notif_toast: Option<NotifRow<'a>>,
     pub notif_list: Vec<NotifRow<'a>>,
     pub notif_unread: usize,
-    pub notif_scroll: usize,
+    pub notif_scroll: f32,
     pub notif_status: nacre_platform::notifications::Status,
     pub timer_running: bool,
     pub detached_timer: Option<(f32, f32, f32, f32)>,
     pub todos: Vec<&'a nacre_core::notch::todo::TodoItem>,
     pub todo_done: usize,
     pub todo_total: usize,
-    pub todo_scroll: usize,
+    pub todo_scroll: f32,
     pub todo_adding: bool,
     pub todo_editing: bool,
     pub todo_cal_mode: bool,
     pub todo_cal_adding: bool,
-    pub todo_cal_scroll: usize,
+    pub todo_cal_scroll: f32,
     pub todo_cal_err: &'a str,
     pub todo_status: nacre_platform::gtasks::SyncStatus,
     pub gemini_text: &'a str,
     pub gemini_streaming: bool,
     pub gemini_error: &'a str,
     pub gemini_has_key: bool,
-    pub gemini_scroll: usize,
+    pub gemini_scroll: f32,
+    pub gemini_auto_follow: bool,
     pub gemini_model_label: &'a str,
     pub gemini_copied: bool,
+    pub sb_hover: f32,
+    pub sb_active: f32,
+    pub sb_dragging: bool,
 }
 
 pub struct NotifRow<'a> {
@@ -359,6 +363,18 @@ impl DropZoneLive {
     }
 }
 
+pub struct CompactLyricLive {
+    pub viewport: ContainerVisual,
+    pub active: Option<ContainerVisual>,
+    pub ghost: Option<ContainerVisual>,
+    pub active_tw: f32,
+    pub active_marquee: bool,
+    pub vw: f32,
+    pub h: f32,
+    pub left_pad: f32,
+    pub right_pad: f32,
+}
+
 pub struct LyricsHostLive {
     pub host: ContainerVisual,
     pub x: f32,
@@ -374,6 +390,112 @@ pub struct GeminiRespHost {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+pub struct ScrollBarLive {
+    pub right_x: f32,
+    pub track_y: f32,
+    pub track_h: f32,
+    pub base_w: f32,
+    pub hover_w: f32,
+    pub hit_x: f32,
+    pub hit_w: f32,
+    pub thumb_h: f32,
+    pub thumb_y: f32,
+    pub track: SpriteVisual,
+    pub track_geo: CompositionRoundedRectangleGeometry,
+    pub track_brush: CompositionColorBrush,
+    pub thumb: SpriteVisual,
+    pub thumb_geo: CompositionRoundedRectangleGeometry,
+    pub thumb_brush: CompositionColorBrush,
+}
+
+impl ScrollBarLive {
+    pub fn hit_rail(&self, x: f32, y: f32) -> bool {
+        x >= self.hit_x && x <= self.hit_x + self.hit_w && y >= self.track_y - 4.0 && y <= self.track_y + self.track_h + 4.0
+    }
+
+    pub fn hit_thumb(&self, y: f32) -> bool {
+        y >= self.thumb_y - 4.0 && y <= self.thumb_y + self.thumb_h + 4.0
+    }
+
+    pub fn scroll_for_thumb_top(&self, thumb_top: f32, max_scroll: f32) -> f32 {
+        let travel = (self.track_h - self.thumb_h).max(1.0);
+        (((thumb_top - self.track_y) / travel).clamp(0.0, 1.0)) * max_scroll.max(0.0)
+    }
+}
+
+pub struct ScrollViewLive {
+    pub vx: f32,
+    pub vy: f32,
+    pub vw: f32,
+    pub vh: f32,
+    pub max_scroll: f32,
+    pub scroll_px: f32,
+    pub content: ContainerVisual,
+    pub bar: Option<ScrollBarLive>,
+    pub regions: Vec<Region>,
+}
+
+impl ScrollViewLive {
+    pub fn apply(&mut self, scroll_px: f32, hover_t: f32, dragging: bool, active_t: f32) {
+        let s = scroll_px.clamp(0.0, self.max_scroll);
+        self.scroll_px = s;
+        let _ = self.content.SetOffset(Vector3 { X: 0.0, Y: -s, Z: 0.0 });
+        if let Some(bar) = self.bar.as_mut() {
+            let ht = if dragging { 1.0 } else { hover_t.clamp(0.0, 1.0) };
+            let at = active_t.clamp(0.0, 1.0).max(ht);
+            let bw = bar.base_w + (bar.hover_w - bar.base_w) * ht;
+            let bx = bar.right_x - bw;
+            let r = bw / 2.0;
+
+            let _ = bar.track.SetSize(Vector2 { X: bw, Y: bar.track_h });
+            let _ = bar.track.SetOffset(Vector3 { X: bx, Y: bar.track_y, Z: 0.0 });
+            let _ = bar.track_geo.SetSize(Vector2 { X: bw, Y: bar.track_h });
+            let _ = bar.track_geo.SetCornerRadius(Vector2 { X: r, Y: r });
+            let tr_a = (14.0 + 22.0 * ht + 10.0 * at).round().clamp(0.0, 255.0) as u8;
+            let _ = bar.track_brush.SetColor(white(tr_a));
+
+            let frac = if self.max_scroll > 0.01 { (s / self.max_scroll).clamp(0.0, 1.0) } else { 0.0 };
+            bar.thumb_y = bar.track_y + (bar.track_h - bar.thumb_h) * frac;
+            let _ = bar.thumb.SetSize(Vector2 { X: bw, Y: bar.thumb_h });
+            let _ = bar.thumb.SetOffset(Vector3 { X: bx, Y: bar.thumb_y, Z: 0.0 });
+            let _ = bar.thumb_geo.SetSize(Vector2 { X: bw, Y: bar.thumb_h });
+            let _ = bar.thumb_geo.SetCornerRadius(Vector2 { X: r, Y: r });
+            let th_a = if dragging {
+                244u8
+            } else {
+                (84.0 + 58.0 * at + 52.0 * ht).round().clamp(0.0, 240.0) as u8
+            };
+            let _ = bar.thumb_brush.SetColor(white(th_a));
+        }
+    }
+
+    pub fn hit_viewport(&self, x: f32, y: f32) -> bool {
+        x >= self.vx && x < self.vx + self.vw && y >= self.vy && y < self.vy + self.vh
+    }
+
+    pub fn hit_region(&self, x: f32, y: f32) -> Option<Action> {
+        if !self.hit_viewport(x, y) || self.bar.as_ref().is_some_and(|b| b.hit_rail(x, y)) {
+            return None;
+        }
+        let lx = x - self.vx;
+        let ly = y - self.vy + self.scroll_px;
+        self.regions.iter().find(|r| r.hit(lx, ly)).map(|r| r.action)
+    }
+
+    pub fn hit_hover_region(&self, x: f32, y: f32) -> Option<Action> {
+        if !self.hit_viewport(x, y) || self.bar.as_ref().is_some_and(|b| b.hit_rail(x, y)) {
+            return None;
+        }
+        let lx = x - self.vx;
+        let ly = y - self.vy + self.scroll_px;
+        self.regions.iter().find(|r| r.vis.is_some() && r.hit(lx, ly)).map(|r| r.action)
+    }
+
+    pub fn find_region(&self, act: Action) -> Option<&Region> {
+        self.regions.iter().find(|r| r.action == act)
+    }
 }
 
 pub struct NavLive {
@@ -452,9 +574,8 @@ pub struct Live {
     pub todo_input_box: Option<(f32, f32, f32, f32)>,
     pub gemini_input_box: Option<(f32, f32, f32, f32)>,
     pub gemini_resp_host: Option<GeminiRespHost>,
-    pub lyric: Option<SpriteVisual>,
-    pub lyric_scroll: Option<ContainerVisual>,
-    pub lyric_shift: f32,
+    pub scroll: Option<ScrollViewLive>,
+    pub compact_lyric: Option<CompactLyricLive>,
     pub compact_left: Option<ContainerVisual>,
     pub compact_right: Option<ContainerVisual>,
     pub compact_glow: Option<SpriteVisual>,
@@ -466,14 +587,36 @@ pub struct Live {
 }
 
 const ORANGE: [u8; 3] = [255, 159, 10];
-const AMBER: [u8; 3] = [251, 191, 36]; // #FBBF24
-const INDIGO: [u8; 3] = [124, 102, 255]; // #7C66FF
-const VIOLET_GLOW: [u8; 3] = [139, 92, 246]; // #8B5CF6
-const CORAL: [u8; 3] = [240, 93, 78]; // #F05D4E
 const GREEN: [u8; 3] = [48, 209, 88];
 const BLUE: [u8; 3] = [10, 132, 255];
 const RED: [u8; 3] = [255, 59, 48];
 const CARD_DARK: Color = Color { A: 255, R: 20, G: 20, B: 22 }; // #141416
+
+const TRACK_PALETTE: [[u8; 3]; 8] = [
+    [240, 93, 78],  // Coral Red
+    [245, 158, 11], // Warm Amber
+    [52, 211, 153], // Emerald Mint
+    [56, 189, 248], // Sky Cyan
+    [99, 102, 241], // Indigo Blue
+    [168, 85, 247], // Electric Violet
+    [236, 72, 153], // Rose Magenta
+    [20, 184, 166], // Deep Teal
+];
+
+/// Gently lifts darker hues toward white so text/icons stay crisp on pure black OLED pills
+/// while preserving the exact color tone of the active Abra theme or Live-Lyrics album tint.
+fn lift_for_dark_pill(rgb: [u8; 3]) -> [u8; 3] {
+    let lum = 0.299 * rgb[0] as f32 + 0.587 * rgb[1] as f32 + 0.114 * rgb[2] as f32;
+    if lum >= 165.0 {
+        return rgb;
+    }
+    let mix = ((165.0 - lum) / 185.0).clamp(0.0, 0.48);
+    [
+        (rgb[0] as f32 + (255.0 - rgb[0] as f32) * mix).round() as u8,
+        (rgb[1] as f32 + (255.0 - rgb[1] as f32) * mix).round() as u8,
+        (rgb[2] as f32 + (255.0 - rgb[2] as f32) * mix).round() as u8,
+    ]
+}
 
 const DOTS_STRIP_DP: f32 = 22.0;
 const EDGE_PAD_DP: f32 = 18.0;
@@ -506,7 +649,7 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
             let bf = Frame { x0: f.x0, w: f.w, h: bh };
             match tab {
                 Tab::Play => play(p, c, bf, f.h, d, regions, live),
-                Tab::Alerts => alerts_tab(p, c, bf, d, regions),
+                Tab::Alerts => alerts_tab(p, c, bf, d, regions, live),
                 Tab::Shelf if d.send.is_some() => send_card(p, c, bf, d, regions),
                 Tab::Shelf if d.shelf.is_empty() => shelf_empty(p, c, bf),
                 Tab::Shelf => shelf_tab(p, c, bf, d, regions),
@@ -547,8 +690,13 @@ fn detached_timer_pill(
     let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
 
     let cy = th / 2.0;
-    let content_op = if d.timer.phase == Phase::Running { 1.0 } else { 0.80 };
-    p.sym(&wrap, Sym::Stopwatch, p.px(19.0), cy, 14.5, AMBER, content_op);
+    let base_rgb = d.media.as_ref().map(media_tint).unwrap_or_else(crate::prefs::accent);
+    let fg_rgb = lift_for_dark_pill(base_rgb);
+    if let Some(glow) = p.ambient_glow(&wrap, 0.0, 0.0, tw, th, 0.0, base_rgb, true) {
+        let _ = glow.SetOpacity(if d.timer.phase == Phase::Running { 0.85 } else { 0.45 });
+    }
+    let content_op = if d.timer.phase == Phase::Running { 1.0 } else { 0.78 };
+    p.sym(&wrap, Sym::Stopwatch, p.px(19.0), cy, 14.5, fg_rgb, content_op);
     let txt = format_mmss(d.timer.remaining_secs(d.now_ms));
     let txt_h = p.px(13.5) * 1.28;
     p.text(
@@ -558,7 +706,7 @@ fn detached_timer_pill(
         cy - txt_h / 2.0,
         13.5,
         700,
-        AMBER,
+        fg_rgb,
         content_op,
         Anchor::Right,
         (tw - p.px(30.0)).max(p.px(24.0)),
@@ -783,7 +931,7 @@ fn bottom_nav(p: &mut Painter, c: &ContainerVisual, bf: Frame, cur_h: f32, cur: 
             let icx = x + slot_w / 2.0;
             let n0 = kids(&pill_group);
             let (rgb, op) = match tab_opt {
-                Some(Tab::Timer) if d.timer_running => (ORANGE, 1.0),
+                Some(Tab::Timer) if d.timer_running => (lift_for_dark_pill(accent), 1.0),
                 Some(_) if on => (accent, 1.0),
                 _ => (WHITE, 0.56),
             };
@@ -882,7 +1030,109 @@ fn compact_notification(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data
     regions.push(Region { x: f.x0, y: 0.0, w: dx - p.px(12.0) - f.x0, h: f.h, action: Action::NotifFocus(n.id), vis: None, hover_bg: None });
 }
 
-fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
+fn create_scroll_viewport(
+    p: &Painter,
+    parent: &ContainerVisual,
+    vx: f32,
+    vy: f32,
+    vw: f32,
+    vh: f32,
+) -> windows_core::Result<ContainerVisual> {
+    let vp = p.comp.CreateContainerVisual()?;
+    vp.SetOffset(Vector3 { X: vx.round(), Y: vy.round(), Z: 0.0 })?;
+    vp.SetSize(Vector2 { X: vw.ceil(), Y: vh.ceil() })?;
+    vp.SetClip(&p.comp.CreateInsetClip()?)?;
+    parent.Children()?.InsertAtTop(&vp)?;
+    let content = p.comp.CreateContainerVisual()?;
+    content.SetSize(Vector2 { X: vw.ceil(), Y: vh.ceil() })?;
+    vp.Children()?.InsertAtTop(&content)?;
+    Ok(content)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_scroll_view(
+    p: &Painter,
+    parent: &ContainerVisual,
+    vx: f32,
+    vy: f32,
+    vw: f32,
+    vh: f32,
+    content: ContainerVisual,
+    content_h: f32,
+    sb_right_x: f32,
+    sb_top_y: f32,
+    sb_h: f32,
+    scroll_px: f32,
+    hover_t: f32,
+    dragging: bool,
+    active_t: f32,
+    regions: Vec<Region>,
+) -> ScrollViewLive {
+    let max_scroll = (content_h - vh).max(0.0);
+    let bar = if max_scroll > 1.0 && sb_h > p.px(14.0) {
+        let build = || -> windows_core::Result<ScrollBarLive> {
+            let track_geo = p.comp.CreateRoundedRectangleGeometry()?;
+            let track_clip = p.comp.CreateGeometricClip()?;
+            track_clip.SetGeometry(&track_geo)?;
+            let track_brush = p.comp.CreateColorBrushWithColor(white(14))?;
+            let track = p.comp.CreateSpriteVisual()?;
+            track.SetBrush(&track_brush)?;
+            track.SetClip(&track_clip)?;
+            parent.Children()?.InsertAtTop(&track)?;
+
+            let thumb_geo = p.comp.CreateRoundedRectangleGeometry()?;
+            let thumb_clip = p.comp.CreateGeometricClip()?;
+            thumb_clip.SetGeometry(&thumb_geo)?;
+            let thumb_brush = p.comp.CreateColorBrushWithColor(white(84))?;
+            let thumb = p.comp.CreateSpriteVisual()?;
+            thumb.SetBrush(&thumb_brush)?;
+            thumb.SetClip(&thumb_clip)?;
+            parent.Children()?.InsertAtTop(&thumb)?;
+
+            let base_w = p.px(3.0).max(2.0);
+            let hover_w = p.px(5.5).max(4.0);
+            let hit_w = p.px(14.0);
+            let hit_x = sb_right_x - hit_w + p.px(2.5);
+            let thumb_h = ((vh / content_h.max(1.0)) * sb_h).clamp(p.px(18.0), sb_h);
+
+            Ok(ScrollBarLive {
+                right_x: sb_right_x,
+                track_y: sb_top_y,
+                track_h: sb_h,
+                base_w,
+                hover_w,
+                hit_x,
+                hit_w,
+                thumb_h,
+                thumb_y: sb_top_y,
+                track,
+                track_geo,
+                track_brush,
+                thumb,
+                thumb_geo,
+                thumb_brush,
+            })
+        };
+        build().ok()
+    } else {
+        None
+    };
+    let mut sv = ScrollViewLive {
+        vx,
+        vy,
+        vw,
+        vh,
+        max_scroll,
+        scroll_px: 0.0,
+        content,
+        bar,
+        regions,
+    };
+    sv.apply(scroll_px, hover_t, dragging, active_t);
+    sv
+}
+
+fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
     use nacre_platform::notifications::Status;
     let pad = p.px(EDGE_PAD_DP);
     let top = p.px(12.0);
@@ -898,7 +1148,7 @@ fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
         p.sym(c, Sym::Bell, cx, cy - p.px(18.0), 20.0, WHITE, 0.34);
         p.text(c, tr("Belum ada notifikasi"), cx, cy + p.px(4.0), 12.5, 600, WHITE, 0.88, Anchor::Center, w - p.px(8.0));
         let sub = match d.notif_status {
-            Status::Denied => tr("Aktifkan izin notifikasi untuk ABRA di Pengaturan Privasi Windows."),
+            Status::Denied => tr("Aktifkan izin notifikasi untuk NOX di Pengaturan Privasi Windows."),
             Status::Unsupported => tr("Listener notifikasi tidak tersedia pada sesi Windows ini."),
             _ => tr("Notifikasi baru dari aplikasi Windows akan muncul di sini."),
         };
@@ -917,25 +1167,34 @@ fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
     let row_h = p.px(38.0);
     let gap = p.px(4.0);
     let list_top = top + p.px(26.0);
-    let max_rows = ((bot - list_top) / (row_h + gap)).floor().max(1.0) as usize;
-    let start = d.notif_scroll.min(d.notif_list.len().saturating_sub(1));
+    let list_h = (bot - list_top).max(row_h);
+    let n_items = d.notif_list.len();
+    let content_h = if n_items == 0 {
+        0.0
+    } else {
+        n_items as f32 * row_h + (n_items.saturating_sub(1)) as f32 * gap + p.px(2.0)
+    };
+    let will_scroll = content_h > list_h + 1.0;
+    let row_w = if will_scroll { w - p.px(9.0) } else { w };
+    let Ok(sc) = create_scroll_viewport(p, c, x0, list_top, w, list_h) else { return };
+    let mut sc_regions = Vec::new();
     let isz = p.px(22.0);
-    for (idx, n) in d.notif_list.iter().skip(start).take(max_rows).enumerate() {
-        let ry = list_top + idx as f32 * (row_h + gap);
-        let n0 = kids(c);
-        p.rect(c, x0, ry, w, row_h, p.px(11.0), white(if n.unread { 18 } else { 9 }));
-        let ix = x0 + p.px(9.0);
+    for (idx, n) in d.notif_list.iter().enumerate() {
+        let ry = idx as f32 * (row_h + gap);
+        let n0 = kids(&sc);
+        p.rect(&sc, 0.0, ry, row_w, row_h, p.px(11.0), white(if n.unread { 18 } else { 9 }));
+        let ix = p.px(9.0);
         let icy = ry + row_h / 2.0;
         match n.icon {
             Some(s) => {
-                p.image(c, s, ix, icy - isz / 2.0, isz, isz, p.px(5.5));
+                p.image(&sc, s, ix, icy - isz / 2.0, isz, isz, p.px(5.5));
             }
             None => {
-                p.rect(c, ix, icy - isz / 2.0, isz, isz, p.px(5.5), Color { A: 200, R: accent[0], G: accent[1], B: accent[2] });
-                p.sym(c, Sym::Bell, ix + isz / 2.0, icy, 11.0, WHITE, 0.95);
+                p.rect(&sc, ix, icy - isz / 2.0, isz, isz, p.px(5.5), Color { A: 200, R: accent[0], G: accent[1], B: accent[2] });
+                p.sym(&sc, Sym::Bell, ix + isz / 2.0, icy, 11.0, WHITE, 0.95);
             }
         }
-        let close_cx = x0 + w - p.px(14.0);
+        let close_cx = row_w - p.px(14.0);
         let time_x = close_cx - p.px(12.0);
         let tx = ix + isz + p.px(9.0);
         let tw = (time_x - p.px(32.0) - tx).max(p.px(40.0));
@@ -944,17 +1203,35 @@ fn alerts_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
         } else {
             format!("{} \u{00B7} {}", n.app_name, n.title)
         };
-        p.text(c, &p.fit(&head, 11.5, 600, tw), tx, ry + p.px(5.0), 11.5, 600, WHITE, 0.96, Anchor::Left, tw + p.px(2.0));
+        p.text(&sc, &p.fit(&head, 11.5, 600, tw), tx, ry + p.px(5.0), 11.5, 600, WHITE, 0.96, Anchor::Left, tw + p.px(2.0));
         if !n.body.is_empty() {
-            p.text(c, &p.fit(n.body, 10.5, 400, tw), tx, ry + p.px(20.0), 10.5, 400, WHITE, 0.56, Anchor::Left, tw + p.px(2.0));
+            p.text(&sc, &p.fit(n.body, 10.5, 400, tw), tx, ry + p.px(20.0), 10.5, 400, WHITE, 0.56, Anchor::Left, tw + p.px(2.0));
         }
-        p.text(c, &n.time, time_x, ry + p.px(6.0), 9.5, 500, WHITE, 0.44, Anchor::Right, p.px(36.0));
-        let row_vis = group_since(c, n0);
-        let c0 = kids(c);
-        p.sym(c, Sym::Close, close_cx, icy, 8.5, WHITE, 0.48);
-        regions.push(Region { x: close_cx - p.px(12.0), y: ry, w: p.px(24.0), h: row_h, action: Action::NotifDismiss(n.id), vis: group_since(c, c0), hover_bg: None });
-        regions.push(Region { x: x0, y: ry, w: close_cx - p.px(12.0) - x0, h: row_h, action: Action::NotifFocus(n.id), vis: row_vis, hover_bg: None });
+        p.text(&sc, &n.time, time_x, ry + p.px(6.0), 9.5, 500, WHITE, 0.44, Anchor::Right, p.px(36.0));
+        let row_vis = group_since(&sc, n0);
+        let c0 = kids(&sc);
+        p.sym(&sc, Sym::Close, close_cx, icy, 8.5, WHITE, 0.48);
+        sc_regions.push(Region { x: close_cx - p.px(12.0), y: ry, w: p.px(24.0), h: row_h, action: Action::NotifDismiss(n.id), vis: group_since(&sc, c0), hover_bg: None });
+        sc_regions.push(Region { x: 0.0, y: ry, w: close_cx - p.px(12.0), h: row_h, action: Action::NotifFocus(n.id), vis: row_vis, hover_bg: None });
     }
+    live.scroll = Some(finish_scroll_view(
+        p,
+        c,
+        x0,
+        list_top,
+        w,
+        list_h,
+        sc,
+        content_h,
+        x0 + w,
+        list_top + p.px(2.0),
+        (list_h - p.px(4.0)).max(p.px(14.0)),
+        d.notif_scroll,
+        d.sb_hover,
+        d.sb_dragging,
+        d.sb_active,
+        sc_regions,
+    ));
 }
 
 fn compact_shelf(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
@@ -1109,15 +1386,62 @@ fn shelf_empty(p: &mut Painter, c: &ContainerVisual, f: Frame) {
 
 fn compact_timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, urgent: bool) {
     let cy = f.h / 2.0;
-    let rgb = if urgent { ORANGE } else { WHITE };
-    p.sym(c, Sym::Stopwatch, f.x0 + p.px(20.0), cy, 15.0, rgb, 0.95);
+    let base_rgb = crate::prefs::accent();
+    let rgb = if urgent { lift_for_dark_pill(base_rgb) } else { WHITE };
+    if let Some(glow) = p.ambient_glow(c, f.x0, 0.0, f.w, f.h, 0.0, base_rgb, true) {
+        let _ = glow.SetOpacity(if urgent { 0.9 } else { 0.55 });
+    }
+    p.sym(c, Sym::Stopwatch, f.x0 + p.px(20.0), cy, 15.0, lift_for_dark_pill(base_rgb), 0.96);
     let t = format_mmss(d.timer.remaining_secs(d.now_ms));
     let th = p.px(13.0) * 1.3;
     p.text(c, &t, f.x0 + f.w - p.px(16.0), cy - th / 2.0, 13.0, 600, rgb, 1.0, Anchor::Right, f.w);
 }
 
-fn accent_or(t: Option<[u8; 3]>) -> [u8; 3] {
-    t.unwrap_or_else(crate::prefs::accent)
+/// Single source of truth for adaptive media color across Compact Live-Lyrics, Compact Music,
+/// Compact Player, Expanded Now Playing, and the adjacent Detached Timer Pill.
+/// Prefers extracted album art tint; falls back deterministically per track so every view always matches.
+fn media_tint(m: &MediaView) -> [u8; 3] {
+    if let Some(rgb) = m.tint {
+        return rgb;
+    }
+    if m.title.is_empty() && m.artist.is_empty() {
+        return crate::prefs::accent();
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in m.title.as_bytes().iter().chain(b"\x1f").chain(m.artist.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    TRACK_PALETTE[(h as usize) % TRACK_PALETTE.len()]
+}
+
+fn glide_scalar(
+    comp: &windows::UI::Composition::Compositor,
+    obj: &windows::UI::Composition::CompositionObject,
+    prop: &str,
+    from: f32,
+    to: f32,
+    ms: u32,
+    delay: u32,
+) {
+    use windows::Foundation::TimeSpan;
+    use windows::UI::Composition::{AnimationDelayBehavior, CompositionEasingFunction};
+    use windows_core::{Interface, HSTRING};
+    let go = || -> windows_core::Result<()> {
+        let ease: CompositionEasingFunction = comp
+            .CreateCubicBezierEasingFunction(Vector2 { X: 0.22, Y: 1.0 }, Vector2 { X: 0.36, Y: 1.0 })?
+            .cast()?;
+        let a = comp.CreateScalarKeyFrameAnimation()?;
+        a.InsertKeyFrame(0.0, from)?;
+        a.InsertKeyFrameWithEasingFunction(1.0, to, &ease)?;
+        a.SetDuration(TimeSpan { Duration: ms as i64 * 10_000 })?;
+        if delay > 0 {
+            a.SetDelayTime(TimeSpan { Duration: delay as i64 * 10_000 })?;
+            a.SetDelayBehavior(AnimationDelayBehavior::SetInitialValueBeforeDelay)?;
+        }
+        obj.StartAnimation(&HSTRING::from(prop), &a)
+    };
+    let _ = go();
 }
 
 fn current_line(d: &Data) -> String {
@@ -1127,43 +1451,137 @@ fn current_line(d: &Data) -> String {
     }
 }
 
-fn compact_lyrics(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live) {
-    compact_music(p, c, f, d, live, f.h, false);
-    let left = f.x0 + p.px(44.0);
-    let right = f.x0 + f.w - p.px(50.0);
-    let vw = (right - left).max(p.px(24.0));
-    let line = current_line(d);
-    let full_w = p.measure_dwrite(&line, 13.0, 600).max(p.measure(&line, 13.0, 600));
-    let cy = f.h / 2.0;
+fn build_compact_lyric_row(
+    p: &mut Painter,
+    vp: &ContainerVisual,
+    line: &str,
+    vw: f32,
+    h: f32,
+    animate_in: bool,
+) -> Option<(ContainerVisual, f32, bool, Option<MarqueeLive>)> {
+    use windows::UI::Composition::CompositionObject;
+    use windows_core::Interface;
+    let full_w = p.measure_dwrite(line, 13.0, 600).max(p.measure(line, 13.0, 600));
+    let cy = h / 2.0;
+    let is_marquee = full_w > vw + p.px(2.0);
+    let max_w = if is_marquee { full_w + p.px(12.0) } else { vw + p.px(6.0) };
+    let (surf, tw, th) = p.render_text_surface(line, 13.0, 600, WHITE, max_w)?;
+    let tw_f = tw as f32;
+    let th_f = th as f32;
+    let ty = (cy - th_f / 2.0).round();
 
-    if full_w <= vw + p.px(2.0) {
-        if let Some((surf, tw, th)) = p.render_text_surface(&line, 13.0, 600, WHITE, vw + p.px(6.0)) {
-            let x = ((left + right - tw as f32) / 2.0).round();
-            let y = (cy - th as f32 / 2.0).round();
-            live.lyric = p.place(c, &surf, x, y, tw as f32, th as f32, 1.0);
-        }
-    } else if let (Ok(vp), Ok(cl)) = (p.comp.CreateContainerVisual(), p.comp.CreateInsetClip()) {
-        let _ = vp.SetOffset(Vector3 { X: left.round(), Y: 0.0, Z: 0.0 });
-        let _ = vp.SetSize(Vector2 { X: vw.ceil(), Y: f.h });
-        let _ = vp.SetClip(&cl);
-        let _ = c.Children().and_then(|k| k.InsertAtTop(&vp));
-        if let Some((surf, tw, th)) = p.render_text_surface(&line, 13.0, 600, WHITE, full_w + p.px(12.0)) {
-            let ty = (cy - th as f32 / 2.0).round();
-            let travel = (tw as f32 - vw).max(0.0);
-            if let Some(v) = p.place(&vp, &surf, 0.0, ty, tw as f32, th as f32, 1.0) {
-                live.lyric = Some(v.clone());
-                if travel > 2.0 {
-                    live.marquee = Some(MarqueeLive { vis: v, travel, base_y: ty });
-                }
+    let outer = p.comp.CreateContainerVisual().ok()?;
+    let x_init = if is_marquee { 0.0 } else { ((vw - tw_f) / 2.0).max(0.0) };
+    let _ = outer.SetOffset(Vector3 { X: x_init, Y: 0.0, Z: 0.0 });
+    let _ = vp.Children().and_then(|k| k.InsertAtTop(&outer));
+
+    let inner = p.comp.CreateContainerVisual().ok()?;
+    let _ = inner.SetCenterPoint(Vector3 { X: (tw_f / 2.0).min(vw / 2.0), Y: cy, Z: 0.0 });
+    let _ = outer.Children().and_then(|k| k.InsertAtTop(&inner));
+
+    let mut mq = None;
+    if let Some(v) = p.place(&inner, &surf, 0.0, ty, tw_f, th_f, 1.0) {
+        if is_marquee {
+            let travel = (tw_f - vw).max(0.0);
+            if travel > 2.0 {
+                mq = Some(MarqueeLive { vis: v, travel, base_y: ty });
             }
         }
     }
+    if animate_in {
+        if let Ok(o) = inner.cast::<CompositionObject>() {
+            let rise = p.px(11.0);
+            glide_scalar(&p.comp, &o, "Offset.Y", rise, 0.0, 360, 45);
+            glide_scalar(&p.comp, &o, "Opacity", 0.0, 1.0, 300, 45);
+            glide_scalar(&p.comp, &o, "Scale.X", 0.94, 1.0, 360, 45);
+            glide_scalar(&p.comp, &o, "Scale.Y", 0.94, 1.0, 360, 45);
+        }
+    }
+    Some((outer, tw_f, is_marquee, mq))
+}
+
+fn compact_lyrics(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live) {
+    compact_music(p, c, f, d, live, f.h, false);
+    let left_pad = p.px(44.0);
+    let right_pad = p.px(50.0);
+    let vw = (f.w - left_pad - right_pad).max(p.px(24.0));
+    let Ok(vp) = p.comp.CreateContainerVisual() else { return };
+    let _ = vp.SetOffset(Vector3 { X: f.x0 + left_pad, Y: 0.0, Z: 0.0 });
+    let _ = vp.SetSize(Vector2 { X: vw, Y: f.h });
+    if let Ok(cl) = p.comp.CreateInsetClip() {
+        let _ = vp.SetClip(&cl);
+    }
+    let _ = c.Children().and_then(|k| k.InsertAtTop(&vp));
+
+    let line = current_line(d);
+    let mut active = None;
+    let mut active_tw = 0.0;
+    let mut active_marquee = false;
+    if let Some((row, tw, is_mq, mq)) = build_compact_lyric_row(p, &vp, &line, vw, f.h, false) {
+        active = Some(row);
+        active_tw = tw;
+        active_marquee = is_mq;
+        live.marquee = mq;
+    }
+    live.compact_lyric = Some(CompactLyricLive {
+        viewport: vp,
+        active,
+        ghost: None,
+        active_tw,
+        active_marquee,
+        vw,
+        h: f.h,
+        left_pad,
+        right_pad,
+    });
+}
+
+pub fn swap_compact_lyric(p: &mut Painter, live: &mut Live, line: &str, target_w: f32) -> bool {
+    use windows::UI::Composition::CompositionObject;
+    use windows_core::Interface;
+    let Some(cl) = live.compact_lyric.as_mut() else {
+        return false;
+    };
+    let vp = cl.viewport.clone();
+    let target_vw = (target_w - cl.left_pad - cl.right_pad).max(p.px(24.0));
+    let h = cl.h;
+
+    // Retire previous ghost cleanly.
+    if let Some(old_ghost) = cl.ghost.take() {
+        let _ = vp.Children().and_then(|k| k.Remove(&old_ghost));
+    }
+    // Smoothly float outgoing lyric up, scale slightly down, and dissolve.
+    if let Some(prev) = cl.active.take() {
+        if let Ok(o) = prev.cast::<CompositionObject>() {
+            let cy = h / 2.0;
+            let _ = prev.SetCenterPoint(Vector3 { X: (cl.active_tw / 2.0).min(cl.vw / 2.0), Y: cy, Z: 0.0 });
+            let rise = p.px(11.0);
+            glide_scalar(&p.comp, &o, "Offset.Y", 0.0, -rise, 270, 0);
+            glide_scalar(&p.comp, &o, "Opacity", 1.0, 0.0, 230, 0);
+            glide_scalar(&p.comp, &o, "Scale.X", 1.0, 0.94, 270, 0);
+            glide_scalar(&p.comp, &o, "Scale.Y", 1.0, 0.94, 270, 0);
+        }
+        cl.ghost = Some(prev);
+    }
+
+    live.marquee = None;
+    if let Some((row, tw, is_mq, mq)) = build_compact_lyric_row(p, &vp, line, target_vw, h, true) {
+        if !is_mq {
+            let _ = row.SetOffset(Vector3 { X: ((cl.vw - tw) / 2.0).max(0.0), Y: 0.0, Z: 0.0 });
+        }
+        cl.active = Some(row);
+        cl.active_tw = tw;
+        cl.active_marquee = is_mq;
+        live.marquee = mq;
+    }
+    true
 }
 
 fn compact_player(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
     let Some(m) = &d.media else { return };
-    let glow = accent_or(m.tint);
-    p.ambient_glow(c, f.x0, 0.0, f.w, f.h, 0.0, glow, false);
+    let glow = media_tint(m);
+    let inset = p.px(14.0);
+    p.ambient_glow(c, f.x0 + inset, 0.0, (f.w - 2.0 * inset).max(p.px(40.0)), (f.h - inset).max(p.px(32.0)), 0.0, glow, false);
     let a = p.px(52.0);
     let (ax, ay) = (f.x0 + p.px(22.0), p.px(10.0));
     match m.art {
@@ -1201,7 +1619,7 @@ fn compact_player(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regi
 fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live, row_h: f32, show_marquee: bool) {
     let Some(m) = &d.media else { return };
     let is_lyrics = !show_marquee;
-    let rgb = m.tint.unwrap_or(if is_lyrics { CORAL } else { crate::prefs::accent() });
+    let rgb = media_tint(m);
     live.compact_glow = p.ambient_glow(c, f.x0, 0.0, f.w, row_h, 0.0, rgb, true);
 
     let cy = row_h / 2.0;
@@ -1798,25 +2216,51 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
             Events::List(list) => {
                 let row_h = p.px(25.0);
                 let gap = p.px(2.0);
-                let max_rows = ((card_y + card_h - p.px(6.0) - list_top) / (row_h + gap)).floor().max(1.0) as usize;
-                let start = d.todo_cal_scroll.min(list.len().saturating_sub(1));
-                let dot = p.px(5.0);
-                let tth = p.px(11.5) * 1.3;
-                for (idx, ev) in list.iter().enumerate().skip(start).take(max_rows) {
-                    let vis_idx = idx - start;
-                    let ry = list_top + vis_idx as f32 * (row_h + gap);
-                    let cy = ry + row_h / 2.0;
-                    p.rect(c, rx + p.px(11.0), cy - dot / 2.0, dot, dot, dot / 2.0, Color { A: 245, R: BLUE[0], G: BLUE[1], B: BLUE[2] });
-                    let when = match ev.minute {
-                        Some(m) if crate::prefs::get().clock_24h => format!("{:02}:{:02}", m / 60, m % 60),
-                        Some(m) => format!("{}:{:02}{}", (m / 60 + 11) % 12 + 1, m % 60, if m < 720 { "a" } else { "p" }),
-                        None => tr("Sepanjang hari").to_string(),
-                    };
-                    let time_x = rx + p.px(22.0);
-                    let time_w = p.text(c, &when, time_x, cy - tth / 2.0, 10.5, 600, BLUE, 0.95, Anchor::Left, p.px(56.0));
-                    let tx = time_x + time_w + p.px(7.0);
-                    let tw = (rx + rw - p.px(10.0) - tx).max(p.px(40.0));
-                    p.text(c, &p.fit(&ev.title, 11.5, 500, tw), tx, cy - tth / 2.0, 11.5, 500, WHITE, 0.94, Anchor::Left, tw + p.px(2.0));
+                let list_h = (card_y + card_h - p.px(6.0) - list_top).max(row_h);
+                let n_items = list.len();
+                let content_h = if n_items == 0 {
+                    0.0
+                } else {
+                    n_items as f32 * row_h + (n_items.saturating_sub(1)) as f32 * gap + p.px(4.0)
+                };
+                let will_scroll = content_h > list_h + 1.0;
+                let right_pad = if will_scroll { p.px(16.0) } else { p.px(10.0) };
+                if let Ok(sc) = create_scroll_viewport(p, c, rx, list_top, rw, list_h) {
+                    let dot = p.px(5.0);
+                    let tth = p.px(11.5) * 1.3;
+                    for (idx, ev) in list.iter().enumerate() {
+                        let ry = idx as f32 * (row_h + gap);
+                        let cy = ry + row_h / 2.0;
+                        p.rect(&sc, p.px(11.0), cy - dot / 2.0, dot, dot, dot / 2.0, Color { A: 245, R: BLUE[0], G: BLUE[1], B: BLUE[2] });
+                        let when = match ev.minute {
+                            Some(m) if crate::prefs::get().clock_24h => format!("{:02}:{:02}", m / 60, m % 60),
+                            Some(m) => format!("{}:{:02}{}", (m / 60 + 11) % 12 + 1, m % 60, if m < 720 { "a" } else { "p" }),
+                            None => tr("Sepanjang hari").to_string(),
+                        };
+                        let time_x = p.px(22.0);
+                        let time_w = p.text(&sc, &when, time_x, cy - tth / 2.0, 10.5, 600, BLUE, 0.95, Anchor::Left, p.px(56.0));
+                        let tx = time_x + time_w + p.px(7.0);
+                        let tw = (rw - right_pad - tx).max(p.px(40.0));
+                        p.text(&sc, &p.fit(&ev.title, 11.5, 500, tw), tx, cy - tth / 2.0, 11.5, 500, WHITE, 0.94, Anchor::Left, tw + p.px(2.0));
+                    }
+                    live.scroll = Some(finish_scroll_view(
+                        p,
+                        c,
+                        rx,
+                        list_top,
+                        rw,
+                        list_h,
+                        sc,
+                        content_h,
+                        rx + rw - p.px(5.0),
+                        list_top + p.px(2.0),
+                        (list_h - p.px(4.0)).max(p.px(14.0)),
+                        d.todo_cal_scroll,
+                        d.sb_hover,
+                        d.sb_dragging,
+                        d.sb_active,
+                        Vec::new(),
+                    ));
                 }
             }
             _ => {}
@@ -1834,39 +2278,65 @@ fn todo_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &
 
     let row_h = p.px(26.0);
     let gap = p.px(2.0);
-    let max_rows = ((card_y + card_h - p.px(6.0) - list_top) / (row_h + gap)).floor().max(1.0) as usize;
-    let start = d.todo_scroll.min(d.todos.len().saturating_sub(1));
+    let list_h = (card_y + card_h - p.px(6.0) - list_top).max(row_h);
+    let n_items = d.todos.len();
+    let content_h = if n_items == 0 {
+        0.0
+    } else {
+        n_items as f32 * row_h + (n_items.saturating_sub(1)) as f32 * gap + p.px(4.0)
+    };
+    let will_scroll = content_h > list_h + 1.0;
+    let sb_pad = if will_scroll { p.px(10.0) } else { 0.0 };
+    let Ok(sc) = create_scroll_viewport(p, c, rx, list_top, rw, list_h) else { return };
+    let mut sc_regions = Vec::new();
     let chk = p.px(14.0);
-    for (idx, it) in d.todos.iter().enumerate().skip(start).take(max_rows) {
-        let vis_idx = idx - start;
-        let ry = list_top + vis_idx as f32 * (row_h + gap);
-        let n0 = kids(c);
-        let cx = rx + p.px(17.0);
+    for (idx, it) in d.todos.iter().enumerate() {
+        let ry = idx as f32 * (row_h + gap);
+        let n0 = kids(&sc);
+        let cx = p.px(17.0);
         let cy = ry + row_h / 2.0;
         if it.completed {
-            p.rect(c, cx - chk / 2.0, cy - chk / 2.0, chk, chk, chk / 2.0, Color { A: 245, R: GREEN[0], G: GREEN[1], B: GREEN[2] });
-            p.sym(c, Sym::Check, cx, cy, 9.0, WHITE, 1.0);
+            p.rect(&sc, cx - chk / 2.0, cy - chk / 2.0, chk, chk, chk / 2.0, Color { A: 245, R: GREEN[0], G: GREEN[1], B: GREEN[2] });
+            p.sym(&sc, Sym::Check, cx, cy, 9.0, WHITE, 1.0);
         } else {
-            p.rect(c, cx - chk / 2.0, cy - chk / 2.0, chk, chk, chk / 2.0, white(115));
+            p.rect(&sc, cx - chk / 2.0, cy - chk / 2.0, chk, chk, chk / 2.0, white(115));
             let inner = chk - p.px(2.6);
-            p.rect(c, cx - inner / 2.0, cy - inner / 2.0, inner, inner, inner / 2.0, CARD_DARK);
+            p.rect(&sc, cx - inner / 2.0, cy - inner / 2.0, inner, inner, inner / 2.0, CARD_DARK);
         }
-        let del_cx = rx + rw - p.px(14.0);
-        let right_edge = if d.todo_editing { del_cx - p.px(12.0) } else { rx + rw - p.px(10.0) };
+        let del_cx = rw - p.px(14.0) - sb_pad;
+        let right_edge = if d.todo_editing { del_cx - p.px(12.0) } else { rw - p.px(10.0) - sb_pad };
         let tx = cx + chk / 2.0 + p.px(9.0);
         let tw = (right_edge - tx).max(p.px(36.0));
         let tth = p.px(12.0) * 1.3;
-        p.text(c, &p.fit(&it.title, 12.0, if it.completed { 400 } else { 500 }, tw), tx, cy - tth / 2.0, 12.0, if it.completed { 400 } else { 500 }, WHITE, if it.completed { 0.38 } else { 0.96 }, Anchor::Left, tw + p.px(2.0));
-        let row_vis = group_since(c, n0);
+        p.text(&sc, &p.fit(&it.title, 12.0, if it.completed { 400 } else { 500 }, tw), tx, cy - tth / 2.0, 12.0, if it.completed { 400 } else { 500 }, WHITE, if it.completed { 0.38 } else { 0.96 }, Anchor::Left, tw + p.px(2.0));
+        let row_vis = group_since(&sc, n0);
         if d.todo_editing {
-            let d0 = kids(c);
-            p.sym(c, Sym::Close, del_cx, cy, 8.5, RED, 0.85);
-            regions.push(Region { x: del_cx - p.px(12.0), y: ry, w: p.px(24.0), h: row_h, action: Action::TodoDelete(idx), vis: group_since(c, d0), hover_bg: None });
-            regions.push(Region { x: rx, y: ry, w: del_cx - p.px(12.0) - rx, h: row_h, action: Action::TodoToggle(idx), vis: row_vis, hover_bg: None });
+            let d0 = kids(&sc);
+            p.sym(&sc, Sym::Close, del_cx, cy, 8.5, RED, 0.85);
+            sc_regions.push(Region { x: del_cx - p.px(12.0), y: ry, w: p.px(24.0), h: row_h, action: Action::TodoDelete(idx), vis: group_since(&sc, d0), hover_bg: None });
+            sc_regions.push(Region { x: 0.0, y: ry, w: del_cx - p.px(12.0), h: row_h, action: Action::TodoToggle(idx), vis: row_vis, hover_bg: None });
         } else {
-            regions.push(Region { x: rx, y: ry, w: rw, h: row_h, action: Action::TodoToggle(idx), vis: row_vis, hover_bg: None });
+            sc_regions.push(Region { x: 0.0, y: ry, w: rw - sb_pad, h: row_h, action: Action::TodoToggle(idx), vis: row_vis, hover_bg: None });
         }
     }
+    live.scroll = Some(finish_scroll_view(
+        p,
+        c,
+        rx,
+        list_top,
+        rw,
+        list_h,
+        sc,
+        content_h,
+        rx + rw - p.px(5.0),
+        list_top + p.px(2.0),
+        (list_h - p.px(4.0)).max(p.px(14.0)),
+        d.todo_scroll,
+        d.sb_hover,
+        d.sb_dragging,
+        d.sb_active,
+        sc_regions,
+    ));
 }
 
 fn gemini_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
@@ -1919,7 +2389,23 @@ fn gemini_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
     let rh = (bot - ry).max(p.px(40.0));
     if let Ok(host) = p.comp.CreateContainerVisual() {
         let _ = c.Children().and_then(|k| k.InsertAtTop(&host));
-        draw_gemini_response(p, &host, rx, ry, rw, rh, d.gemini_text, d.gemini_error, d.gemini_has_key, d.gemini_streaming, d.gemini_scroll);
+        live.scroll = draw_gemini_response(
+            p,
+            &host,
+            rx,
+            ry,
+            rw,
+            rh,
+            d.gemini_text,
+            d.gemini_error,
+            d.gemini_has_key,
+            d.gemini_streaming,
+            d.gemini_auto_follow,
+            d.gemini_scroll,
+            d.sb_hover,
+            d.sb_dragging,
+            d.sb_active,
+        );
         live.gemini_resp_host = Some(GeminiRespHost { host, x: rx, y: ry, w: rw, h: rh });
     }
 }
@@ -1927,18 +2413,42 @@ fn gemini_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions:
 #[allow(clippy::too_many_arguments)]
 pub fn refresh_gemini_response(
     p: &mut Painter,
-    live: &Live,
+    live: &mut Live,
     text: &str,
     error: &str,
     has_key: bool,
     streaming: bool,
-    scroll: usize,
-) {
-    let Some(h) = live.gemini_resp_host.as_ref() else { return };
-    if let Ok(k) = h.host.Children() {
+    auto_follow: bool,
+    scroll_px: f32,
+    sb_hover: f32,
+    sb_dragging: bool,
+    sb_active: f32,
+) -> f32 {
+    let Some(h) = live.gemini_resp_host.as_ref() else {
+        return 0.0;
+    };
+    let (host, x, y, w, hh) = (h.host.clone(), h.x, h.y, h.w, h.h);
+    if let Ok(k) = host.Children() {
         let _ = k.RemoveAll();
     }
-    draw_gemini_response(p, &h.host, h.x, h.y, h.w, h.h, text, error, has_key, streaming, scroll);
+    live.scroll = draw_gemini_response(
+        p,
+        &host,
+        x,
+        y,
+        w,
+        hh,
+        text,
+        error,
+        has_key,
+        streaming,
+        auto_follow,
+        scroll_px,
+        sb_hover,
+        sb_dragging,
+        sb_active,
+    );
+    live.scroll.as_ref().map_or(0.0, |s| s.max_scroll)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1953,72 +2463,96 @@ fn draw_gemini_response(
     error: &str,
     has_key: bool,
     streaming: bool,
-    scroll: usize,
-) {
-    if !error.is_empty() {
-        let font = 11.5;
-        let line_h = p.px(font) * 1.38;
-        let max_lines = (h / line_h).floor().max(1.0) as usize;
-        let lines = nacre_core::notch::typeset::wrap(error, w - p.px(4.0), max_lines, |s| p.measure(s, font, 500));
-        let mut yy = y + p.px(4.0);
-        for line in lines.iter().take(max_lines) {
-            p.text(c, line, x, yy, font, 500, [255, 110, 100], 0.95, Anchor::Left, w + p.px(4.0));
-            yy += line_h;
-        }
-        return;
-    }
-    if text.is_empty() {
+    auto_follow: bool,
+    scroll_px: f32,
+    sb_hover: f32,
+    sb_dragging: bool,
+    sb_active: f32,
+) -> Option<ScrollViewLive> {
+    let font = 11.5;
+    let line_h = p.px(font) * 1.38;
+    let wrap_w = (w - p.px(12.0)).max(p.px(40.0));
+
+    let (src, weight, rgb, op, follow) = if !error.is_empty() {
+        (error, 500, [255, 110, 100], 0.95, false)
+    } else if !text.is_empty() {
+        (text, 400, WHITE, 0.92, streaming && auto_follow)
+    } else {
         let msg = if streaming {
             tr("Berpikir…")
         } else if !has_key {
-            tr("Atur Gemini API Key di Pengaturan → Visor untuk mulai bertanya.")
+            tr("Atur Gemini API Key di Pengaturan → Integrasi untuk mulai bertanya.")
         } else {
             tr("Ketik pertanyaan dan tekan Enter.")
         };
         p.text(c, &p.fit(msg, 11.5, 400, w), x + w / 2.0, y + h / 2.0 - p.px(8.0), 11.5, 400, WHITE, 0.45, Anchor::Center, w + p.px(2.0));
-        return;
-    }
-    let font = 11.5;
-    let line_h = p.px(font) * 1.38;
+        return None;
+    };
+
     let mut wrapped: Vec<String> = Vec::new();
-    for para in text.lines() {
+    for para in src.lines() {
         let t = para.trim_end();
         if t.is_empty() {
             wrapped.push(String::new());
             continue;
         }
-        for line in nacre_core::notch::typeset::wrap(t, w - p.px(4.0), 40, |s| p.measure(s, font, 400)) {
+        for line in nacre_core::notch::typeset::wrap(t, wrap_w, 120, |s| p.measure(s, font, weight)) {
             wrapped.push(line);
+            if wrapped.len() >= 240 {
+                break;
+            }
+        }
+        if wrapped.len() >= 240 {
+            break;
         }
     }
-    let max_lines = (h / line_h).floor().max(1.0) as usize;
-    let start = if streaming {
-        wrapped.len().saturating_sub(max_lines)
-    } else {
-        scroll.min(wrapped.len().saturating_sub(max_lines))
-    };
-    let mut yy = y;
-    for line in wrapped.iter().skip(start).take(max_lines) {
+
+    let sc = create_scroll_viewport(p, c, x, y, w, h).ok()?;
+    let mut yy = 0.0;
+    for line in &wrapped {
         if !line.is_empty() {
-            p.text(c, line, x, yy, font, 400, WHITE, 0.92, Anchor::Left, w + p.px(4.0));
+            p.text(&sc, line, 0.0, yy, font, weight, rgb, op, Anchor::Left, wrap_w + p.px(4.0));
         }
         yy += line_h;
     }
+    let content_h = (yy + p.px(4.0)).max(h);
+    let max_scroll = (content_h - h).max(0.0);
+    let init_scroll = if follow { max_scroll } else { scroll_px.clamp(0.0, max_scroll) };
+    Some(finish_scroll_view(
+        p,
+        c,
+        x,
+        y,
+        w,
+        h,
+        sc,
+        content_h,
+        x + w,
+        y + p.px(2.0),
+        (h - p.px(4.0)).max(p.px(14.0)),
+        init_scroll,
+        sb_hover,
+        sb_dragging,
+        sb_active,
+        Vec::new(),
+    ))
 }
 
 fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
     let lp = d.lyrics_progress.clamp(0.0, 1.0);
     let show_lyrics_layer = d.lyrics_open || lp > 0.01;
 
-    // Contextual ambient glow: smoothly fades in/out in lockstep with `sp_lyrics`.
+    // Contextual adaptive media glow: always matches Compact Live-Lyrics color (`media_tint`)
+    // and stays inset 14 dp from outer walls/bottom so the silhouette perimeter remains pure #000000.
     let mut lyrics_glow = None;
-    if show_lyrics_layer {
-        if let Some(m) = &d.media {
-            let glow = accent_or(m.tint);
-            if let Some(gv) = p.ambient_glow(c, bf.x0, 0.0, bf.w, full_h, 0.0, glow, false) {
-                let _ = gv.SetOpacity(lp);
-                lyrics_glow = Some(gv);
-            }
+    if let Some(m) = &d.media {
+        let glow = media_tint(m);
+        let inset = p.px(14.0);
+        let gw = (bf.w - 2.0 * inset).max(p.px(40.0));
+        let gh = (full_h - inset).max(p.px(40.0));
+        if let Some(gv) = p.ambient_glow(c, bf.x0 + inset, 0.0, gw, gh, 0.0, glow, false) {
+            let _ = gv.SetOpacity(0.78 + 0.22 * lp);
+            lyrics_glow = Some(gv);
         }
     }
 
@@ -2047,11 +2581,15 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
                 None
             }
         };
-        // Gliding lyrics panel container: slides out from behind the music player (`-12 dp -> 0`) + opacity sync.
+        // Gliding lyrics panel container: smooth scale + slide + fade in lockstep with `sp_lyrics`.
         let mut lyrics_panel = None;
         if let Ok(panel) = p.comp.CreateContainerVisual() {
-            let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
-            let slide_x = -(1.0 - lp) * p.px(12.0);
+            let panel_t = ((lp - 0.08) / 0.92).clamp(0.0, 1.0);
+            let panel_op = panel_t * panel_t * (3.0 - 2.0 * panel_t);
+            let slide_x = -(1.0 - lp) * p.px(14.0);
+            let sc = 0.965 + 0.035 * panel_op;
+            let _ = panel.SetCenterPoint(Vector3 { X: div_x, Y: top + h / 2.0, Z: 0.0 });
+            let _ = panel.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
             let _ = panel.SetOpacity(panel_op);
             let _ = panel.SetOffset(Vector3 { X: slide_x, Y: 0.0, Z: 0.0 });
             let _ = c.Children().and_then(|k| k.InsertAtTop(&panel));
@@ -2097,7 +2635,7 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
                 left_group,
                 ctrl_groups,
                 lyrics_panel: None,
-                lyrics_glow: None,
+                lyrics_glow,
             });
         }
     }
@@ -2107,21 +2645,19 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
 fn lyrics_slot(p: &mut Painter, c: &ContainerVisual, x: f32, y: f32, w: f32, h: f32, d: &Data, live: &mut Live, compact_player: bool) {
     if let Ok(host) = p.comp.CreateContainerVisual() {
         let _ = c.Children().and_then(|k| k.InsertAtTop(&host));
-        lyrics_3line_stack(p, &host, x, y, w, h, d.media.is_some(), &d.lyrics, live, compact_player);
+        lyrics_3line_stack(p, &host, x, y, w, h, d.media.is_some(), &d.lyrics, compact_player, 0);
         live.lyrics_host = Some(LyricsHostLive { host, x, y, w, h, compact_player });
     }
 }
 
-pub fn refresh_lyrics_in_place(p: &mut Painter, live: &mut Live, has_media: bool, ly: &LyricsView) {
+pub fn refresh_lyrics_in_place(p: &mut Painter, live: &mut Live, has_media: bool, ly: &LyricsView, dir: i32) {
     let Some(h) = live.lyrics_host.as_ref() else { return };
     let host = h.host.clone();
     let (x, y, w, h_px, compact_player) = (h.x, h.y, h.w, h.h, h.compact_player);
     if let Ok(k) = host.Children() {
         let _ = k.RemoveAll();
     }
-    live.lyric_scroll = None;
-    live.lyric_shift = 0.0;
-    lyrics_3line_stack(p, &host, x, y, w, h_px, has_media, ly, live, compact_player);
+    lyrics_3line_stack(p, &host, x, y, w, h_px, has_media, ly, compact_player, dir);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2134,9 +2670,12 @@ fn lyrics_3line_stack(
     h: f32,
     has_media: bool,
     ly: &LyricsView,
-    live: &mut Live,
     compact_player: bool,
+    dir: i32,
 ) {
+    use windows::UI::Composition::CompositionObject;
+    use windows_core::Interface;
+
     let rx = x.round();
     let ry = y.round();
     let rw = w.ceil();
@@ -2154,18 +2693,15 @@ fn lyrics_3line_stack(
         return;
     };
 
-    let go = || -> windows_core::Result<(ContainerVisual, ContainerVisual)> {
+    let go = || -> windows_core::Result<ContainerVisual> {
         let frame = p.comp.CreateContainerVisual()?;
         frame.SetOffset(Vector3 { X: rx, Y: ry, Z: 0.0 })?;
         frame.SetSize(Vector2 { X: rw, Y: rh })?;
         frame.SetClip(&p.comp.CreateInsetClip()?)?;
         c.Children()?.InsertAtTop(&frame)?;
-        let scroll = p.comp.CreateContainerVisual()?;
-        scroll.SetSize(Vector2 { X: rw, Y: rh })?;
-        frame.Children()?.InsertAtTop(&scroll)?;
-        Ok((frame, scroll))
+        Ok(frame)
     };
-    let Ok((_frame, sc)) = go() else { return };
+    let Ok(frame) = go() else { return };
 
     let maxw = (rw - p.px(4.0)).max(p.px(40.0));
     let active_sz = if compact_player { 14.5 } else { 15.0 };
@@ -2209,34 +2745,113 @@ fn lyrics_3line_stack(
             + cur_h
             + if next_h > 0.0 { gap + next_h } else { 0.0 };
 
-        let mut yy = ((rh - total_h) / 2.0).max(p.px(2.0)).round();
-        if !prev_lines.is_empty() {
-            for t in &prev_lines {
-                p.text(&sc, t, 0.0, yy, dim_sz, 600, WHITE, 0.34, Anchor::Left, maxw + p.px(4.0));
-                yy += dim_lh;
+        let y_top = ((rh - total_h) / 2.0).max(p.px(2.0)).round();
+        let shift = if prev_h > 0.0 { prev_h + gap } else { active_lh + gap };
+        let mut yy = y_top;
+
+        // Outgoing top line (`center - 2`) softly floats up and dissolves on forward advance.
+        if dir > 0 && center >= 2 {
+            let t = clean_line(&l.lines[center - 2].text);
+            let shown = p.fit(t, dim_sz, 600, maxw);
+            if let Ok(slot) = p.comp.CreateContainerVisual() {
+                let _ = slot.SetOffset(Vector3 { X: 0.0, Y: y_top, Z: 0.0 });
+                let _ = frame.Children().and_then(|k| k.InsertAtTop(&slot));
+                p.text(&slot, &shown, 0.0, 0.0, dim_sz, 600, WHITE, 1.0, Anchor::Left, maxw + p.px(4.0));
+                if let Ok(o) = slot.cast::<CompositionObject>() {
+                    glide_scalar(&p.comp, &o, "Offset.Y", y_top, y_top - (dim_lh + gap), 360, 0);
+                    glide_scalar(&p.comp, &o, "Opacity", 0.34, 0.0, 260, 0);
+                }
             }
-            live.lyric_shift = (prev_h + gap).round();
-            yy += gap;
-        } else {
-            live.lyric_shift = (active_lh + gap).round();
         }
 
-        let is_active = active.is_some();
-        for t in &cur_lines {
-            p.text(&sc, t, 0.0, yy, active_sz, 700, WHITE, if is_active { 1.0 } else { 0.45 }, Anchor::Left, maxw + p.px(4.0));
-            yy += active_lh;
-        }
-        if !next_lines.is_empty() {
-            yy += gap;
-            for t in &next_lines {
-                if yy + dim_lh * 0.5 > rh {
-                    break;
+        // Previous line (`center - 1`): glides up from active slot, smoothly dims & relaxes scale.
+        if !prev_lines.is_empty() {
+            if let Ok(slot) = p.comp.CreateContainerVisual() {
+                let _ = slot.SetOffset(Vector3 { X: 0.0, Y: yy, Z: 0.0 });
+                let _ = slot.SetCenterPoint(Vector3 { X: 0.0, Y: prev_h / 2.0, Z: 0.0 });
+                let _ = slot.SetOpacity(0.34);
+                let _ = frame.Children().and_then(|k| k.InsertAtTop(&slot));
+                let mut ly_off = 0.0;
+                for t in &prev_lines {
+                    p.text(&slot, t, 0.0, ly_off, dim_sz, 600, WHITE, 1.0, Anchor::Left, maxw + p.px(4.0));
+                    ly_off += dim_lh;
                 }
-                p.text(&sc, t, 0.0, yy, dim_sz, 600, WHITE, 0.34, Anchor::Left, maxw + p.px(4.0));
-                yy += dim_lh;
+                if dir > 0 {
+                    if let Ok(o) = slot.cast::<CompositionObject>() {
+                        glide_scalar(&p.comp, &o, "Offset.Y", yy + shift, yy, 440, 0);
+                        glide_scalar(&p.comp, &o, "Opacity", 0.92, 0.34, 420, 0);
+                        glide_scalar(&p.comp, &o, "Scale.X", 1.04, 1.0, 440, 0);
+                        glide_scalar(&p.comp, &o, "Scale.Y", 1.04, 1.0, 440, 0);
+                    }
+                } else if dir < 0 {
+                    if let Ok(o) = slot.cast::<CompositionObject>() {
+                        glide_scalar(&p.comp, &o, "Offset.Y", yy - shift * 0.45, yy, 360, 0);
+                        glide_scalar(&p.comp, &o, "Opacity", 0.0, 0.34, 320, 0);
+                    }
+                }
+            }
+            yy += prev_h + gap;
+        }
+
+        // Active current line (`center`): staggered Apple-Music glide + brightness & scale bloom.
+        let is_active = active.is_some();
+        let cur_op = if is_active { 1.0 } else { 0.45 };
+        if let Ok(slot) = p.comp.CreateContainerVisual() {
+            let _ = slot.SetOffset(Vector3 { X: 0.0, Y: yy, Z: 0.0 });
+            let _ = slot.SetCenterPoint(Vector3 { X: 0.0, Y: cur_h / 2.0, Z: 0.0 });
+            let _ = slot.SetOpacity(cur_op);
+            let _ = frame.Children().and_then(|k| k.InsertAtTop(&slot));
+            let mut ly_off = 0.0;
+            for t in &cur_lines {
+                p.text(&slot, t, 0.0, ly_off, active_sz, 700, WHITE, 1.0, Anchor::Left, maxw + p.px(4.0));
+                ly_off += active_lh;
+            }
+            if dir > 0 {
+                if let Ok(o) = slot.cast::<CompositionObject>() {
+                    glide_scalar(&p.comp, &o, "Offset.Y", yy + shift, yy, 460, 28);
+                    glide_scalar(&p.comp, &o, "Opacity", 0.34, cur_op, 400, 28);
+                    glide_scalar(&p.comp, &o, "Scale.X", 0.96, 1.0, 460, 28);
+                    glide_scalar(&p.comp, &o, "Scale.Y", 0.96, 1.0, 460, 28);
+                }
+            } else if dir < 0 {
+                if let Ok(o) = slot.cast::<CompositionObject>() {
+                    glide_scalar(&p.comp, &o, "Offset.Y", yy - shift * 0.45, yy, 380, 0);
+                    glide_scalar(&p.comp, &o, "Opacity", 0.34, cur_op, 340, 0);
+                    glide_scalar(&p.comp, &o, "Scale.X", 0.96, 1.0, 380, 0);
+                    glide_scalar(&p.comp, &o, "Scale.Y", 0.96, 1.0, 380, 0);
+                }
             }
         }
-        live.lyric_scroll = Some(sc);
+        yy += cur_h;
+
+        // Upcoming next line (`center + 1`): gentle staggered rise & soft fade-in.
+        if !next_lines.is_empty() {
+            yy += gap;
+            if let Ok(slot) = p.comp.CreateContainerVisual() {
+                let _ = slot.SetOffset(Vector3 { X: 0.0, Y: yy, Z: 0.0 });
+                let _ = slot.SetOpacity(0.34);
+                let _ = frame.Children().and_then(|k| k.InsertAtTop(&slot));
+                let mut ly_off = 0.0;
+                for t in &next_lines {
+                    if yy + ly_off + dim_lh * 0.5 > rh {
+                        break;
+                    }
+                    p.text(&slot, t, 0.0, ly_off, dim_sz, 600, WHITE, 1.0, Anchor::Left, maxw + p.px(4.0));
+                    ly_off += dim_lh;
+                }
+                if dir > 0 {
+                    if let Ok(o) = slot.cast::<CompositionObject>() {
+                        glide_scalar(&p.comp, &o, "Offset.Y", yy + shift, yy, 480, 56);
+                        glide_scalar(&p.comp, &o, "Opacity", 0.0, 0.34, 420, 56);
+                    }
+                } else if dir < 0 {
+                    if let Ok(o) = slot.cast::<CompositionObject>() {
+                        glide_scalar(&p.comp, &o, "Offset.Y", yy - shift * 0.45, yy, 380, 20);
+                        glide_scalar(&p.comp, &o, "Opacity", 0.85, 0.34, 340, 20);
+                    }
+                }
+            }
+        }
     } else {
         let mut yy = p.px(4.0);
         for line in l.lines.iter().filter(|x| !x.text.is_empty()) {
@@ -2244,7 +2859,7 @@ fn lyrics_3line_stack(
                 break;
             }
             for t in nacre_core::notch::typeset::wrap(&line.text, maxw, 2, |s| p.measure(s, dim_sz, 500)) {
-                p.text(&sc, &t, 0.0, yy, dim_sz, 500, WHITE, 0.78, Anchor::Left, maxw + p.px(4.0));
+                p.text(&frame, &t, 0.0, yy, dim_sz, 500, WHITE, 0.78, Anchor::Left, maxw + p.px(4.0));
                 yy += dim_lh;
             }
             yy += gap * 0.6;
@@ -2272,6 +2887,14 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
     let mins = t.mins_left(d.now_ms);
     let prog = t.progress(d.now_ms);
     let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
+    let accent = crate::prefs::accent();
+    let accent_soft = lift_for_dark_pill(accent);
+
+    // Subtle thematic bottom wash inset 14 dp from outer walls/bottom so outer silhouette stays pure #000000.
+    let inset = p.px(14.0);
+    if let Some(glow) = p.ambient_glow(c, f.x0 + inset, 0.0, (f.w - 2.0 * inset).max(p.px(40.0)), (f.h - inset).max(p.px(40.0)), 0.0, accent, false) {
+        let _ = glow.SetOpacity(if t.phase == Phase::Running { 0.42 } else { 0.20 });
+    }
 
     // --- Left Column: Pomodoro title, session subtitle, big countdown, status & thin progress bar ---
     p.text(c, "Pomodoro", x_left, top, 15.0, 700, WHITE, 0.98, Anchor::Left, lw);
@@ -2295,7 +2918,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
     };
     p.text(c, &stage_sub, x_left, top + p.px(25.0), 11.0, 500, WHITE, 0.48, Anchor::Left, lw);
 
-    let time_rgb = if t.phase == Phase::Running && secs <= 60 { AMBER } else { WHITE };
+    let time_rgb = if t.phase == Phase::Running && secs <= 60 { accent_soft } else { WHITE };
     p.text(c, &format_mmss(secs), x_left, top + p.px(42.0), 31.0, 700, time_rgb, 1.0, Anchor::Left, lw);
 
     let mins_str = if en { format!("{mins} min left") } else { format!("{mins} mnt lagi") };
@@ -2326,7 +2949,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
             fill_w,
             bar_h,
             bar_h / 2.0,
-            Color { A: 255, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
+            Color { A: 255, R: accent[0], G: accent[1], B: accent[2] },
         );
     }
 
@@ -2363,17 +2986,15 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
     let pill_x = rst_cx - rst_dia / 2.0 - p.px(7.0) - pill_w;
     let pill_y = row_cy - pill_h / 2.0;
     let n_btn = kids(c);
-    p.rect(
-        c,
-        pill_x,
-        pill_y,
-        pill_w,
-        pill_h,
-        pill_h / 2.0,
-        Color { A: 255, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
-    );
+    // Calm tinted glass surface when Running (Pause), vibrant theme accent when Idle/Paused (Start/Resume).
+    let (pill_fill, pill_txt_rgb, pill_txt_op) = if t.phase == Phase::Running {
+        (Color { A: 58, R: accent[0], G: accent[1], B: accent[2] }, accent_soft, 0.98)
+    } else {
+        (Color { A: 242, R: accent[0], G: accent[1], B: accent[2] }, WHITE, 1.0)
+    };
+    p.rect(c, pill_x, pill_y, pill_w, pill_h, pill_h / 2.0, pill_fill);
     let bth = p.px(11.5) * 1.3;
-    p.text(c, pill_label, pill_x + pill_w / 2.0, row_cy - bth / 2.0, 11.5, 700, WHITE, 1.0, Anchor::Center, pill_w);
+    p.text(c, pill_label, pill_x + pill_w / 2.0, row_cy - bth / 2.0, 11.5, 700, pill_txt_rgb, pill_txt_op, Anchor::Center, pill_w);
     regions.push(Region {
         x: pill_x,
         y: pill_y,
@@ -2405,7 +3026,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
         let completed = i < active_slot || (in_short_break && i == active_slot);
         let active_focus = matches!(t.stage, PomodoroStage::Focus(n) if n == i + 1);
         let track_col = if completed {
-            Color { A: 220, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] }
+            Color { A: 220, R: accent[0], G: accent[1], B: accent[2] }
         } else {
             white(32)
         };
@@ -2421,7 +3042,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
                     fw,
                     seg_h,
                     seg_h / 2.0,
-                    Color { A: 245, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
+                    Color { A: 245, R: accent[0], G: accent[1], B: accent[2] },
                 );
             }
             orb_pos = Some((sx + (seg_w * prog).clamp(p.px(3.0), seg_w - p.px(3.0)), track_cy));
@@ -2456,7 +3077,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
             let brk_done = i < active_slot && !(in_short_break && i == active_slot);
             let brk_active = matches!(t.stage, PomodoroStage::ShortBreak(n) if n == i + 1);
             let dot_col = if brk_done || brk_active {
-                Color { A: 230, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] }
+                Color { A: 230, R: accent[0], G: accent[1], B: accent[2] }
             } else {
                 white(36)
             };
@@ -2483,7 +3104,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
                 fw,
                 seg_h,
                 seg_h / 2.0,
-                Color { A: 245, R: INDIGO[0], G: INDIGO[1], B: INDIGO[2] },
+                Color { A: 245, R: accent[0], G: accent[1], B: accent[2] },
             );
         }
         orb_pos = Some((lx + (long_w * prog).clamp(p.px(3.0), long_w - p.px(3.0)), track_cy));
@@ -2510,7 +3131,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
         hover_bg: None,
     });
 
-    // Glowing white + soft violet orb on the active session segment (drawn on top of track).
+    // Glowing white + soft theme-accent orb on the active session segment (drawn on top of track).
     if let Some((ox, oy)) = orb_pos {
         let h1 = p.px(21.0);
         let h2 = p.px(13.5);
@@ -2522,7 +3143,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
             h1,
             h1,
             h1 / 2.0,
-            Color { A: 54, R: VIOLET_GLOW[0], G: VIOLET_GLOW[1], B: VIOLET_GLOW[2] },
+            Color { A: 50, R: accent_soft[0], G: accent_soft[1], B: accent_soft[2] },
         );
         p.rect(
             c,
@@ -2531,7 +3152,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut
             h2,
             h2,
             h2 / 2.0,
-            Color { A: 135, R: VIOLET_GLOW[0], G: VIOLET_GLOW[1], B: VIOLET_GLOW[2] },
+            Color { A: 128, R: accent_soft[0], G: accent_soft[1], B: accent_soft[2] },
         );
         p.rect(
             c,

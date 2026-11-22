@@ -11,7 +11,7 @@ fn main() {
     let Ok(pid) = pid.to_string_lossy().parse::<u32>() else { return };
     let marker = PathBuf::from(marker);
 
-    nacre_platform::log::init(marker.with_file_name("abra-guard.log"));
+    nacre_platform::log::init(marker.with_file_name("nox-guard.log"));
     nacre_platform::log::line("guard", &format!("menunggu pid {pid}"));
 
     if wait_for_exit(pid) == WaitOutcome::Unknown {

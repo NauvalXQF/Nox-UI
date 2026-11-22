@@ -251,7 +251,7 @@ impl Net {
                         }
                     }
                     v.push(Item::heading(prefs::tr("Jaringan sekitar perlu izin Lokasi Windows")));
-                    v.push(Item::heading(prefs::tr("ABRA tidak membaca atau menyimpan lokasimu")));
+                    v.push(Item::heading(prefs::tr("NOX tidak membaca atau menyimpan lokasimu")));
                     v.push(Item::action(ID_LOCATION, prefs::tr("Izinkan di Pengaturan Lokasi\u{2026}"), true));
                 }
                 Some(s) => {

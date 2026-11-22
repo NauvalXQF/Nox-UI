@@ -2,10 +2,10 @@ use super::json::{self, Json};
 use super::todo::push_json_str;
 
 pub const MODELS: [&str; 4] = [
-    "gemini-3.6-flash",
-    "gemini-3.5-pro",
-    "gemini-3.5-flash",
     "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
 ];
 
 pub fn model_id(idx: u8) -> &'static str {
@@ -14,21 +14,21 @@ pub fn model_id(idx: u8) -> &'static str {
 
 pub fn model_label(idx: u8) -> &'static str {
     match idx {
-        0 => "Gemini 3.6 Flash",
-        1 => "Gemini 3.5 Pro",
-        2 => "Gemini 3.5 Flash",
-        3 => "Gemini 2.5 Flash",
-        _ => "Gemini 3.6 Flash",
+        0 => "Gemini 2.5 Flash",
+        1 => "Gemini 2.5 Pro",
+        2 => "Gemini 2.5 Flash-Lite",
+        3 => "Gemini 2.0 Flash",
+        _ => "Gemini 2.5 Flash",
     }
 }
 
 pub fn model_short_label(idx: u8) -> &'static str {
     match idx {
-        0 => "3.6 Flash",
-        1 => "3.5 Pro",
-        2 => "3.5 Flash",
-        3 => "2.5 Flash",
-        _ => "3.6 Flash",
+        0 => "2.5 Flash",
+        1 => "2.5 Pro",
+        2 => "2.5 Lite",
+        3 => "2.0 Flash",
+        _ => "2.5 Flash",
     }
 }
 
@@ -295,8 +295,8 @@ mod tests {
 
     #[test]
     fn resolves_custom_model_and_parses_models_endpoint() {
-        assert_eq!(active_model_id(0, ""), "gemini-3.6-flash");
-        assert_eq!(active_model_id(1, "  gemini-3.6-pro  "), "gemini-3.6-pro");
+        assert_eq!(active_model_id(0, ""), "gemini-2.5-flash");
+        assert_eq!(active_model_id(1, "  gemini-2.5-pro  "), "gemini-2.5-pro");
         let resp = r#"{"models":[
             {"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]},
             {"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},

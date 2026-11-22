@@ -1,5 +1,5 @@
 use std::sync::Once;
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -8,7 +8,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_core::Result;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
-static REGISTER: Once = Once::new();
+static REGISTER_DOCK: Once = Once::new();
+static REGISTER_NOTCH: Once = Once::new();
 
 struct State {
     target: HWND,
@@ -27,7 +28,12 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
                 return LRESULT(0);
             }
             let mut r = RECT::default();
-            if GetWindowRect(h, &mut r).is_err() || pt.x < r.left || pt.x >= r.right {
+            if GetWindowRect(h, &mut r).is_err()
+                || pt.x < r.left
+                || pt.x >= r.right
+                || pt.y < r.top
+                || pt.y >= r.bottom
+            {
                 return LRESULT(0);
             }
             if !s.inside {
@@ -75,10 +81,17 @@ impl Drop for Strip {
 
 impl Strip {
     pub fn new(target: HWND, enter: u32, leave: u32) -> Result<Strip> {
+        Self::create(w!("NacreEdgeStrip"), &REGISTER_DOCK, target, enter, leave)
+    }
+
+    pub fn new_notch(target: HWND, enter: u32, leave: u32) -> Result<Strip> {
+        Self::create(w!("NacreNotchStrip"), &REGISTER_NOTCH, target, enter, leave)
+    }
+
+    fn create(class: PCWSTR, once: &Once, target: HWND, enter: u32, leave: u32) -> Result<Strip> {
         unsafe {
             let hi: HINSTANCE = GetModuleHandleW(None)?.into();
-            let class = w!("NacreEdgeStrip");
-            REGISTER.call_once(|| {
+            once.call_once(|| {
                 RegisterClassW(&WNDCLASSW {
                     lpfnWndProc: Some(proc),
                     hInstance: hi,
@@ -113,6 +126,12 @@ impl Strip {
 
     pub fn set_visible(&self, on: bool) {
         unsafe {
+            if !on {
+                let st = GetWindowLongPtrW(self.hwnd, GWLP_USERDATA) as *mut State;
+                if !st.is_null() {
+                    (*st).inside = false;
+                }
+            }
             let _ = ShowWindow(self.hwnd, if on { SW_SHOWNOACTIVATE } else { SW_HIDE });
         }
     }

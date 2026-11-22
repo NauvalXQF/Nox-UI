@@ -73,7 +73,7 @@ fn http_get(url: &str) -> Option<(i32, String)> {
     let client = HttpClient::new().ok()?;
     if let Ok(h) = client.DefaultRequestHeaders() {
         if let Ok(ua) = h.UserAgent() {
-            let _ = ua.TryParseAdd(&HSTRING::from(concat!("ABRA/", env!("CARGO_PKG_VERSION"))));
+            let _ = ua.TryParseAdd(&HSTRING::from(concat!("NOX/", env!("CARGO_PKG_VERSION"))));
         }
     }
     let op = client.GetAsync(&Uri::CreateUri(&HSTRING::from(url)).ok()?).ok()?;

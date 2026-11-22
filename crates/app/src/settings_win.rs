@@ -2,6 +2,7 @@ use crate::popup::Popup;
 use crate::prefs::{self, Role, WM_PREFS};
 use nacre_core::hud::slider;
 use nacre_core::i18n::Lang;
+use nacre_core::notch::spring::{Spring, SpringParams};
 use nacre_core::settings::{Behavior, Material, Theme};
 use nacre_platform::icons::Bitmap;
 use nacre_platform::text::{measure, render, render_face, Style, ICON_FACE};
@@ -10,9 +11,13 @@ use nacre_ui::gfx::Gfx;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Instant;
 use windows::core::w;
 use windows::UI::Color;
-use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual};
+use windows::UI::Composition::{
+    CompositionColorBrush, CompositionDrawingSurface, CompositionRoundedRectangleGeometry,
+    CompositionStretch, Compositor, ContainerVisual, SpriteVisual,
+};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL};
@@ -23,6 +28,8 @@ use windows_numerics::{Vector2, Vector3};
 
 const WM_CLOSE_SELF: u32 = WM_APP + 50;
 const WM_GEMINI_MODELS: u32 = WM_APP + 51;
+const T_ANIM: usize = 10;
+const T_SB_IDLE: usize = 11;
 static FETCHED_GEMINI_RESULT: Mutex<Option<Result<Vec<String>, String>>> = Mutex::new(None);
 const W: f32 = 780.0;
 const H: f32 = 560.0;
@@ -94,7 +101,6 @@ enum Action {
     GeminiCycleFetched,
     LyricsOnline,
     LyricsDir,
-    Donate,
     Close,
     Takeover,
     Dock(Behavior),
@@ -154,6 +160,7 @@ enum RowDef {
     Seg(&'static str, Vec<(&'static str, Action)>, usize),
     Slider(&'static str, u16, u8),
     Pick(&'static str, String, Action),
+    Info(&'static str, String),
     Swatches(&'static str, usize),
     Thumbs(&'static str, Vec<(&'static str, Thumb, Action)>, usize),
     Radios(Vec<(&'static str, Action)>, usize),
@@ -170,15 +177,24 @@ const ACCENT_NAMES: [&str; 9] = ["Multiwarna", "Biru", "Ungu", "Merah Muda", "Me
 
 fn row_label(r: &RowDef) -> &'static str {
     match r {
-        RowDef::Toggle(l, ..) | RowDef::Seg(l, ..) | RowDef::Slider(l, ..) | RowDef::Pick(l, ..) | RowDef::Swatches(l, ..) | RowDef::Thumbs(l, ..) | RowDef::Text(l, ..) => l,
+        RowDef::Toggle(l, ..) | RowDef::Seg(l, ..) | RowDef::Slider(l, ..) | RowDef::Pick(l, ..) | RowDef::Info(l, ..) | RowDef::Swatches(l, ..) | RowDef::Thumbs(l, ..) | RowDef::Text(l, ..) => l,
         RowDef::Radios(..) => "",
     }
 }
 
-const DONATE_URL: &str = "https://saweria.co/kreativadev";
-
 fn user_name() -> String {
-    std::env::var("USERNAME").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "ABRA".to_string())
+    std::env::var("USERNAME").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "NOX".to_string())
+}
+
+struct ContentScrollBar {
+    track: (f32, f32, f32, f32),
+    thumb_h: f32,
+    max_scroll: f32,
+    right_edge: f32,
+    thumb: SpriteVisual,
+    clip_geo: CompositionRoundedRectangleGeometry,
+    brush: CompositionColorBrush,
+    fg: [u8; 3],
 }
 
 struct Win {
@@ -199,6 +215,15 @@ struct Win {
     press: Option<(f32, f32)>,
     tab: u8,
     scroll: f32,
+    sp_scroll: Spring,
+    sp_sb_hover: Spring,
+    sp_sb_active: Spring,
+    scroll_body: Option<ContainerVisual>,
+    content_sb: Option<ContentScrollBar>,
+    content_drag: Option<f32>,
+    content_sb_hover: bool,
+    last_tick: Option<Instant>,
+    anim_running: bool,
     content_h: f32,
     history: Vec<u8>,
     hpos: usize,
@@ -243,7 +268,47 @@ fn create(comp: &Compositor) -> windows_core::Result<()> {
     };
     let _ = popup.panel.set_tier(tier);
     let _ = popup.panel.set_radius(24.0 * dpi);
-    let mut win = Box::new(Win { popup, gfx, comp: comp.clone(), dpi, size: (0.0, 0.0), regions: vec![], cache: HashMap::new(), dragging: None, side: vec![], side_hover: None, side_scroll: 0.0, side_view: (0.0, 0.0), side_bar: None, side_drag: None, press: None, tab: 0, scroll: 0.0, content_h: 0.0, history: vec![0], hpos: 0, search: String::new(), search_focus: false, thumbs: HashMap::new(), edit: None, edit_buf: String::new(), fetched_models: Vec::new(), models_status: String::new(), fetching_models: false, frame: None, frame_key: (0, 0, false) });
+    let mut win = Box::new(Win {
+        popup,
+        gfx,
+        comp: comp.clone(),
+        dpi,
+        size: (0.0, 0.0),
+        regions: vec![],
+        cache: HashMap::new(),
+        dragging: None,
+        side: vec![],
+        side_hover: None,
+        side_scroll: 0.0,
+        side_view: (0.0, 0.0),
+        side_bar: None,
+        side_drag: None,
+        press: None,
+        tab: 0,
+        scroll: 0.0,
+        sp_scroll: Spring::new(0.0, SpringParams::smooth_scroll()),
+        sp_sb_hover: Spring::new_unit(0.0, SpringParams::from_response(0.18, 0.94)),
+        sp_sb_active: Spring::new_unit(0.0, SpringParams::from_response(0.18, 0.94)),
+        scroll_body: None,
+        content_sb: None,
+        content_drag: None,
+        content_sb_hover: false,
+        last_tick: None,
+        anim_running: false,
+        content_h: 0.0,
+        history: vec![0],
+        hpos: 0,
+        search: String::new(),
+        search_focus: false,
+        thumbs: HashMap::new(),
+        edit: None,
+        edit_buf: String::new(),
+        fetched_models: Vec::new(),
+        models_status: String::new(),
+        fetching_models: false,
+        frame: None,
+        frame_key: (0, 0, false),
+    });
     win.render();
     let (sw, sh) = sys::screen_size();
     let (w, h) = (win.size.0 as i32, win.size.1 as i32);
@@ -416,7 +481,86 @@ impl Win {
         }
         self.tab = t;
         self.scroll = 0.0;
+        self.sp_scroll.snap(0.0);
+        self.content_drag = None;
+        self.content_sb_hover = false;
+        self.sp_sb_hover.snap(0.0);
         self.render();
+    }
+
+    fn start_anim(&mut self) {
+        if !self.anim_running {
+            self.anim_running = true;
+            self.last_tick = Some(Instant::now());
+            unsafe {
+                let _ = SetTimer(Some(self.popup.hwnd), T_ANIM, 8, None);
+            }
+        }
+    }
+
+    fn stop_anim(&mut self) {
+        if self.anim_running {
+            self.anim_running = false;
+            self.last_tick = None;
+            unsafe {
+                let _ = KillTimer(Some(self.popup.hwnd), T_ANIM);
+            }
+        }
+    }
+
+    fn wake_sb(&mut self) {
+        self.sp_sb_active.target = 1.0;
+        unsafe {
+            let _ = SetTimer(Some(self.popup.hwnd), T_SB_IDLE, 1400, None);
+        }
+        self.start_anim();
+    }
+
+    fn sync_scroll_visuals(&mut self) {
+        let d = self.dpi;
+        if let Some(body) = &self.scroll_body {
+            let _ = body.SetOffset(Vector3 { X: 0.0, Y: -self.scroll, Z: 0.0 });
+        }
+        if let Some(sb) = &self.content_sb {
+            let h = self.sp_sb_hover.pos.clamp(0.0, 1.0);
+            let act = self.sp_sb_active.pos.clamp(0.0, 1.0);
+            let bw = (4.0 + 3.0 * h) * d;
+            let frac = (self.scroll / sb.max_scroll.max(1.0)).clamp(0.0, 1.0);
+            let ty = sb.track.1 + (sb.track.3 - sb.thumb_h) * frac;
+            let bx = sb.right_edge - bw;
+            let _ = sb.thumb.SetOffset(Vector3 { X: bx, Y: ty, Z: 0.0 });
+            let _ = sb.thumb.SetSize(Vector2 { X: bw, Y: sb.thumb_h });
+            let _ = sb.clip_geo.SetSize(Vector2 { X: bw, Y: sb.thumb_h });
+            let _ = sb.clip_geo.SetCornerRadius(Vector2 { X: bw / 2.0, Y: bw / 2.0 });
+            let alpha = (52.0 + 68.0 * act.max(h) + 55.0 * h).clamp(0.0, 220.0).round() as u8;
+            let _ = sb.brush.SetColor(col(sb.fg, alpha));
+        }
+    }
+
+    fn tick_anim(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .last_tick
+            .map(|p| now.duration_since(p).as_secs_f32())
+            .unwrap_or(1.0 / 120.0)
+            .clamp(0.001, 0.04);
+        self.last_tick = Some(now);
+        let max_s = self.content_sb.as_ref().map(|s| s.max_scroll).unwrap_or(0.0);
+        self.sp_scroll.target = self.sp_scroll.target.clamp(0.0, max_s);
+        let moving_scroll = if self.content_drag.is_some() {
+            false
+        } else {
+            let m = self.sp_scroll.step(dt);
+            self.sp_scroll.pos = self.sp_scroll.pos.clamp(0.0, max_s);
+            self.scroll = self.sp_scroll.pos;
+            m
+        };
+        let m_h = self.sp_sb_hover.step(dt);
+        let m_a = self.sp_sb_active.step(dt);
+        self.sync_scroll_visuals();
+        if !moving_scroll && !m_h && !m_a {
+            self.stop_anim();
+        }
     }
 
     fn page_matches(&self, idx: u8, name: &str) -> bool {
@@ -473,6 +617,8 @@ impl Win {
             }
             2 => {
                 nacre_platform::cred::write_secret(nacre_platform::cred::TARGET_GEMINI_KEY, &self.edit_buf);
+                self.fetched_models.clear();
+                self.models_status.clear();
                 prefs::broadcast();
             }
             3 => {
@@ -673,8 +819,25 @@ impl Win {
                     } else {
                         (value.clone(), 0.95)
                     };
-                    self.text(c, &shown, bx + 12.0 * d, by + (bh - 16.0 * d) / 2.0 - 1.0, 12.5, 500, look.fg, op, 0);
+                    let inner_w = (bw - 20.0 * d).max(1.0);
+                    let tw = measure(&shown, &Style { px: (12.5 * d).round() as i32, weight: 500 }).0 as f32;
+                    let tx = if editing && tw > inner_w { inner_w - tw } else { 2.0 * d };
+                    if let Ok(clip_box) = self.comp.CreateContainerVisual() {
+                        let _ = clip_box.SetOffset(Vector3 { X: bx + 10.0 * d, Y: by, Z: 0.0 });
+                        let _ = clip_box.SetSize(Vector2 { X: inner_w, Y: bh });
+                        if let Ok(clip) = self.comp.CreateInsetClip() {
+                            let _ = clip_box.SetClip(&clip);
+                        }
+                        let _ = c.Children().and_then(|k| k.InsertAtTop(&clip_box));
+                        self.text(&clip_box, &shown, tx, (bh - 16.0 * d) / 2.0 - 1.0, 12.5, 500, look.fg, op, 0);
+                    } else {
+                        self.text(c, &shown, bx + 12.0 * d, by + (bh - 16.0 * d) / 2.0 - 1.0, 12.5, 500, look.fg, op, 0);
+                    }
                     self.region(bx, y, bw, rh, Action::EditText(*field));
+                }
+                RowDef::Info(label, value) => {
+                    self.text(c, label, lx, y + (rh - 17.0 * d) / 2.0, 13.5, 400, look.fg, 0.95, 0);
+                    self.text(c, value, rx, y + (rh - 16.0 * d) / 2.0, 12.5, 500, look.fg, 0.55, 2);
                 }
                 RowDef::Pick(label, value, act) => {
                     self.text(c, label, lx, y + (rh - 17.0 * d) / 2.0, 13.5, 400, look.fg, 0.95, 0);
@@ -721,7 +884,7 @@ impl Win {
                     vec![
                         RowDef::Toggle(prefs::tr("Jalankan saat login Windows"), s.autostart, Action::Autostart),
                         RowDef::Toggle(prefs::tr("Sembunyikan taskbar Windows"), s.takeover, Action::Takeover),
-                        RowDef::Toggle(prefs::tr("Sembunyikan ikon desktop saat ABRA berjalan"), s.hide_desktop_icons, Action::HideIcons),
+                        RowDef::Toggle(prefs::tr("Sembunyikan ikon desktop saat NOX berjalan"), s.hide_desktop_icons, Action::HideIcons),
                         RowDef::Toggle(prefs::tr("Selalu di atas jendela layar penuh"), s.above_fullscreen, Action::AboveFull),
                         RowDef::Toggle(prefs::tr("Pintasan cepat (Alt+` ganti jendela app)"), s.mac_shortcuts, Action::MacKeys),
                     ],
@@ -735,7 +898,10 @@ impl Win {
                 ),
                 (
                     Some(prefs::tr("Tentang")),
-                    vec![RowDef::Pick(prefs::tr("Dibuat oleh kreativa.dev"), prefs::tr("Belikan aku kopi").to_string(), Action::Donate)],
+                    vec![
+                        RowDef::Info(prefs::tr("Versi"), format!("NOX v{}", env!("CARGO_PKG_VERSION"))),
+                        RowDef::Info(prefs::tr("Dibuat oleh opankcs.com"), "opankcs.com".to_string()),
+                    ],
                 ),
             ],
             1 => vec![
@@ -761,46 +927,52 @@ impl Win {
                     ],
                 ),
             ],
-            2 => vec![(
-                None,
-                vec![
-                    RowDef::Toggle(prefs::tr("Aktifkan Visor"), s.notch_enabled, Action::NotchOn),
-                    RowDef::Seg(prefs::tr("Bentuk"), vec![(prefs::tr("Visor"), Action::NotchShape(false)), (prefs::tr("Capsule"), Action::NotchShape(true))], if s.notch_island { 1 } else { 0 }),
-                    RowDef::Seg(prefs::tr("Perilaku"), behaviors(false), beh_idx(s.notch)),
-                    RowDef::Slider(prefs::tr("Kebulatan sudut"), s.notch_round as u16, 3),
-                    RowDef::Toggle(prefs::tr("Buka otomatis saat kursor di Visor"), s.notch_hover_open, Action::HoverOpen),
-                ],
-            ), (
-                Some(prefs::tr("Auto-hide")),
-                vec![
-                    RowDef::Slider(prefs::tr("Jeda hover Auto-hide"), s.notch_autohide_delay, 8),
-                    RowDef::Toggle(prefs::tr("Intip otomatis saat notifikasi masuk"), s.notch_notif_peek, Action::NotchNotifPeek),
-                ],
-            ), (
-                Some(prefs::tr("Notifikasi Sistem")),
-                {
-                    use nacre_platform::notifications::{status, Status};
-                    let st = match status() {
-                        Status::Connected => prefs::tr("Aktif (WinRT)"),
-                        Status::ConnectedUia => prefs::tr("Aktif (Zero-Config)"),
-                        Status::NeedsIdentity => prefs::tr("Mode Zero-Config"),
-                        Status::Denied => prefs::tr("Ditolak"),
-                        Status::Unsupported => prefs::tr("Tidak didukung"),
-                        Status::Connecting => prefs::tr("Menyambung…"),
-                    };
+            2 => {
+                let mut groups = vec![(
+                    None,
                     vec![
-                        RowDef::Toggle(prefs::tr("Tampilkan notifikasi Windows di Visor"), s.notch_notifs, Action::NotchNotifs),
-                        RowDef::Pick(prefs::tr("Listener notifikasi Windows"), st.to_string(), Action::NotifSetup),
-                    ]
-                },
-            ), (
-                Some(prefs::tr("Saat Visor diam")),
-                {
-                    let name = if s.greet_name.is_empty() { user_name() } else { s.greet_name.as_str().to_string() };
-                    let hour = nacre_platform::time::local_now().hour;
-                    let auto = nacre_core::notch::glance::greeting_text("", &name, hour, s.lang);
-                    vec![
-                        RowDef::Seg(
+                        RowDef::Toggle(prefs::tr("Aktifkan Notch"), s.notch_enabled, Action::NotchOn),
+                        RowDef::Seg(prefs::tr("Bentuk"), vec![(prefs::tr("Notch"), Action::NotchShape(false)), (prefs::tr("Capsule"), Action::NotchShape(true))], if s.notch_island { 1 } else { 0 }),
+                        RowDef::Seg(prefs::tr("Perilaku"), behaviors(false), beh_idx(s.notch)),
+                        RowDef::Slider(prefs::tr("Kebulatan sudut"), s.notch_round as u16, 3),
+                        RowDef::Toggle(prefs::tr("Buka otomatis saat kursor di Notch"), s.notch_hover_open, Action::HoverOpen),
+                    ],
+                )];
+                if matches!(s.notch, Behavior::Smart | Behavior::AutoHide) {
+                    groups.push((
+                        Some(prefs::tr("Auto-hide")),
+                        vec![
+                            RowDef::Slider(prefs::tr("Jeda hover Auto-hide"), s.notch_autohide_delay, 8),
+                            RowDef::Toggle(prefs::tr("Intip otomatis saat notifikasi masuk"), s.notch_notif_peek, Action::NotchNotifPeek),
+                        ],
+                    ));
+                }
+                groups.push((
+                    Some(prefs::tr("Notifikasi Sistem")),
+                    {
+                        use nacre_platform::notifications::{status, Status};
+                        let st = match status() {
+                            Status::Connected => prefs::tr("Aktif (WinRT)"),
+                            Status::ConnectedUia => prefs::tr("Aktif (Zero-Config)"),
+                            Status::NeedsIdentity => prefs::tr("Mode Zero-Config"),
+                            Status::Denied => prefs::tr("Ditolak"),
+                            Status::Unsupported => prefs::tr("Tidak didukung"),
+                            Status::Connecting => prefs::tr("Menyambung…"),
+                        };
+                        let mut rows = vec![RowDef::Toggle(prefs::tr("Tampilkan notifikasi Windows di Notch"), s.notch_notifs, Action::NotchNotifs)];
+                        if s.notch_notifs {
+                            rows.push(RowDef::Pick(prefs::tr("Listener notifikasi Windows"), st.to_string(), Action::NotifSetup));
+                        }
+                        rows
+                    },
+                ));
+                groups.push((
+                    Some(prefs::tr("Saat Notch diam")),
+                    {
+                        let name = if s.greet_name.is_empty() { user_name() } else { s.greet_name.as_str().to_string() };
+                        let hour = nacre_platform::time::local_now().hour;
+                        let auto = nacre_core::notch::glance::greeting_text("", &name, hour, s.lang);
+                        let mut rows = vec![RowDef::Seg(
                             prefs::tr("Tampilkan"),
                             vec![(prefs::tr("Sapaan & info"), Action::NotchIdle(0)), (prefs::tr("Musik & lirik"), Action::NotchIdle(2)), (prefs::tr("Kosong"), Action::NotchIdle(1))],
                             match s.notch_idle {
@@ -808,106 +980,31 @@ impl Win {
                                 2 => 1,
                                 _ => 2,
                             },
-                        ),
-                        RowDef::Text(prefs::tr("Nama panggilan"), s.greet_name.as_str().to_string(), user_name(), 0),
-                        RowDef::Text(prefs::tr("Teks sapaan"), s.greet_text.as_str().to_string(), auto, 1),
-                    ]
-                },
-            ), (
-                Some(prefs::tr("Lirik")),
-                vec![
-                    RowDef::Toggle(prefs::tr("Tampilkan lirik di Visor"), s.lyrics_compact, Action::LyricsCompact),
-                    RowDef::Toggle(prefs::tr("Cari lirik online (LRCLIB)"), s.lyrics_online, Action::LyricsOnline),
-                    RowDef::Pick(prefs::tr("Folder lirik (.lrc)"), prefs::tr("Buka").to_string(), Action::LyricsDir),
-                ],
-            ), (
-                Some(prefs::tr("Aktivitas")),
-                vec![
-                    RowDef::Toggle(prefs::tr("Tampilkan unduhan (Store, Steam, peramban)"), s.notch_downloads, Action::NotchDownloads),
-                    RowDef::Toggle(prefs::tr("Kirim ke HP lewat QR (Wi-Fi yang sama)"), s.notch_send, Action::NotchSend),
-                ],
-            ), (
-                Some(prefs::tr("Google (Tasks & Calendar)")),
-                {
-                    use nacre_platform::cred;
-                    use nacre_platform::gtasks::{status, SyncStatus};
-                    let st = match status() {
-                        SyncStatus::Synced => prefs::tr("Putuskan"),
-                        SyncStatus::Syncing => prefs::tr("Sinkronisasi…"),
-                        SyncStatus::Connecting => prefs::tr("Menyambung…"),
-                        SyncStatus::NeedsClientConfig => prefs::tr("Butuh Client ID"),
-                        SyncStatus::Disconnected | SyncStatus::Error => prefs::tr("Sambungkan"),
-                    };
-                    let cid = cred::read_secret(cred::TARGET_GTASKS_CLIENT_ID).map(|v| cred::mask_secret(&v)).unwrap_or_default();
-                    let csec = cred::read_secret(cred::TARGET_GTASKS_CLIENT_SECRET).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+                        )];
+                        if s.notch_idle == 0 {
+                            rows.push(RowDef::Text(prefs::tr("Nama panggilan"), s.greet_name.as_str().to_string(), user_name(), 0));
+                            rows.push(RowDef::Text(prefs::tr("Teks sapaan"), s.greet_text.as_str().to_string(), auto, 1));
+                        }
+                        rows
+                    },
+                ));
+                groups.push((
+                    Some(prefs::tr("Lirik")),
                     vec![
-                        RowDef::Pick(prefs::tr("Akun Google (Tasks & Calendar)"), st.to_string(), Action::GoogleTasksToggle),
-                        RowDef::Text(prefs::tr("Google Client ID"), cid, prefs::tr("Tempel ID…").to_string(), 3),
-                        RowDef::Text(prefs::tr("Google Client Secret"), csec, prefs::tr("Tempel rahasia…").to_string(), 4),
-                    ]
-                },
-            ), (
-                Some(prefs::tr("Ask Gemini")),
-                {
-                    use nacre_platform::cred;
-                    let key = cred::read_secret(cred::TARGET_GEMINI_KEY).map(|v| cred::mask_secret(&v)).unwrap_or_default();
-                    let custom = s.gemini_custom_model.as_str().to_string();
-                    let seg_sel = if custom.is_empty() {
-                        s.gemini_model.min(3) as usize
-                    } else {
-                        nacre_core::notch::gemini::MODELS
-                            .iter()
-                            .position(|m| m.eq_ignore_ascii_case(&custom))
-                            .unwrap_or(usize::MAX)
-                    };
-                    let fetch_label = if self.fetching_models {
-                        prefs::tr("Mengambil…").to_string()
-                    } else if !self.models_status.is_empty() {
-                        self.models_status.clone()
-                    } else {
-                        prefs::tr("Refresh / Fetch Models").to_string()
-                    };
-                    let mut rows = vec![
-                        RowDef::Text(prefs::tr("Gemini API Key"), key, prefs::tr("Tempel kunci…").to_string(), 2),
-                        RowDef::Seg(
-                            prefs::tr("Model preset"),
-                            vec![
-                                ("3.6 Flash", Action::GeminiModel(0)),
-                                ("3.5 Pro", Action::GeminiModel(1)),
-                                ("3.5 Flash", Action::GeminiModel(2)),
-                                ("2.5 Flash", Action::GeminiModel(3)),
-                            ],
-                            seg_sel,
-                        ),
-                        RowDef::Text(
-                            prefs::tr("Custom Model ID"),
-                            custom.clone(),
-                            prefs::tr("Kosong = pakai preset…").to_string(),
-                            5,
-                        ),
-                        RowDef::Pick(prefs::tr("Daftar model aktif"), fetch_label, Action::GeminiFetchModels),
-                    ];
-                    if !self.fetched_models.is_empty() {
-                        let cur_idx = self
-                            .fetched_models
-                            .iter()
-                            .position(|m| m.eq_ignore_ascii_case(&custom))
-                            .unwrap_or(0);
-                        let live_lbl = format!(
-                            "{} ({}/{})",
-                            self.fetched_models[cur_idx],
-                            cur_idx + 1,
-                            self.fetched_models.len()
-                        );
-                        rows.push(RowDef::Pick(
-                            prefs::tr("Model live (klik ganti)"),
-                            live_lbl,
-                            Action::GeminiCycleFetched,
-                        ));
-                    }
-                    rows
-                },
-            )],
+                        RowDef::Toggle(prefs::tr("Tampilkan lirik di Notch"), s.lyrics_compact, Action::LyricsCompact),
+                        RowDef::Toggle(prefs::tr("Cari lirik online (LRCLIB)"), s.lyrics_online, Action::LyricsOnline),
+                        RowDef::Pick(prefs::tr("Folder lirik (.lrc)"), prefs::tr("Buka").to_string(), Action::LyricsDir),
+                    ],
+                ));
+                groups.push((
+                    Some(prefs::tr("Aktivitas")),
+                    vec![
+                        RowDef::Toggle(prefs::tr("Tampilkan unduhan (Store, Steam, peramban)"), s.notch_downloads, Action::NotchDownloads),
+                        RowDef::Toggle(prefs::tr("Kirim ke HP lewat QR (Wi-Fi yang sama)"), s.notch_send, Action::NotchSend),
+                    ],
+                ));
+                groups
+            }
             3 => {
                 let cur = if s.menubar_material {
                     3
@@ -963,7 +1060,7 @@ impl Win {
                     Theme::Dark => 2,
                 };
                 let mat_idx = |m: Material| Material::ALL.iter().position(|x| *x == m).unwrap_or(0);
-                let mat_opts = |dock: bool| vec![(prefs::tr("Blur"), Action::Material(dock, Material::Blur)), (prefs::tr("Crystal"), Action::Material(dock, Material::Glass)), (prefs::tr("Hitam buram"), Action::Material(dock, Material::Black))];
+                let mat_opts = |dock: bool| vec![(prefs::tr("Blur"), Action::Material(dock, Material::Blur)), (prefs::tr("Crystal"), Action::Material(dock, Material::Glass)), (prefs::tr("Hitam OLED"), Action::Material(dock, Material::Black))];
                 let ist = match s.icon_style {
                     IconStyle::Default => 0,
                     IconStyle::Dark => 1,
@@ -1005,11 +1102,22 @@ impl Win {
                     113..=137 => 1,
                     _ => 2,
                 };
+                let mut glass_rows = vec![
+                    RowDef::Seg(prefs::tr("Material"), mat_opts(true), mat_idx(s.dock_material)),
+                    RowDef::Seg(prefs::tr("Material Notch"), mat_opts(false), mat_idx(s.notch_material)),
+                ];
+                if s.dock_material != Material::Black || s.notch_material != Material::Black {
+                    glass_rows.push(RowDef::Slider(prefs::tr("Tingkat blur"), s.blur as u16, 0));
+                    glass_rows.push(RowDef::Slider(prefs::tr("Transparansi"), s.transparency as u16, 1));
+                }
+                if s.dock_material == Material::Glass {
+                    glass_rows.push(RowDef::Toggle(prefs::tr("Refraksi tepi kaca (Deck)"), s.refraction, Action::Refraction));
+                }
                 vec![
                     (
                         None,
                         vec![RowDef::Seg(
-                            prefs::tr("Skala Deck, Visor, Rail & Quick Panel"),
+                            prefs::tr("Skala Deck, Notch, Rail & Quick Panel"),
                             vec![("100%", Action::UiScale(100)), ("125%", Action::UiScale(125)), ("150%", Action::UiScale(150))],
                             scale_idx,
                         )],
@@ -1027,16 +1135,7 @@ impl Win {
                         )],
                     ),
                     (Some(prefs::tr("Tema")), theme),
-                    (
-                        Some(prefs::tr("Kaca")),
-                        vec![
-                            RowDef::Seg(prefs::tr("Material"), mat_opts(true), mat_idx(s.dock_material)),
-                            RowDef::Seg(prefs::tr("Material Visor"), mat_opts(false), mat_idx(s.notch_material)),
-                            RowDef::Slider(prefs::tr("Tingkat blur"), s.blur as u16, 0),
-                            RowDef::Slider(prefs::tr("Transparansi"), s.transparency as u16, 1),
-                            RowDef::Toggle(prefs::tr("Refraksi tepi kaca (Deck)"), s.refraction, Action::Refraction),
-                        ],
-                    ),
+                    (Some(prefs::tr("Kaca")), glass_rows),
                 ]
             }
             5 => {
@@ -1050,6 +1149,81 @@ impl Win {
                     RowDef::Pick(prefs::tr("Widget desktop"), prefs::tr("Tambah widget").to_string(), Action::WidgetGallery),
                 ],
             )],
+            8 => {
+                use nacre_platform::cred;
+                use nacre_platform::gtasks::{status, SyncStatus};
+                let st = match status() {
+                    SyncStatus::Synced => prefs::tr("Terhubung · Putuskan"),
+                    SyncStatus::Syncing => prefs::tr("Sinkronisasi…"),
+                    SyncStatus::Connecting => prefs::tr("Menyambung…"),
+                    SyncStatus::NeedsClientConfig => prefs::tr("Butuh Client ID"),
+                    SyncStatus::Disconnected | SyncStatus::Error => prefs::tr("Sambungkan"),
+                };
+                let cid = cred::read_secret(cred::TARGET_GTASKS_CLIENT_ID).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+                let csec = cred::read_secret(cred::TARGET_GTASKS_CLIENT_SECRET).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+
+                let key = cred::read_secret(cred::TARGET_GEMINI_KEY).map(|v| cred::mask_secret(&v)).unwrap_or_default();
+                let custom = s.gemini_custom_model.as_str().to_string();
+                let seg_sel = if custom.is_empty() {
+                    s.gemini_model.min(3) as usize
+                } else {
+                    nacre_core::notch::gemini::MODELS
+                        .iter()
+                        .position(|m| m.eq_ignore_ascii_case(&custom))
+                        .unwrap_or(usize::MAX)
+                };
+                let (live_lbl, live_act) = if self.fetching_models {
+                    (prefs::tr("Mengambil…").to_string(), Action::GeminiFetchModels)
+                } else if !self.fetched_models.is_empty() {
+                    let cur_idx = self
+                        .fetched_models
+                        .iter()
+                        .position(|m| m.eq_ignore_ascii_case(&custom))
+                        .unwrap_or(0);
+                    (
+                        format!("{} ({}/{})", self.fetched_models[cur_idx], cur_idx + 1, self.fetched_models.len()),
+                        Action::GeminiCycleFetched,
+                    )
+                } else if !self.models_status.is_empty() {
+                    (self.models_status.clone(), Action::GeminiFetchModels)
+                } else {
+                    (prefs::tr("Ambil daftar model").to_string(), Action::GeminiFetchModels)
+                };
+
+                vec![
+                    (
+                        Some(prefs::tr("Google (Tasks & Calendar)")),
+                        vec![
+                            RowDef::Pick(prefs::tr("Akun Google (Tasks & Calendar)"), st.to_string(), Action::GoogleTasksToggle),
+                            RowDef::Text(prefs::tr("Google Client ID"), cid, prefs::tr("Tempel ID…").to_string(), 3),
+                            RowDef::Text(prefs::tr("Google Client Secret"), csec, prefs::tr("Tempel rahasia…").to_string(), 4),
+                        ],
+                    ),
+                    (
+                        Some(prefs::tr("Ask Gemini")),
+                        vec![
+                            RowDef::Text(prefs::tr("Gemini API Key"), key, prefs::tr("Tempel kunci…").to_string(), 2),
+                            RowDef::Seg(
+                                prefs::tr("Model Gemini"),
+                                vec![
+                                    ("2.5 Flash", Action::GeminiModel(0)),
+                                    ("2.5 Pro", Action::GeminiModel(1)),
+                                    ("2.5 Lite", Action::GeminiModel(2)),
+                                    ("2.0 Flash", Action::GeminiModel(3)),
+                                ],
+                                seg_sel,
+                            ),
+                            RowDef::Text(
+                                prefs::tr("Model kustom"),
+                                custom,
+                                prefs::tr("Kosong = pakai preset…").to_string(),
+                                5,
+                            ),
+                            RowDef::Pick(prefs::tr("Model live API"), live_lbl, live_act),
+                        ],
+                    ),
+                ]
+            }
             _ => vec![(None, vec![RowDef::Toggle(prefs::tr("Riwayat Papan Klip di Quick Search"), s.clipboard_history, Action::ClipHistory)])],
         }
     }
@@ -1089,19 +1263,20 @@ impl Win {
         self.text(c, &user, px0 + av + 10.0 * d, py0 + 2.0 * d, 13.5, 600, look.fg, 0.95, 0);
         self.text(c, prefs::tr("Akun Windows"), px0 + av + 10.0 * d, py0 + 20.0 * d, 11.0, 400, look.fg, 0.6, 0);
 
-        let pages: [(&'static str, &'static str, [u8; 3], u8); 8] = [
+        let pages: [(&'static str, &'static str, [u8; 3], u8); 9] = [
             (prefs::tr("Umum"), "\u{E713}", [142, 142, 147], 0),
             (prefs::tr("Deck"), "\u{E7C4}", [10, 132, 255], 1),
-            (prefs::tr("Visor"), "\u{E7F4}", [58, 58, 60], 2),
+            (prefs::tr("Notch"), "\u{E7F4}", [58, 58, 60], 2),
             (prefs::tr("Rail"), "\u{E700}", [90, 200, 250], 3),
             (prefs::tr("Tampilan"), "\u{E790}", [88, 86, 214], 4),
             (prefs::tr("Screen Corners"), "\u{E73F}", [175, 82, 222], 5),
             (prefs::tr("Quick Search"), "\u{E721}", [255, 149, 10], 6),
             (prefs::tr("Widget"), "\u{E737}", [0, 122, 255], 7),
+            (prefs::tr("Integrasi"), "\u{E71B}", [52, 199, 89], 8),
         ];
         let mut sy = 140.0 * d;
         self.side.clear();
-        let (view_top, view_bot) = (134.0 * d, (H - 96.0) * d);
+        let (view_top, view_bot) = (134.0 * d, (H - 42.0) * d);
         let side_body = match (self.comp.CreateContainerVisual(), self.comp.CreateContainerVisual()) {
             (Ok(v), Ok(b)) => {
                 let _ = v.SetOffset(Vector3 { X: 0.0, Y: view_top, Z: 0.0 });
@@ -1161,12 +1336,8 @@ impl Win {
             self.side_bar = Some(((bx - 6.0 * d, track_top, bw + 12.0 * d, track_h), th));
         }
         let (kx, kw) = (20.0 * d, (SIDEBAR_W - 40.0) * d);
-        let ky = (H - 84.0) * d;
-        self.text(c, prefs::tr("Dibuat oleh kreativa.dev"), kx + kw / 2.0, ky, 11.0, 500, look.fg, 0.55, 1);
-        let (kby, kbh) = (ky + 22.0 * d, 32.0 * d);
-        self.rect(c, kx, kby, kw, kbh, kbh / 2.0, col([255, 159, 10], 255));
-        self.text(c, prefs::tr("Belikan aku kopi"), kx + kw / 2.0, kby + (kbh - 17.0 * d) / 2.0, 13.0, 600, [255, 255, 255], 1.0, 1);
-        self.region_fixed(kx, kby, kw, kbh, Action::Donate);
+        let ky = (H - 28.0) * d;
+        self.text(c, prefs::tr("Dibuat oleh opankcs.com"), kx + kw / 2.0, ky, 11.0, 500, look.fg, 0.50, 1);
 
         let (bx, by, bw, bh) = (CONTENT_X * d, 11.0 * d, 64.0 * d, 28.0 * d);
         self.rect(c, bx, by, bw, bh, 14.0 * d, col(look.fg, 24));
@@ -1212,10 +1383,41 @@ impl Win {
         }
         self.content_h = y + 6.0 * d;
         let max_scroll = (self.content_h - vh).max(0.0);
-        if self.scroll > max_scroll {
-            self.scroll = max_scroll;
-            let _ = body.SetOffset(Vector3 { X: 0.0, Y: -self.scroll, Z: 0.0 });
+        self.scroll = self.scroll.clamp(0.0, max_scroll);
+        self.sp_scroll.pos = self.sp_scroll.pos.clamp(0.0, max_scroll);
+        self.sp_scroll.target = self.sp_scroll.target.clamp(0.0, max_scroll);
+        self.scroll_body = Some(body.clone());
+        self.content_sb = None;
+        if max_scroll > 0.5 {
+            let track_top = vt + 4.0 * d;
+            let track_h = (vh - 8.0 * d).max(1.0);
+            let th = (track_h * vh / self.content_h.max(vh)).max(32.0 * d).min(track_h);
+            let right_edge = (W - 7.0) * d;
+            let make_sb = || -> windows_core::Result<ContentScrollBar> {
+                let thumb = self.comp.CreateSpriteVisual()?;
+                let brush = self.comp.CreateColorBrushWithColor(col(look.fg, 52))?;
+                thumb.SetBrush(&brush)?;
+                let clip_geo = self.comp.CreateRoundedRectangleGeometry()?;
+                let clip = self.comp.CreateGeometricClip()?;
+                clip.SetGeometry(&clip_geo)?;
+                thumb.SetClip(&clip)?;
+                c.Children()?.InsertAtTop(&thumb)?;
+                Ok(ContentScrollBar {
+                    track: ((W - 22.0) * d, track_top, 20.0 * d, track_h),
+                    thumb_h: th,
+                    max_scroll,
+                    right_edge,
+                    thumb,
+                    clip_geo,
+                    brush,
+                    fg: look.fg,
+                })
+            };
+            if let Ok(sb) = make_sb() {
+                self.content_sb = Some(sb);
+            }
         }
+        self.sync_scroll_visuals();
         self.size = (W * d, H * d);
         let (x, yy, ww, hh) = self.popup.rect;
         let (nw, nh) = ((W * d) as i32, (H * d) as i32);
@@ -1348,6 +1550,20 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             .unwrap_or(false);
             LRESULT(if drag { HTCAPTION } else { HTCLIENT } as isize)
         }
+        WM_TIMER => {
+            if wp.0 == T_ANIM {
+                with_win(|w| w.tick_anim());
+            } else if wp.0 == T_SB_IDLE {
+                let _ = KillTimer(Some(hwnd), T_SB_IDLE);
+                with_win(|w| {
+                    if w.content_drag.is_none() && !w.content_sb_hover {
+                        w.sp_sb_active.target = 0.0;
+                        w.start_anim();
+                    }
+                });
+            }
+            LRESULT(0)
+        }
         WM_MOUSEWHEEL => {
             let delta = ((wp.0 >> 16) as i16) as f32;
             with_win(|w| {
@@ -1362,13 +1578,39 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     return;
                 }
                 let max = (w.content_h - vh).max(0.0);
-                w.scroll = (w.scroll - delta / 120.0 * 48.0 * d).clamp(0.0, max);
-                w.render();
+                if max > 0.5 {
+                    w.sp_scroll.target = (w.sp_scroll.target - delta / 120.0 * 64.0 * d).clamp(0.0, max);
+                    w.wake_sb();
+                }
             });
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
             let (x, y) = xy(lp);
+            let grabbed_content = with_win(|w| {
+                let Some(sb) = &w.content_sb else { return false };
+                let r = sb.track;
+                if !(x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3) {
+                    return false;
+                }
+                let (th, max) = (sb.thumb_h, sb.max_scroll);
+                let ty = r.1 + (r.3 - th) * (w.scroll / max.max(1.0));
+                let grab = if y >= ty && y < ty + th { y - ty } else { th / 2.0 };
+                let s = (((y - grab - r.1) / (r.3 - th).max(1.0)) * max).clamp(0.0, max);
+                w.content_drag = Some(grab);
+                w.content_sb_hover = true;
+                w.sp_sb_hover.target = 1.0;
+                w.scroll = s;
+                w.sp_scroll.snap(s);
+                w.sync_scroll_visuals();
+                w.wake_sb();
+                true
+            })
+            .unwrap_or(false);
+            if grabbed_content {
+                SetCapture(hwnd);
+                return LRESULT(0);
+            }
             let grabbed = with_win(|w| {
                 let Some((r, th)) = w.side_bar else { return false };
                 if !(x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3) {
@@ -1410,6 +1652,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = xy(lp);
             with_win(|w| {
+                if let Some(grab) = w.content_drag {
+                    if let Some((r, th, max)) = w.content_sb.as_ref().map(|sb| (sb.track, sb.thumb_h, sb.max_scroll)) {
+                        let s = (((y - grab - r.1) / (r.3 - th).max(1.0)) * max).clamp(0.0, max);
+                        w.scroll = s;
+                        w.sp_scroll.snap(s);
+                        w.sync_scroll_visuals();
+                    }
+                    return;
+                }
                 if let (Some(grab), Some((r, th))) = (w.side_drag, w.side_bar) {
                     let max = w.side_view.1;
                     w.side_scroll = (((y - grab - r.1) / (r.3 - th).max(1.0)) * max).clamp(0.0, max);
@@ -1422,14 +1673,34 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
                 let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                 let _ = TrackMouseEvent(&mut t);
+                let sb_hit = w.content_sb.as_ref().is_some_and(|sb| {
+                    let r = sb.track;
+                    x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+                });
+                if sb_hit != w.content_sb_hover {
+                    w.content_sb_hover = sb_hit;
+                    w.sp_sb_hover.target = if sb_hit { 1.0 } else { 0.0 };
+                    if sb_hit {
+                        w.wake_sb();
+                    } else {
+                        w.start_anim();
+                    }
+                }
                 let (top, s) = (w.side_view.0, w.side_scroll);
-                let hit = if y < top || y > (H - 96.0) * w.dpi { None } else { w.side.iter().find(|(_, r, _)| x >= r.0 && x < r.0 + r.2 && y + s >= r.1 && y + s < r.1 + r.3).map(|e| e.0) };
+                let hit = if y < top || y > (H - 42.0) * w.dpi { None } else { w.side.iter().find(|(_, r, _)| x >= r.0 && x < r.0 + r.2 && y + s >= r.1 && y + s < r.1 + r.3).map(|e| e.0) };
                 w.hover_side(hit);
             });
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            with_win(|w| w.hover_side(None));
+            with_win(|w| {
+                w.hover_side(None);
+                if w.content_sb_hover {
+                    w.content_sb_hover = false;
+                    w.sp_sb_hover.target = 0.0;
+                    w.start_anim();
+                }
+            });
             LRESULT(0)
         }
         WM_CHAR => {
@@ -1510,7 +1781,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         w.search_focus = false;
                     }
                     0x0D => {
-                        if let Some(t) = (0u8..8).find(|i| w.page_matches(*i, "")) {
+                        if let Some(t) = (0u8..9).find(|i| w.page_matches(*i, "")) {
                             w.go(t, true);
                             return;
                         }
@@ -1524,6 +1795,24 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_LBUTTONUP => {
             let (x, y) = xy(lp);
             let _ = ReleaseCapture();
+            if with_win(|w| {
+                if w.content_drag.take().is_some() {
+                    let still_over = w.content_sb.as_ref().is_some_and(|sb| {
+                        let r = sb.track;
+                        x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+                    });
+                    w.content_sb_hover = still_over;
+                    w.sp_sb_hover.target = if still_over { 1.0 } else { 0.0 };
+                    w.wake_sb();
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+            {
+                return LRESULT(0);
+            }
             if with_win(|w| w.side_drag.take().is_some()).unwrap_or(false) {
                 with_win(|w| w.render());
                 return LRESULT(0);
@@ -1666,7 +1955,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                 }
                 Some(Action::LyricsOnline) => prefs::update(|s| s.lyrics_online = !s.lyrics_online),
-                Some(Action::Donate) => nacre_platform::launch::open(DONATE_URL),
                 Some(Action::MenuLogoPick) => {
                     let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                     let picked = nacre_platform::pick::open_file(prefs::tr("Pilih gambar"), &[(prefs::tr("Gambar logo"), "*.png;*.jpg;*.jpeg;*.bmp;*.ico;*.gif;*.webp;*.tif;*.tiff")]);
@@ -1813,6 +2101,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             LRESULT(0)
         }
         WM_CLOSE_SELF => {
+            let _ = KillTimer(Some(hwnd), T_ANIM);
+            let _ = KillTimer(Some(hwnd), T_SB_IDLE);
             prefs::unlisten(hwnd);
             let win = WIN.with(|s| s.borrow_mut().take());
             drop(win);

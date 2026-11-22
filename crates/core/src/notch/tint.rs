@@ -34,10 +34,10 @@ pub fn from_art(bgra: &[u8], w: u32, h: u32) -> Option<[u8; 3]> {
             }
             total += 1.0;
             let (hue, s, v) = hsv(r / 255.0, g / 255.0, b / 255.0);
-            if s < 0.28 || v < 0.22 {
+            if s < 0.18 || v < 0.18 {
                 continue;
             }
-            let wgt = s * s * v;
+            let wgt = s.powf(1.35) * v;
             let k = ((hue / 360.0 * BUCKETS as f32) as usize).min(BUCKETS - 1);
             weight[k] += wgt;
             sum[k][0] += r * wgt;
@@ -46,7 +46,7 @@ pub fn from_art(bgra: &[u8], w: u32, h: u32) -> Option<[u8; 3]> {
         }
     }
     let (k, best) = weight.iter().copied().enumerate().max_by(|a, b| a.1.total_cmp(&b.1))?;
-    if total == 0.0 || best / total < 0.04 {
+    if total == 0.0 || best / total < 0.015 {
         return None;
     }
     let c = [sum[k][0] / best, sum[k][1] / best, sum[k][2] / best];
@@ -93,5 +93,22 @@ mod tests {
         let big = img(600, 600, |_, _| [30, 160, 90]);
         let c = from_art(&big, 600, 600).unwrap();
         assert_eq!(c[1], 235);
+    }
+
+    #[test]
+    fn extracts_warm_tint_from_scenic_cover_with_moderate_saturation() {
+        // Scenic cover: mostly dark rocks + pale sky, with a warm golden-orange sunset center.
+        let scenic = img(64, 64, |_, y| {
+            if y < 18 {
+                [215, 225, 230] // pale neutral sky
+            } else if y < 34 {
+                [235, 155, 110] // warm moderate-saturation sunset
+            } else {
+                [28, 26, 30] // dark canyon rocks
+            }
+        });
+        let c = from_art(&scenic, 64, 64).expect("scenic warm sunset must yield adaptive tint");
+        assert_eq!(c[0], 235);
+        assert!(c[0] > c[1] && c[1] > c[2], "warm orange/gold hue expected, got {c:?}");
     }
 }

@@ -23,7 +23,7 @@ fn res_entry(out: &mut Vec<u8>, typ: u16, name: u16, flags: u16, data: &[u8]) {
 fn ico_to_res(ico: &[u8], group: u16, manifest: Option<&[u8]>) -> Vec<u8> {
     let u16_at = |o: usize| u16::from_le_bytes([ico[o], ico[o + 1]]);
     let u32_at = |o: usize| u32::from_le_bytes([ico[o], ico[o + 1], ico[o + 2], ico[o + 3]]);
-    assert!(ico.len() > 6 && u16_at(2) == 1, "assets/abra.ico bukan berkas ikon");
+    assert!(ico.len() > 6 && u16_at(2) == 1, "assets/nox.ico bukan berkas ikon");
     let count = u16_at(4) as usize;
     let mut res = Vec::new();
     res_entry(&mut res, 0, 0, 0, &[]);
@@ -52,20 +52,20 @@ fn ico_to_res(ico: &[u8], group: u16, manifest: Option<&[u8]>) -> Vec<u8> {
 }
 
 fn embed_icon() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let ico = manifest_dir.join("../../assets/abra.ico");
-    let manifest = manifest_dir.join("abra.manifest");
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let ico = manifest_dir.join("../../assets/nox.ico");
+    let manifest = manifest_dir.join("nox.manifest");
     println!("cargo:rerun-if-changed={}", ico.display());
     println!("cargo:rerun-if-changed={}", manifest.display());
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    let data = std::fs::read(&ico).expect("assets/abra.ico tidak terbaca");
+    let data = std::fs::read(&ico).expect("assets/nox.ico tidak terbaca");
     let man_bytes = std::fs::read(&manifest).ok();
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let res_path = out_dir.join("abra_icon.res");
-    std::fs::write(&res_path, ico_to_res(&data, 1, man_bytes.as_deref())).expect("gagal menulis abra_icon.res");
+    let res_path = out_dir.join("nox_icon.res");
+    std::fs::write(&res_path, ico_to_res(&data, 1, man_bytes.as_deref())).expect("gagal menulis nox_icon.res");
 
     if env == "msvc" {
         if man_bytes.is_some() {
@@ -73,7 +73,7 @@ fn embed_icon() {
         }
         println!("cargo:rustc-link-arg-bins={}", res_path.display());
     } else if env == "gnu" {
-        let obj_path = out_dir.join("abra_icon.o");
+        let obj_path = out_dir.join("nox_icon.o");
         let windres = ["windres", "x86_64-w64-mingw32-windres", r"C:\msys64\mingw64\bin\windres.exe"]
             .into_iter()
             .find_map(|tool| {

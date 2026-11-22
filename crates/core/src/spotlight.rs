@@ -55,12 +55,12 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef { id: "screenshot", title: "Ambil Tangkapan Layar", app: "Snipping Tool", default_key: "ss" },
     ActionDef { id: "lock", title: "Kunci Layar", app: "Sistem", default_key: "lk" },
     ActionDef { id: "desktop", title: "Tampilkan Desktop", app: "Sistem", default_key: "" },
-    ActionDef { id: "dark", title: "Ganti Mode Gelap", app: "ABRA", default_key: "dm" },
-    ActionDef { id: "mission", title: "Overview", app: "ABRA", default_key: "mc" },
+    ActionDef { id: "dark", title: "Ganti Mode Gelap", app: "NOX", default_key: "dm" },
+    ActionDef { id: "mission", title: "Overview", app: "NOX", default_key: "mc" },
     ActionDef { id: "calc", title: "Buka Kalkulator", app: "Kalkulator", default_key: "ca" },
     ActionDef { id: "taskmgr", title: "Buka Task Manager", app: "Sistem", default_key: "" },
     ActionDef { id: "settings", title: "Buka Pengaturan Windows", app: "Pengaturan", default_key: "st" },
-    ActionDef { id: "clearclip", title: "Hapus Riwayat Papan Klip", app: "ABRA", default_key: "" },
+    ActionDef { id: "clearclip", title: "Hapus Riwayat Papan Klip", app: "NOX", default_key: "" },
 ];
 
 pub fn parse_quick_keys(text: &str) -> HashMap<String, String> {

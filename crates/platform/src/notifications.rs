@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::{c_char, c_int, c_void, CString};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use windows::core::PWSTR;
+use windows::core::{w, GUID, HSTRING, PCWSTR, PWSTR};
 use windows::Foundation::TypedEventHandler;
 use windows::UI::Notifications::Management::{
     UserNotificationListener, UserNotificationListenerAccessStatus,
@@ -12,10 +13,19 @@ use windows::UI::Notifications::{
     KnownNotificationBindings, NotificationKinds, UserNotification,
     UserNotificationChangedEventArgs, UserNotificationChangedKind,
 };
-use windows::Win32::Foundation::{CloseHandle, APPMODEL_ERROR_NO_PACKAGE, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+use windows::Win32::Foundation::{
+    CloseHandle, APPMODEL_ERROR_NO_PACKAGE, ERROR_INSUFFICIENT_BUFFER, HWND, LPARAM, POINT, RECT,
+};
+use windows::Win32::Storage::Packaging::Appx::{
+    GetCurrentPackageFullName, GetPackagePathByFullName, GetPackagesByPackageFamily,
+};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CLSIDFromString, CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED,
+};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Registry::{
+    RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -25,20 +35,26 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationCondition,
     IUIAutomationElement, IUIAutomationEventHandler, IUIAutomationEventHandler_Impl,
     IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, SetWinEventHook,
-    TreeScope_Descendants, TreeScope_Element, TreeScope_Subtree, UnhookWinEvent, HWINEVENTHOOK,
-    UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
-    UIA_DataItemControlTypeId, UIA_EVENT_ID, UIA_InvokePatternId, UIA_ListItemControlTypeId,
-    UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TextControlTypeId,
-    UIA_TreeItemControlTypeId, UIA_Window_WindowOpenedEventId,
+    TreeScope, TreeScope_Children, TreeScope_Descendants, TreeScope_Element, TreeScope_Subtree,
+    UnhookWinEvent, HWINEVENTHOOK, UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId,
+    UIA_ControlTypePropertyId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
+    UIA_EVENT_ID, UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TableControlTypeId,
+    UIA_TextControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId,
+    UIA_Window_WindowOpenedEventId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
 };
+use windows::Win32::UI::Notifications::INotificationActivationCallback;
+use windows::Win32::UI::Shell::{
+    ApplicationActivationManager, IApplicationActivationManager, AO_NONE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, SetCursorPos,
-    TranslateMessage, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, MSG, PM_REMOVE,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    AllowSetForegroundWindow, DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    PeekMessageW, SetCursorPos, TranslateMessage, ASFW_ANY, EVENT_OBJECT_NAMECHANGE,
+    EVENT_OBJECT_SHOW, MSG, PM_REMOVE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 use windows_core::{implement, BOOL};
 
@@ -1346,6 +1362,7 @@ fn has_webview_child(hwnd: HWND) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn scan_cached_candidates(
     root: &IUIAutomationElement,
+    scope: TreeScope,
     cond: &IUIAutomationCondition,
     cache: &IUIAutomationCacheRequest,
     left_min: i32,
@@ -1356,7 +1373,7 @@ fn scan_cached_candidates(
     limit: i32,
     early_score: u8,
 ) -> Option<(u8, IUIAutomationElement, RECT)> {
-    let arr = unsafe { root.FindAllBuildCache(TreeScope_Descendants, cond, cache) }.ok()?;
+    let arr = unsafe { root.FindAllBuildCache(scope, cond, cache) }.ok()?;
     let total = unsafe { arr.Length() }.unwrap_or(0).min(limit);
 
     let mut best: Option<(u8, u8, i32, IUIAutomationElement, RECT)> = None;
@@ -1369,7 +1386,7 @@ fn scan_cached_candidates(
         };
         let ew = rc.right - rc.left;
         let eh = rc.bottom - rc.top;
-        if ew <= 4 || eh <= 4 || eh > 150 {
+        if ew <= 4 || eh <= 4 || eh > 260 {
             continue;
         }
         let cx = (rc.left + rc.right) / 2;
@@ -1417,9 +1434,41 @@ fn scan_cached_candidates(
     best.map(|(s, _, _, el, rc)| (s, el, rc))
 }
 
+/// Locates left-sidebar list/grid/table/tree containers directly via a single fast UIA query
+/// (~7ms on WhatsApp WebView2), avoiding full-window `ListItem`/`DataItem` descendant scans
+/// that otherwise serialize hundreds of chat message bubbles (~3–4s).
+fn find_sidebar_containers(
+    root: &IUIAutomationElement,
+    container_cond: &IUIAutomationCondition,
+    cache: &IUIAutomationCacheRequest,
+    left_min: i32,
+    left_max: i32,
+) -> Vec<IUIAutomationElement> {
+    let mut out = Vec::new();
+    let Ok(arr) = (unsafe { root.FindAllBuildCache(TreeScope_Descendants, container_cond, cache) }) else {
+        return out;
+    };
+    let n = unsafe { arr.Length() }.unwrap_or(0).min(24);
+    for i in 0..n {
+        let Ok(el) = (unsafe { arr.GetElement(i) }) else {
+            continue;
+        };
+        let Ok(r) = (unsafe { el.CachedBoundingRectangle() }) else {
+            continue;
+        };
+        let rw = r.right - r.left;
+        let rh = r.bottom - r.top;
+        if r.left >= left_min - 24 && r.right <= left_max + 80 && rw >= 140 && rh >= 120 {
+            out.push(el);
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_select_chat_in_hwnd(
     uia: &IUIAutomation,
+    container_cond: &IUIAutomationCondition,
     row_cond: &IUIAutomationCondition,
     text_cond: &IUIAutomationCondition,
     cache: &IUIAutomationCacheRequest,
@@ -1452,25 +1501,52 @@ fn try_select_chat_in_hwnd(
         return false;
     };
 
-    // Fast Pass 1: cached scan of ListItem/DataItem/TreeItem rows ONLY (avoids hundreds of message Text nodes).
-    let mut hit = scan_cached_candidates(
-        &root,
-        row_cond,
-        cache,
-        left_min,
-        left_max,
-        top_min,
-        bottom_max,
-        targets,
-        120,
-        78,
-    );
-    let matched_row_directly = hit.is_some();
+    let mut hit: Option<(u8, IUIAutomationElement, RECT)> = None;
+    let mut matched_row_directly = false;
+    let mut scoped = false;
 
-    // Fallback Pass 2: cached scan of Text nodes (for custom sidebar DOMs without row ARIA names).
-    if hit.is_none() {
+    // Fast Path 0 (~11ms on WhatsApp WebView2): isolate sidebar List/DataGrid/Table/Tree first,
+    // then scan direct children (~4ms) before descendants (~15ms) inside that container only.
+    let containers = find_sidebar_containers(&root, container_cond, cache, left_min, left_max);
+    for sidebar in &containers {
+        scoped = true;
         hit = scan_cached_candidates(
-            &root,
+            sidebar,
+            TreeScope_Children,
+            row_cond,
+            cache,
+            left_min,
+            left_max,
+            top_min,
+            bottom_max,
+            targets,
+            60,
+            78,
+        );
+        if hit.is_some() {
+            matched_row_directly = true;
+            break;
+        }
+        hit = scan_cached_candidates(
+            sidebar,
+            TreeScope_Descendants,
+            row_cond,
+            cache,
+            left_min,
+            left_max,
+            top_min,
+            bottom_max,
+            targets,
+            120,
+            78,
+        );
+        if hit.is_some() {
+            matched_row_directly = true;
+            break;
+        }
+        hit = scan_cached_candidates(
+            sidebar,
+            TreeScope_Descendants,
             text_cond,
             cache,
             left_min,
@@ -1478,9 +1554,47 @@ fn try_select_chat_in_hwnd(
             top_min,
             bottom_max,
             targets,
-            260,
+            160,
             90,
         );
+        if hit.is_some() {
+            matched_row_directly = false;
+            break;
+        }
+    }
+
+    // Fallback: Full-window scan only when no sidebar container matched.
+    if hit.is_none() {
+        scoped = false;
+        hit = scan_cached_candidates(
+            &root,
+            TreeScope_Descendants,
+            row_cond,
+            cache,
+            left_min,
+            left_max,
+            top_min,
+            bottom_max,
+            targets,
+            120,
+            78,
+        );
+        matched_row_directly = hit.is_some();
+        if hit.is_none() {
+            hit = scan_cached_candidates(
+                &root,
+                TreeScope_Descendants,
+                text_cond,
+                cache,
+                left_min,
+                left_max,
+                top_min,
+                bottom_max,
+                targets,
+                260,
+                90,
+            );
+        }
     }
 
     let Some((score, matched_el, matched_rc)) = hit else {
@@ -1528,7 +1642,7 @@ fn try_select_chat_in_hwnd(
                 crate::log::line(
                     "notif",
                     &format!(
-                        "nav app={app_name} target=\"{}\" score={score} via=uia_select elapsed={}ms",
+                        "nav app={app_name} target=\"{}\" score={score} scoped={scoped} via=uia_select elapsed={}ms",
                         targets[0],
                         t0.elapsed().as_millis()
                     ),
@@ -1543,7 +1657,7 @@ fn try_select_chat_in_hwnd(
                 crate::log::line(
                     "notif",
                     &format!(
-                        "nav app={app_name} target=\"{}\" score={score} via=uia_invoke elapsed={}ms",
+                        "nav app={app_name} target=\"{}\" score={score} scoped={scoped} via=uia_invoke elapsed={}ms",
                         targets[0],
                         t0.elapsed().as_millis()
                     ),
@@ -1560,7 +1674,7 @@ fn try_select_chat_in_hwnd(
         crate::log::line(
             "notif",
             &format!(
-                "nav app={app_name} target=\"{}\" score={score} via=uia_click({cx},{cy}) webview={is_webview} elapsed={}ms",
+                "nav app={app_name} target=\"{}\" score={score} scoped={scoped} via=uia_click({cx},{cy}) webview={is_webview} elapsed={}ms",
                 targets[0],
                 t0.elapsed().as_millis()
             ),
@@ -1575,7 +1689,7 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
     let _ = std::thread::Builder::new().name("abra-notif-nav".into()).spawn(move || {
         // Proceed immediately if already foreground; poll briefly (25ms steps) only while waking from tray.
         let mut raw_hwnd = initial_hwnd;
-        for _ in 0..24 {
+        for _ in 0..40 {
             if raw_hwnd != 0 && unsafe { GetForegroundWindow().0 as isize == raw_hwnd } {
                 break;
             }
@@ -1585,7 +1699,7 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(12));
         }
         if raw_hwnd == 0 {
             crate::log::line("notif", &format!("nav app={app_name} aborted: window not found"));
@@ -1602,8 +1716,25 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
             let setup = (|| -> windows_core::Result<(
                 IUIAutomationCondition,
                 IUIAutomationCondition,
+                IUIAutomationCondition,
                 IUIAutomationCacheRequest,
             )> {
+                let c_l = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_ListControlTypeId.0))
+                }?;
+                let c_g = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_DataGridControlTypeId.0))
+                }?;
+                let c_tb = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_TableControlTypeId.0))
+                }?;
+                let c_tr = unsafe {
+                    uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_TreeControlTypeId.0))
+                }?;
+                let cg1 = unsafe { uia.CreateOrCondition(&c_l, &c_g) }?;
+                let cg2 = unsafe { uia.CreateOrCondition(&c_tb, &c_tr) }?;
+                let container_cond = unsafe { uia.CreateOrCondition(&cg1, &cg2) }?;
+
                 let c_list = unsafe {
                     uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_ListItemControlTypeId.0))
                 }?;
@@ -1625,14 +1756,34 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
                     cache.AddProperty(UIA_ControlTypePropertyId)?;
                     cache.SetTreeScope(TreeScope_Element)?;
                 }
-                Ok((row_cond, text_cond, cache))
+                Ok((container_cond, row_cond, text_cond, cache))
             })();
-            if let Ok((row_cond, text_cond, cache)) = setup {
-                if !try_select_chat_in_hwnd(&uia, &row_cond, &text_cond, &cache, hwnd, &targets, &app_name, t0) {
+            if let Ok((container_cond, row_cond, text_cond, cache)) = setup {
+                if !try_select_chat_in_hwnd(
+                    &uia,
+                    &container_cond,
+                    &row_cond,
+                    &text_cond,
+                    &cache,
+                    hwnd,
+                    &targets,
+                    &app_name,
+                    t0,
+                ) {
                     // Retry once after 180ms in case the app was just restored from tray and still rendering.
                     std::thread::sleep(Duration::from_millis(180));
                     if unsafe { GetForegroundWindow() == hwnd }
-                        && !try_select_chat_in_hwnd(&uia, &row_cond, &text_cond, &cache, hwnd, &targets, &app_name, t0)
+                        && !try_select_chat_in_hwnd(
+                            &uia,
+                            &container_cond,
+                            &row_cond,
+                            &text_cond,
+                            &cache,
+                            hwnd,
+                            &targets,
+                            &app_name,
+                            t0,
+                        )
                     {
                         crate::log::line(
                             "notif",
@@ -1652,13 +1803,540 @@ fn spawn_chat_navigator(aumid: String, app_name: String, initial_hwnd: isize, ta
     });
 }
 
+// =============================================================================
+// Tier 0: Native Windows Toast COM Deep-Link Activation (~10-20ms)
+// Reads the exact `<toast launch="...">` payload from Windows' per-user
+// `wpndatabase.db` via built-in `winsqlite3.dll` (zero external deps) and
+// invokes the target app's registered `INotificationActivationCallback` COM
+// server (or `IApplicationActivationManager` / protocol URI) — identical to
+// clicking Windows' own Action Center / Toast banner.
+// =============================================================================
+
+struct WinSqliteApi {
+    open_v2: unsafe extern "C" fn(*const c_char, *mut *mut c_void, c_int, *const c_char) -> c_int,
+    busy_timeout: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+    prepare_v2: unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        c_int,
+        *mut *mut c_void,
+        *mut *const c_char,
+    ) -> c_int,
+    bind_int64: unsafe extern "C" fn(*mut c_void, c_int, i64) -> c_int,
+    step: unsafe extern "C" fn(*mut c_void) -> c_int,
+    column_blob: unsafe extern "C" fn(*mut c_void, c_int) -> *const c_void,
+    column_bytes: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+    column_text: unsafe extern "C" fn(*mut c_void, c_int) -> *const u8,
+    finalize: unsafe extern "C" fn(*mut c_void) -> c_int,
+    close: unsafe extern "C" fn(*mut c_void) -> c_int,
+}
+
+static WIN_SQLITE: OnceLock<Option<WinSqliteApi>> = OnceLock::new();
+static CLSID_CACHE: OnceLock<Mutex<HashMap<String, Option<GUID>>>> = OnceLock::new();
+
+fn winsqlite() -> Option<&'static WinSqliteApi> {
+    WIN_SQLITE
+        .get_or_init(|| unsafe {
+            let module = LoadLibraryW(w!("winsqlite3.dll")).ok()?;
+            macro_rules! sym {
+                ($name:literal) => {{
+                    let ptr = GetProcAddress(module, windows::core::PCSTR(concat!($name, "\0").as_ptr()))?;
+                    std::mem::transmute(ptr)
+                }};
+            }
+            Some(WinSqliteApi {
+                open_v2: sym!("sqlite3_open_v2"),
+                busy_timeout: sym!("sqlite3_busy_timeout"),
+                prepare_v2: sym!("sqlite3_prepare_v2"),
+                bind_int64: sym!("sqlite3_bind_int64"),
+                step: sym!("sqlite3_step"),
+                column_blob: sym!("sqlite3_column_blob"),
+                column_bytes: sym!("sqlite3_column_bytes"),
+                column_text: sym!("sqlite3_column_text"),
+                finalize: sym!("sqlite3_finalize"),
+                close: sym!("sqlite3_close"),
+            })
+        })
+        .as_ref()
+}
+
+fn unescape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let b = s.as_bytes();
+    while i < b.len() {
+        if b[i] == b'&' {
+            if let Some(rel) = s[i..].find(';') {
+                let ent = &s[i + 1..i + rel];
+                let decoded = match ent {
+                    "amp" => Some('&'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    _ if ent.starts_with("#x") || ent.starts_with("#X") => {
+                        u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                    }
+                    _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32),
+                    _ => None,
+                };
+                if let Some(ch) = decoded {
+                    out.push(ch);
+                    i += rel + 1;
+                    continue;
+                }
+            }
+        }
+        if let Some(ch) = s[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn extract_xml_attr(tag: &str, attr_name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let needle = attr_name.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(pos) = lower[search_from..].find(&needle) {
+        let abs = search_from + pos;
+        let prev_ok = abs == 0
+            || tag.as_bytes()[abs - 1].is_ascii_whitespace()
+            || tag.as_bytes()[abs - 1] == b':';
+        let after = abs + needle.len();
+        if prev_ok && after < tag.len() {
+            let rest = tag[after..].trim_start();
+            if let Some(val_part) = rest.strip_prefix('=') {
+                let val_part = val_part.trim_start();
+                let quote = val_part.as_bytes().first().copied()?;
+                if quote == b'"' || quote == b'\'' {
+                    let inner = &val_part[1..];
+                    if let Some(end) = inner.find(quote as char) {
+                        return Some(unescape_xml(&inner[..end]));
+                    }
+                }
+            }
+        }
+        search_from = after;
+    }
+    None
+}
+
+/// Parses `<toast launch="..." activationType="...">` from raw WPN payload XML.
+/// Returns `(launch_args, is_protocol)`.
+fn parse_toast_xml_launch(xml: &str) -> Option<(String, bool)> {
+    let lower = xml.to_ascii_lowercase();
+    let start = lower.find("<toast")?;
+    let rel_end = xml[start..].find('>')?;
+    let tag = &xml[start..=start + rel_end];
+    let launch = extract_xml_attr(tag, "launch")?;
+    if launch.is_empty() {
+        return None;
+    }
+    let is_protocol = extract_xml_attr(tag, "activationType")
+        .is_some_and(|v| v.eq_ignore_ascii_case("protocol"));
+    Some((launch, is_protocol))
+}
+
+fn extract_toast_xml_texts(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = xml.to_ascii_lowercase();
+    let mut pos = 0;
+    while let Some(rel) = lower[pos..].find("<text") {
+        let s = pos + rel;
+        let Some(gt) = xml[s..].find('>') else { break };
+        let content_start = s + gt + 1;
+        let Some(close_rel) = lower[content_start..].find("</text>") else { break };
+        let txt = unescape_xml(xml[content_start..content_start + close_rel].trim());
+        if !txt.is_empty() {
+            out.push(txt);
+        }
+        pos = content_start + close_rel + 7;
+    }
+    out
+}
+
+fn read_sqlite_text(api: &WinSqliteApi, stmt: *mut c_void, col: c_int) -> String {
+    unsafe {
+        let p = (api.column_text)(stmt, col);
+        let len = (api.column_bytes)(stmt, col);
+        if p.is_null() || len <= 0 {
+            return String::new();
+        }
+        let slice = std::slice::from_raw_parts(p, len as usize);
+        String::from_utf8_lossy(slice).trim_end_matches('\0').to_string()
+    }
+}
+
+fn read_sqlite_payload(api: &WinSqliteApi, stmt: *mut c_void, col: c_int) -> String {
+    unsafe {
+        let p = (api.column_blob)(stmt, col) as *const u8;
+        let len = (api.column_bytes)(stmt, col);
+        if p.is_null() || len <= 0 {
+            return String::new();
+        }
+        let slice = std::slice::from_raw_parts(p, len as usize);
+        String::from_utf8_lossy(slice).trim_end_matches('\0').to_string()
+    }
+}
+
+/// Queries `%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db` read-only
+/// for the exact notification's `<toast launch="...">` payload (~5–12ms).
+fn query_wpn_toast_payload(
+    id: u32,
+    aumid: &str,
+    app_name: &str,
+    title: &str,
+) -> Option<(String, bool, String)> {
+    let api = winsqlite()?;
+    let local = std::env::var("LOCALAPPDATA").ok()?;
+    let db_path = std::path::PathBuf::from(local)
+        .join("Microsoft")
+        .join("Windows")
+        .join("Notifications")
+        .join("wpndatabase.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let c_path = CString::new(db_path.to_string_lossy().as_bytes()).ok()?;
+
+    const SQLITE_OK: c_int = 0;
+    const SQLITE_ROW: c_int = 100;
+    const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
+
+    let mut db: *mut c_void = std::ptr::null_mut();
+    unsafe {
+        if (api.open_v2)(c_path.as_ptr(), &mut db, SQLITE_OPEN_READONLY, std::ptr::null()) != SQLITE_OK
+            || db.is_null()
+        {
+            if !db.is_null() {
+                let _ = (api.close)(db);
+            }
+            return None;
+        }
+        let _ = (api.busy_timeout)(db, 120);
+    }
+
+    let result = (|| -> Option<(String, bool, String)> {
+        // 1. Exact Notification.Id lookup (for WinRT notifications where id < 1_000_000).
+        if id > 0 && id < 1_000_000 {
+            let sql = CString::new(
+                "SELECT n.Payload, h.PrimaryId FROM Notification n \
+                 LEFT JOIN NotificationHandler h ON n.HandlerId = h.RecordId \
+                 WHERE n.Id = ?1 AND n.Type = 'toast' LIMIT 1",
+            )
+            .ok()?;
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            unsafe {
+                if (api.prepare_v2)(db, sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut()) == SQLITE_OK
+                    && !stmt.is_null()
+                {
+                    let _ = (api.bind_int64)(stmt, 1, id as i64);
+                    let hit = if (api.step)(stmt) == SQLITE_ROW {
+                        let xml = read_sqlite_payload(api, stmt, 0);
+                        let primary_id = read_sqlite_text(api, stmt, 1);
+                        parse_toast_xml_launch(&xml).map(|(l, proto)| (l, proto, primary_id))
+                    } else {
+                        None
+                    };
+                    let _ = (api.finalize)(stmt);
+                    if hit.is_some() {
+                        return hit;
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback match by recent toast XML text + AUMID/app_name (supports Zero-Config UIA too!).
+        let norm_title = normalize_label(strip_count_suffix(title));
+        if norm_title.is_empty() {
+            return None;
+        }
+        let aumid_lc = aumid.to_ascii_lowercase();
+        let app_lc = app_name.to_ascii_lowercase();
+        let sql = CString::new(
+            "SELECT n.Payload, h.PrimaryId FROM Notification n \
+             LEFT JOIN NotificationHandler h ON n.HandlerId = h.RecordId \
+             WHERE n.Type = 'toast' ORDER BY n.ArrivalTime DESC LIMIT 24",
+        )
+        .ok()?;
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            if (api.prepare_v2)(db, sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut()) != SQLITE_OK
+                || stmt.is_null()
+            {
+                return None;
+            }
+            let mut found = None;
+            while (api.step)(stmt) == SQLITE_ROW {
+                let primary_id = read_sqlite_text(api, stmt, 1);
+                let pid_lc = primary_id.to_ascii_lowercase();
+                let app_ok = if !aumid_lc.is_empty() {
+                    pid_lc == aumid_lc || pid_lc.contains(&aumid_lc)
+                } else if !app_lc.is_empty() && app_lc != "windows" {
+                    pid_lc.contains(&app_lc)
+                } else {
+                    true
+                };
+                if !app_ok {
+                    continue;
+                }
+                let xml = read_sqlite_payload(api, stmt, 0);
+                let texts = extract_toast_xml_texts(&xml);
+                let title_ok = texts.iter().any(|t| {
+                    let nt = normalize_label(strip_count_suffix(t));
+                    nt == norm_title || nt.contains(&norm_title) || norm_title.contains(&nt)
+                });
+                if title_ok {
+                    if let Some((launch, proto)) = parse_toast_xml_launch(&xml) {
+                        found = Some((launch, proto, primary_id));
+                        break;
+                    }
+                }
+            }
+            let _ = (api.finalize)(stmt);
+            found
+        }
+    })();
+
+    unsafe {
+        let _ = (api.close)(db);
+    }
+    result
+}
+
+fn reg_read_sz(root: windows::Win32::System::Registry::HKEY, subkey: &str, value: &str) -> Option<String> {
+    let sub_h = HSTRING::from(subkey);
+    let val_h = HSTRING::from(value);
+    let mut size = 0u32;
+    unsafe {
+        if RegGetValueW(root, &sub_h, &val_h, RRF_RT_REG_SZ, None, None, Some(&mut size)).is_err()
+            || size < 2
+        {
+            return None;
+        }
+        let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+        if RegGetValueW(
+            root,
+            &sub_h,
+            &val_h,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            Some(&mut size),
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let s = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+fn parse_guid_str(raw: &str) -> Option<GUID> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let braced = if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        trimmed.to_string()
+    } else {
+        format!("{{{trimmed}}}")
+    };
+    let h = HSTRING::from(braced);
+    unsafe { CLSIDFromString(PCWSTR(h.as_ptr())).ok() }
+}
+
+fn extract_manifest_toast_clsid(manifest_xml: &str) -> Option<String> {
+    extract_xml_attr(manifest_xml, "ToastActivatorCLSID")
+}
+
+fn packaged_install_path(package_family_name: &str) -> Option<String> {
+    let pfn_h = HSTRING::from(package_family_name);
+    let mut count = 0u32;
+    let mut buf_len = 0u32;
+    unsafe {
+        let err = GetPackagesByPackageFamily(
+            PCWSTR(pfn_h.as_ptr()),
+            &mut count,
+            None,
+            &mut buf_len,
+            None,
+        );
+        if err != ERROR_INSUFFICIENT_BUFFER || count == 0 || buf_len == 0 {
+            return None;
+        }
+        let mut ptrs = vec![PWSTR::null(); count as usize];
+        let mut buf = vec![0u16; buf_len as usize];
+        let err2 = GetPackagesByPackageFamily(
+            PCWSTR(pfn_h.as_ptr()),
+            &mut count,
+            Some(ptrs.as_mut_ptr()),
+            &mut buf_len,
+            Some(PWSTR(buf.as_mut_ptr())),
+        );
+        if err2.is_err() || count == 0 || ptrs[0].is_null() {
+            return None;
+        }
+        let mut path_len = 0u32;
+        let err3 = GetPackagePathByFullName(PCWSTR(ptrs[0].0), &mut path_len, None);
+        if err3 != ERROR_INSUFFICIENT_BUFFER || path_len == 0 {
+            return None;
+        }
+        let mut path_buf = vec![0u16; path_len as usize];
+        if GetPackagePathByFullName(
+            PCWSTR(ptrs[0].0),
+            &mut path_len,
+            Some(PWSTR(path_buf.as_mut_ptr())),
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let n = path_buf.iter().position(|&c| c == 0).unwrap_or(path_buf.len());
+        let s = String::from_utf16_lossy(&path_buf[..n]);
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+fn resolve_toast_clsid(aumid: &str) -> Option<GUID> {
+    if aumid.is_empty() {
+        return None;
+    }
+    let cache = CLSID_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(aumid) {
+            return *hit;
+        }
+    }
+
+    // 1. Desktop Win32 / Electron / Chrome / Discord / Telegram: CustomActivator in registry.
+    let subkey = format!("Software\\Classes\\AppUserModelId\\{aumid}");
+    let mut resolved = reg_read_sz(HKEY_CURRENT_USER, &subkey, "CustomActivator")
+        .or_else(|| reg_read_sz(HKEY_LOCAL_MACHINE, &subkey, "CustomActivator"))
+        .and_then(|s| parse_guid_str(&s));
+
+    // 2. Packaged MSIX / UWP / Desktop Bridge (e.g. WhatsApp Desktop): ToastActivatorCLSID in AppxManifest.xml.
+    if resolved.is_none() {
+        if let Some((pfn, _)) = aumid.split_once('!') {
+            if let Some(install_dir) = packaged_install_path(pfn) {
+                let man_path = std::path::Path::new(&install_dir).join("AppxManifest.xml");
+                if let Ok(xml) = std::fs::read_to_string(&man_path) {
+                    if let Some(clsid_str) = extract_manifest_toast_clsid(&xml) {
+                        resolved = parse_guid_str(&clsid_str);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(aumid.to_string(), resolved);
+    }
+    resolved
+}
+
+fn try_activate_via_wpn_payload(id: u32, aumid: &str, app_name: &str, title: &str) -> bool {
+    let t0 = Instant::now();
+    let Some((launch, is_protocol, db_aumid)) = query_wpn_toast_payload(id, aumid, app_name, title) else {
+        return false;
+    };
+    let effective_aumid = if !db_aumid.is_empty() {
+        db_aumid.as_str()
+    } else {
+        aumid
+    };
+
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+
+    if is_protocol {
+        crate::launch::open(&launch);
+        crate::log::line(
+            "notif",
+            &format!(
+                "nav app={app_name} id={id} via=toast_protocol elapsed={}ms",
+                t0.elapsed().as_millis()
+            ),
+        );
+        return true;
+    }
+
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+    let ok = (|| -> bool {
+        // Preferred: invoke the app's exact `INotificationActivationCallback` COM Toast Activator
+        // (WhatsApp Desktop, Teams, Outlook, Discord, Telegram, Chrome, Edge, WinUI3 apps).
+        if let Some(clsid) = resolve_toast_clsid(effective_aumid) {
+            if let Ok(cb) = unsafe {
+                CoCreateInstance::<_, INotificationActivationCallback>(
+                    &clsid,
+                    None,
+                    CLSCTX_LOCAL_SERVER,
+                )
+            } {
+                let aumid_h = HSTRING::from(effective_aumid);
+                let args_h = HSTRING::from(&launch);
+                if unsafe { cb.Activate(&aumid_h, &args_h, &[]) }.is_ok() {
+                    crate::log::line(
+                        "notif",
+                        &format!(
+                            "nav app={app_name} id={id} via=toast_com elapsed={}ms",
+                            t0.elapsed().as_millis()
+                        ),
+                    );
+                    return true;
+                }
+            }
+        }
+
+        // Fallback for pure packaged UWP apps without a custom COM ToastActivatorCLSID.
+        if effective_aumid.contains('!') {
+            if let Ok(mgr) = unsafe {
+                CoCreateInstance::<_, IApplicationActivationManager>(
+                    &ApplicationActivationManager,
+                    None,
+                    CLSCTX_INPROC_SERVER,
+                )
+            } {
+                let aumid_h = HSTRING::from(effective_aumid);
+                let args_h = HSTRING::from(&launch);
+                if unsafe { mgr.ActivateApplication(&aumid_h, &args_h, AO_NONE) }.is_ok() {
+                    crate::log::line(
+                        "notif",
+                        &format!(
+                            "nav app={app_name} id={id} via=app_activation_mgr elapsed={}ms",
+                            t0.elapsed().as_millis()
+                        ),
+                    );
+                    return true;
+                }
+            }
+        }
+        false
+    })();
+
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    ok
+}
+
 /// Activates a clicked notification:
-/// 1. If Windows' native toast banner is still visible on screen, invokes it directly so the app
-///    receives its original deep-link `launch` payload.
-/// 2. Otherwise brings the source app window to the foreground.
-/// 3. For messaging apps (WhatsApp, Telegram, Discord, Slack, Teams, etc.), navigates to the
-///    matching chat room (`title`) inside the app's sidebar via UI Automation.
-pub fn activate_notification(aumid: &str, app_name: &str, title: &str, _body: &str) -> bool {
+/// 0. Reads the exact `<toast launch="...">` payload from Windows' `wpndatabase.db` and invokes
+///    the target app's native `INotificationActivationCallback` COM server (~15ms, true deep-link!).
+/// 1. Otherwise if Windows' native toast banner is still visible on screen, invokes it directly.
+/// 2. Otherwise brings the source app window to the foreground and (for chat apps) navigates to
+///    the matching chat room via UI Automation.
+pub fn activate_notification(id: u32, aumid: &str, app_name: &str, title: &str, _body: &str) -> bool {
+    if try_activate_via_wpn_payload(id, aumid, app_name, title) {
+        return true;
+    }
     if try_invoke_live_toast(app_name, title) {
         return true;
     }
@@ -1748,5 +2426,25 @@ mod tests {
         assert_eq!(score_chat_candidate("papaya", "papa"), 0);
         assert!(is_chat_app("5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App", "WhatsApp"));
         assert!(!is_chat_app("Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "Notepad"));
+    }
+
+    #[test]
+    fn parses_wpn_toast_launch_payload_and_manifest_clsid() {
+        let xml = r#"<toast launch="action=Click&amp;key=msg%3Afalse_12345&amp;tag=abc" activationType="foreground"><visual><binding template="ToastGeneric"><text>Mama</text><text>Sudah makan?</text></binding></visual></toast>"#;
+        let (launch, proto) = parse_toast_xml_launch(xml).expect("launch parsed");
+        assert_eq!(launch, "action=Click&key=msg%3Afalse_12345&tag=abc");
+        assert!(!proto);
+        assert_eq!(extract_toast_xml_texts(xml), vec!["Mama", "Sudah makan?"]);
+
+        let proto_xml = r#"<toast activationType="protocol" launch="https://opankcs.com/test?a=1&amp;b=2"></toast>"#;
+        let (pl, is_p) = parse_toast_xml_launch(proto_xml).expect("protocol launch");
+        assert_eq!(pl, "https://opankcs.com/test?a=1&b=2");
+        assert!(is_p);
+
+        let man = r#"<desktop:ToastNotificationActivation ToastActivatorCLSID="bebd6a5e-1b14-4a57-a195-c772d28b6d15" />"#;
+        assert_eq!(
+            extract_manifest_toast_clsid(man).as_deref(),
+            Some("bebd6a5e-1b14-4a57-a195-c772d28b6d15")
+        );
     }
 }

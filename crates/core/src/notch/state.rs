@@ -186,22 +186,35 @@ pub fn nav_state(tab: Tab, lyrics_open: bool, nav_hovered: bool) -> NavState {
 }
 
 /// Accumulator + gesture lock for Windows precision touchpad horizontal swipes (`WM_MOUSEHWHEEL`).
-/// Absorbs momentum/inertia tails so a single two-finger swipe always steps by exactly 1 tab.
+/// Absorbs momentum/inertia tails so a single two-finger swipe always steps by exactly 1 tab,
+/// and suppresses accidental diagonal micro-swipes while vertical scrolling is active.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SwipeLatch {
     accum: i32,
     last_ev_ms: i64,
     locked_until_ms: i64,
     locked_dir: i32,
+    vscroll_until_ms: i64,
 }
 
 impl SwipeLatch {
     pub const THRESHOLD: i32 = 60;
     pub const IDLE_RESET_MS: i64 = 120;
     pub const COOLDOWN_MS: i64 = 420;
+    pub const VSCROLL_SUPPRESS_MS: i64 = 220;
+
+    /// Records active vertical scroll input to prevent diagonal touchpad drift from switching tabs.
+    pub fn note_vertical(&mut self, now_ms: i64) {
+        self.accum = 0;
+        self.vscroll_until_ms = self.vscroll_until_ms.max(now_ms + Self::VSCROLL_SUPPRESS_MS);
+    }
 
     pub fn feed(&mut self, delta: i16, now_ms: i64) -> i32 {
         if delta == 0 {
+            return 0;
+        }
+        if now_ms < self.vscroll_until_ms {
+            self.accum = 0;
             return 0;
         }
         let gap = now_ms.saturating_sub(self.last_ev_ms);
@@ -235,6 +248,60 @@ impl SwipeLatch {
             0
         }
     }
+}
+
+/// Accumulates Windows `WM_MOUSEWHEEL` vertical deltas (both `±120` discrete mouse wheel notches
+/// and high-frequency fractional Precision Touchpad ticks) into controlled line/row steps.
+/// Returns positive steps for scrolling down (`delta < 0`) and negative steps for scrolling up (`delta > 0`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WheelAccumulator {
+    accum: i32,
+    last_ev_ms: i64,
+}
+
+impl WheelAccumulator {
+    pub const IDLE_RESET_MS: i64 = 180;
+
+    pub fn reset(&mut self) {
+        self.accum = 0;
+    }
+
+    pub fn feed(&mut self, delta: i16, now_ms: i64, step_delta: i32) -> i32 {
+        if delta == 0 || step_delta <= 0 {
+            return 0;
+        }
+        let gap = now_ms.saturating_sub(self.last_ev_ms);
+        self.last_ev_ms = now_ms;
+        // Negate so positive means scrolling down (increasing list/line offset).
+        let d = -(delta as i32);
+        if gap > Self::IDLE_RESET_MS || (self.accum != 0 && self.accum.signum() != d.signum()) {
+            self.accum = 0;
+        }
+        self.accum += d;
+        let steps = self.accum / step_delta;
+        if steps != 0 {
+            self.accum -= steps * step_delta;
+        }
+        steps
+    }
+}
+
+/// Applies a signed vertical scroll step (`> 0` down, `< 0` up) clamped cleanly to `0..=max_scroll`.
+pub fn apply_scroll_step(cur: usize, steps: i32, max_scroll: usize) -> usize {
+    let base = cur.min(max_scroll);
+    if steps > 0 {
+        base.saturating_add(steps as usize).min(max_scroll)
+    } else if steps < 0 {
+        base.saturating_sub(steps.unsigned_abs() as usize)
+    } else {
+        base
+    }
+}
+
+/// Converts a raw Win32 `WM_MOUSEWHEEL` delta (`> 0` up, `< 0` down, `±120` per mouse notch)
+/// into a signed vertical scroll pixel delta (`> 0` scrolls down, `< 0` scrolls up).
+pub fn wheel_delta_to_px(delta: i16, px_per_notch: f32) -> f32 {
+    -(delta as f32 / 120.0) * px_per_notch
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,11 +352,21 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
     Size { w: w * dpi, h: h * dpi, radius: r * dpi }
 }
 
+/// Soft ambient elevation drop shadow `(blur_dp, offset_y_dp, opacity)`.
 pub fn shadow(l: Look) -> (f32, f32, f32) {
     if matches!(l.view, View::Open(_) | View::Drop) {
-        (32.0, 10.0, 0.62)
+        (22.0, 7.0, 0.65)
     } else {
-        (14.0, 4.0, 0.38)
+        (18.0, 5.5, 0.56)
+    }
+}
+
+/// Tight dense contact shadow right beneath the notch silhouette `(blur_dp, offset_y_dp, opacity)`.
+pub fn contact_shadow(l: Look) -> (f32, f32, f32) {
+    if matches!(l.view, View::Open(_) | View::Drop) {
+        (5.5, 2.0, 0.88)
+    } else {
+        (5.0, 2.0, 0.85)
     }
 }
 
@@ -434,11 +511,58 @@ mod tests {
     }
 
     #[test]
+    fn swipe_latch_suppresses_diagonal_hwheel_during_vertical_scroll() {
+        let mut s = SwipeLatch::default();
+        s.note_vertical(1000);
+        // Stray horizontal drift during vertical scroll must never switch tabs.
+        assert_eq!(s.feed(40, 1020), 0);
+        assert_eq!(s.feed(40, 1050), 0);
+        assert_eq!(s.feed(80, 1180), 0);
+        // After suppression window elapses, intentional horizontal swipe works normally.
+        assert_eq!(s.feed(70, 1250), 1);
+    }
+
+    #[test]
+    fn wheel_accumulator_handles_mouse_notches_touchpad_fractions_and_direction_flip() {
+        let mut w = WheelAccumulator::default();
+        // Standard mouse wheel notch (-120 = down 1 row at 120, or 2 lines at 60).
+        assert_eq!(w.feed(-120, 100, 120), 1);
+        assert_eq!(w.feed(120, 350, 120), -1);
+        assert_eq!(w.feed(-120, 600, 60), 2);
+
+        // Precision touchpad fractional vertical deltas accumulate smoothly without jumping 10x.
+        let mut total_steps = 0;
+        for (i, d) in [-20i16, -25, -30, -35, -30, -20].into_iter().enumerate() {
+            total_steps += w.feed(d, 1000 + i as i64 * 16, 120);
+        }
+        assert_eq!(total_steps, 1, "160 total delta = 1 row step, not 6");
+
+        // Reversing direction clears leftover remainder immediately for crisp response.
+        assert_eq!(w.feed(60, 1120, 60), -1);
+
+        // Clamping helper stays strictly within 0..=max_scroll.
+        assert_eq!(apply_scroll_step(0, -2, 5), 0);
+        assert_eq!(apply_scroll_step(4, 3, 5), 5);
+        assert_eq!(apply_scroll_step(2, -1, 5), 1);
+
+        // Smooth pixel scroll conversion maps standard notches & touchpad fractions accurately.
+        assert!((wheel_delta_to_px(-120, 48.0) - 48.0).abs() < 0.01);
+        assert!((wheel_delta_to_px(120, 48.0) + 48.0).abs() < 0.01);
+        assert!((wheel_delta_to_px(-15, 48.0) - 6.0).abs() < 0.01);
+    }
+
+    #[test]
     fn shadow_deepens_and_softens_when_expanded() {
         let (b0, y0, o0) = shadow(look(Mode::Rest, None));
         let (b1, y1, o1) = shadow(look(Mode::Open(Tab::Play), None));
-        assert_eq!((b0, y0, o0), (14.0, 4.0, 0.38));
-        assert_eq!((b1, y1, o1), (32.0, 10.0, 0.62));
+        assert_eq!((b0, y0, o0), (18.0, 5.5, 0.56));
+        assert_eq!((b1, y1, o1), (22.0, 7.0, 0.65));
         assert!(b1 > b0 && y1 > y0 && o1 > o0);
+
+        let (cb0, cy0, co0) = contact_shadow(look(Mode::Rest, None));
+        let (cb1, cy1, co1) = contact_shadow(look(Mode::Open(Tab::Play), None));
+        assert_eq!((cb0, cy0, co0), (5.0, 2.0, 0.85));
+        assert_eq!((cb1, cy1, co1), (5.5, 2.0, 0.88));
+        assert!(co1 >= co0 && cb1 >= cb0);
     }
 }

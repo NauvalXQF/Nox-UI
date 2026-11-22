@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "abra"
+name = "nox"
 path = "src/main.rs"
 
 [dependencies]

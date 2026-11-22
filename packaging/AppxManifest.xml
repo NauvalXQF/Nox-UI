@@ -6,14 +6,14 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap10 rescap">
   <Identity
-    Name="NauvalXQF.AbraShell"
-    Publisher="CN=NauvalXQF"
+    Name="Opankcs.NoxShell"
+    Publisher="CN=Opankcs"
     Version="0.4.1.0"
     ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>ABRA</DisplayName>
-    <PublisherDisplayName>NauvalXQF</PublisherDisplayName>
-    <Logo>abra.png</Logo>
+    <DisplayName>NOX</DisplayName>
+    <PublisherDisplayName>opankcs.com</PublisherDisplayName>
+    <Logo>nox.png</Logo>
     <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
   </Properties>
   <Dependencies>
@@ -25,16 +25,16 @@
   </Resources>
   <Applications>
     <Application
-      Id="Abra"
-      Executable="abra.exe"
+      Id="Nox"
+      Executable="nox.exe"
       uap10:TrustLevel="mediumIL"
       uap10:RuntimeBehavior="win32App">
       <uap:VisualElements
-        DisplayName="ABRA"
-        Description="macOS-inspired desktop shell for Windows"
+        DisplayName="NOX"
+        Description="Modern desktop shell &amp; Notch for Windows"
         BackgroundColor="transparent"
-        Square150x150Logo="abra.png"
-        Square44x44Logo="abra.png" />
+        Square150x150Logo="nox.png"
+        Square44x44Logo="nox.png" />
     </Application>
   </Applications>
   <Capabilities>

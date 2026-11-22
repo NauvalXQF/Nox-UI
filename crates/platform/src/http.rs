@@ -72,7 +72,7 @@ fn open_and_send(
     recv_timeout_ms: i32,
 ) -> Result<(Handle, Handle, Handle, u16), String> {
     let parsed = parse_url(url)?;
-    let ua = HSTRING::from(concat!("ABRA/", env!("CARGO_PKG_VERSION")));
+    let ua = HSTRING::from(concat!("NOX/", env!("CARGO_PKG_VERSION")));
     let host_h = HSTRING::from(&parsed.host);
     let method_h = HSTRING::from(method);
     let path_h = HSTRING::from(&parsed.path);

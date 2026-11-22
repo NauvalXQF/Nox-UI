@@ -15,7 +15,12 @@ fn reserve(slot: &AtomicIsize, hwnd: HWND, top_edge: bool, screen_w: i32, screen
     unsafe {
         let mut abd = data(hwnd);
         abd.uCallbackMessage = RegisterWindowMessageW(w!("NacreAppBar"));
-        if slot.load(Ordering::Relaxed) != hwnd.0 as isize {
+        let prev = slot.load(Ordering::Relaxed);
+        if prev != hwnd.0 as isize {
+            if prev != 0 {
+                let mut old = data(HWND(prev as *mut _));
+                let _ = SHAppBarMessage(ABM_REMOVE, &mut old);
+            }
             let _ = SHAppBarMessage(ABM_REMOVE, &mut abd);
             if SHAppBarMessage(ABM_NEW, &mut abd) == 0 {
                 return None;
@@ -60,6 +65,19 @@ fn remove(slot: &AtomicIsize) {
 
 pub fn release_top() {
     remove(&TOP);
+}
+
+pub fn release_top_if_owner(hwnd: HWND) {
+    if TOP.compare_exchange(hwnd.0 as isize, 0, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        unsafe {
+            let mut abd = data(hwnd);
+            SHAppBarMessage(ABM_REMOVE, &mut abd);
+        }
+    }
+}
+
+pub fn is_top_owner(hwnd: HWND) -> bool {
+    TOP.load(Ordering::Relaxed) == hwnd.0 as isize
 }
 
 pub fn release_bottom() {

@@ -71,32 +71,6 @@ impl Theme {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlurStyle {
-    Frosted,
-    Clear,
-    Vivid,
-}
-
-impl BlurStyle {
-    pub fn parse(s: &str) -> Option<BlurStyle> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "frosted" | "buram" => Some(BlurStyle::Frosted),
-            "clear" | "bening" => Some(BlurStyle::Clear),
-            "vivid" | "hidup" => Some(BlurStyle::Vivid),
-            _ => None,
-        }
-    }
-    pub fn key(self) -> &'static str {
-        match self {
-            BlurStyle::Frosted => "frosted",
-            BlurStyle::Clear => "clear",
-            BlurStyle::Vivid => "vivid",
-        }
-    }
-    pub const ALL: [BlurStyle; 3] = [BlurStyle::Frosted, BlurStyle::Clear, BlurStyle::Vivid];
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Material {
     Blur,
     Glass,
@@ -262,7 +236,6 @@ pub struct Settings {
     pub dock: Behavior,
     pub notch: Behavior,
     pub blur: u8,
-    pub style: BlurStyle,
     pub transparency: u8,
     pub theme: Theme,
     pub lang: Lang,
@@ -325,7 +298,6 @@ impl Default for Settings {
             dock: Behavior::Smart,
             notch: Behavior::Fixed,
             blur: 100,
-            style: BlurStyle::Clear,
             transparency: 50,
             theme: Theme::Auto,
             lang: Lang::Id,
@@ -583,12 +555,11 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "# ABRA settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\nstyle={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
             self.blur,
-            self.style.key(),
             self.transparency,
             self.theme.key(),
             self.lang.key(),
@@ -683,11 +654,7 @@ pub fn look(s: &Settings, system_dark: bool, material: Material) -> Look {
     };
     let b = s.blur.min(100) as f32 / 100.0;
     let t = s.transparency.min(100) as f32 / 100.0;
-    let (sigma_k, sat) = match s.style {
-        BlurStyle::Frosted => (1.0, 1.25),
-        BlurStyle::Clear => (0.45, 1.05),
-        BlurStyle::Vivid => (0.85, 1.9),
-    };
+    let (sigma_k, sat) = (0.45, 1.05);
     let mut blur_sigma = lerp(1.0, 40.0, b) * sigma_k;
     let mut saturation: f32 = sat;
     let (tr, tg, tb, a_max, a_min) = if dark { (20u8, 20u8, 24u8, 232.0, 40.0) } else { (255, 255, 255, 215.0, 24.0) };
@@ -783,7 +750,7 @@ menubar_style=glass
 
     #[test]
     fn roundtrip() {
-        let s = Settings { takeover: false, dock: Behavior::Smart, notch: Behavior::Overlay, blur: 12, style: BlurStyle::Clear, transparency: 90, theme: Theme::Light, lang: Lang::En, dock_material: Material::Black, dock_round: 80, notch_material: Material::Glass, notch_round: 10, autostart: true, dock_size: 60, dock_gap: 10, dock_zoom: 200, dock_margin: 30, anim: false, refraction: false, dock_enabled: false, notch_enabled: false, notch_hover_open: false, win_shadow: false, menubar: true, clock_24h: false, menubar_glass: true, hot: [HotAction::Mission, HotAction::Launchpad, HotAction::Lock, HotAction::Desktop], ..Default::default() };
+        let s = Settings { takeover: false, dock: Behavior::Smart, notch: Behavior::Overlay, blur: 12, transparency: 90, theme: Theme::Light, lang: Lang::En, dock_material: Material::Black, dock_round: 80, notch_material: Material::Glass, notch_round: 10, autostart: true, dock_size: 60, dock_gap: 10, dock_zoom: 200, dock_margin: 30, anim: false, refraction: false, dock_enabled: false, notch_enabled: false, notch_hover_open: false, win_shadow: false, menubar: true, clock_24h: false, menubar_glass: true, hot: [HotAction::Mission, HotAction::Launchpad, HotAction::Lock, HotAction::Desktop], ..Default::default() };
         assert_eq!(Settings::parse(&s.serialize()), s);
     }
 
@@ -895,13 +862,10 @@ dock_margin=900");
     }
 
     #[test]
-    fn blur_style_option_is_gone_and_always_clear() {
-        let s = Settings::parse("style=vivid
-menubar_material=true
-");
-        assert_eq!(s.style, BlurStyle::Clear);
+    fn legacy_style_key_is_safely_ignored() {
+        let s = Settings::parse("style=vivid\nmenubar_material=true\n");
         assert!(s.menubar_material);
-        assert!(Settings::default().style == BlurStyle::Clear);
+        assert!(!s.serialize().lines().any(|l| l.starts_with("style=")));
     }
 
     #[test]

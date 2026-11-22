@@ -119,7 +119,7 @@ fn run_ask(
         if !cancel.load(Ordering::Relaxed) {
             let _ = ev_tx.send(Event::Error {
                 id,
-                message: "Gemini API Key belum diatur (Settings → Visor).".into(),
+                message: "Gemini API Key belum diatur (Settings → Integrations).".into(),
             });
             notify();
         }

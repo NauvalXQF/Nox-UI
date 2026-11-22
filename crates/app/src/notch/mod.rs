@@ -92,6 +92,7 @@ const T_NOTIF_TOAST: usize = 22;
 const T_CARET: usize = 23;
 const T_COPIED: usize = 24;
 const T_NAV_COLLAPSE: usize = 25;
+const T_SCROLL_IDLE: usize = 26;
 const NAV_COLLAPSE_MS: u32 = 180;
 const NOTIF_TOAST_MS: u32 = 4500;
 const SEND_IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -116,6 +117,7 @@ const WIN_W: f32 = 720.0;
 const WIN_H: f32 = 250.0;
 const SHADOW_PAD_X: f32 = 36.0;
 const SHADOW_PAD_B: f32 = 44.0;
+const SHADOW_BLEED_DP: f32 = 28.0;
 const EAR_DP: f32 = 21.0;
 const DETACHED_TIMER_W_DP: f32 = 86.0;
 const DETACHED_TIMER_GAP_DP: f32 = 9.0;
@@ -292,7 +294,24 @@ fn post_w(hwnd: isize, msg: u32, w: usize) {
 fn on_windows_changed() {
     let h = NOTCH_HWND.load(Ordering::Relaxed);
     if h != 0 {
-        timer(HWND(h as *mut _), T_WINCHG, 150);
+        timer(HWND(h as *mut _), T_WINCHG, 120);
+    }
+}
+
+fn on_win_fx(ev: u32, _hwnd: isize) {
+    if matches!(
+        ev,
+        tracker::EV_LOCATION
+            | tracker::EV_UNCLOAKED
+            | tracker::EV_MOVESIZE_END
+            | tracker::EV_MINIMIZE_START
+            | tracker::EV_MINIMIZE_END
+            | tracker::EV_FOREGROUND
+    ) {
+        let h = NOTCH_HWND.load(Ordering::Relaxed);
+        if h != 0 {
+            timer(HWND(h as *mut _), T_WINCHG, 100);
+        }
     }
 }
 
@@ -361,14 +380,22 @@ pub struct Notch {
     sp_sh_blur: Spring,
     sp_sh_dy: Spring,
     sp_sh_op: Spring,
+    sp_csh_blur: Spring,
+    sp_csh_dy: Spring,
+    sp_csh_op: Spring,
     sp_nav: Spring,
     sp_lyrics: Spring,
     sp_scrub_hover: Spring,
     sp_art_scale: Spring,
     sp_timer_pill: Spring,
+    sp_scroll: Spring,
+    sp_sb_hover: Spring,
+    sp_sb_active: Spring,
     nav_expanded: bool,
     nav_collapse_armed: bool,
     scrub_hovered: bool,
+    sb_hovered: bool,
+    scroll_drag: Option<f32>,
     pressed_act: Option<Action>,
     prev_tab: Option<Tab>,
     art_pop_pending: bool,
@@ -415,7 +442,7 @@ pub struct Notch {
     todo_editing: bool,
     todo_cal_mode: bool,
     todo_cal_adding: bool,
-    todo_cal_scroll: usize,
+    todo_cal_scroll: f32,
     todo_cal_err: String,
     focus: FocusController,
 
@@ -445,10 +472,10 @@ pub struct Notch {
     notif_status: nacre_platform::notifications::Status,
     toast_id: Option<u32>,
     notif_peeking: bool,
-    alerts_scroll: usize,
+    alerts_scroll: f32,
     internal_notif_id: u32,
     todos: nacre_core::notch::todo::TodoStore,
-    todo_scroll: usize,
+    todo_scroll: f32,
     todo_status: nacre_platform::gtasks::SyncStatus,
     gtasks: nacre_platform::gtasks::GTasks,
     gemini: nacre_platform::gemini::Gemini,
@@ -456,7 +483,8 @@ pub struct Notch {
     gemini_resp: String,
     gemini_err: String,
     gemini_streaming: bool,
-    gemini_scroll: usize,
+    gemini_scroll: f32,
+    gemini_auto_follow: bool,
     gemini_copied: bool,
     active_input: Option<ActiveInput>,
     todo_input: Option<TextInput>,
@@ -528,6 +556,8 @@ impl Notch {
             let init_y = if start_hidden { -(init_size.h + 12.0 * dpi) } else { init_gap };
             let (init_sh_blur, init_sh_dy, rest_sh_op) = state::shadow(rest);
             let init_sh_op = if start_hidden { 0.0 } else { rest_sh_op };
+            let (init_csh_blur, init_csh_dy, rest_csh_op) = state::contact_shadow(rest);
+            let init_csh_op = if start_hidden { 0.0 } else { rest_csh_op };
             let frame_ms = frame_interval_ms();
             let hw = hwnd.0 as isize;
             let privacy_mon = Some(privacy::spawn(move || post(hw, WM_PRIVACY)));
@@ -559,15 +589,23 @@ impl Notch {
                 sp_y: Spring::new(init_y, SpringParams::stage_show()),
                 sp_sh_blur: Spring::new(init_sh_blur, SpringParams::swap()),
                 sp_sh_dy: Spring::new(init_sh_dy, SpringParams::swap()),
-                sp_sh_op: Spring::new(init_sh_op, SpringParams::swap()),
-                sp_nav: Spring::new(0.0, SpringParams::swap()),
-                sp_lyrics: Spring::new(1.0, SpringParams::lyrics_glide()),
-                sp_scrub_hover: Spring::new(0.0, SpringParams::tactile()),
-                sp_art_scale: Spring::new(1.0, SpringParams::open()),
-                sp_timer_pill: Spring::new(0.0, SpringParams::swap()),
+                sp_sh_op: Spring::new_unit(init_sh_op, SpringParams::swap()),
+                sp_csh_blur: Spring::new(init_csh_blur, SpringParams::swap()),
+                sp_csh_dy: Spring::new(init_csh_dy, SpringParams::swap()),
+                sp_csh_op: Spring::new_unit(init_csh_op, SpringParams::swap()),
+                sp_nav: Spring::new_unit(0.0, SpringParams::swap()),
+                sp_lyrics: Spring::new_unit(1.0, SpringParams::lyrics_glide()),
+                sp_scrub_hover: Spring::new_unit(0.0, SpringParams::tactile()),
+                sp_art_scale: Spring::new_unit(1.0, SpringParams::open()),
+                sp_timer_pill: Spring::new_unit(0.0, SpringParams::swap()),
+                sp_scroll: Spring::new(0.0, SpringParams::smooth_scroll()),
+                sp_sb_hover: Spring::new_unit(0.0, SpringParams::tactile()),
+                sp_sb_active: Spring::new_unit(0.0, SpringParams::tactile()),
                 nav_expanded: false,
                 nav_collapse_armed: false,
                 scrub_hovered: false,
+                sb_hovered: false,
+                scroll_drag: None,
                 pressed_act: None,
                 prev_tab: None,
                 art_pop_pending: false,
@@ -622,7 +660,7 @@ impl Notch {
                 todo_editing: false,
                 todo_cal_mode: false,
                 todo_cal_adding: false,
-                todo_cal_scroll: 0,
+                todo_cal_scroll: 0.0,
                 todo_cal_err: String::new(),
                 focus: FocusController::new(),
                 album: String::new(),
@@ -650,10 +688,10 @@ impl Notch {
                 notif_status: nacre_platform::notifications::status(),
                 toast_id: None,
                 notif_peeking: false,
-                alerts_scroll: 0,
+                alerts_scroll: 0.0,
                 internal_notif_id: 800_000,
                 todos,
-                todo_scroll: 0,
+                todo_scroll: 0.0,
                 todo_status: nacre_platform::gtasks::status(),
                 gtasks,
                 gemini,
@@ -661,7 +699,8 @@ impl Notch {
                 gemini_resp: String::new(),
                 gemini_err: String::new(),
                 gemini_streaming: false,
-                gemini_scroll: 0,
+                gemini_scroll: 0.0,
+                gemini_auto_follow: true,
                 gemini_copied: false,
                 active_input: None,
                 todo_input: None,
@@ -699,6 +738,7 @@ impl Notch {
             crate::services::register_island(hwnd);
             crate::services::listen_gfx(hwnd);
             tracker::install(on_windows_changed);
+            tracker::install_fx(on_win_fx);
             if !start_hidden {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 with(hwnd, |d| d.shell.set_visible(true, hwnd));
@@ -715,6 +755,7 @@ impl Notch {
                     d.set_reserved(true);
                 }
                 d.publish_notch();
+                d.refresh_overlap();
                 d.update_visibility();
                 d.sync_download_watch();
                 d.sync_notif_watch();
@@ -777,7 +818,7 @@ impl Notch {
             DETACHED_TIMER_GAP_DP * self.dpi
         };
         let tx = (x0 + w + gap_walls).round();
-        let max_avail = (self.win.0 as f32 - t_ear - 4.0 * self.dpi - tx).max(0.0);
+        let max_avail = (self.win.0 as f32 - t_ear - SHADOW_BLEED_DP * self.dpi - tx).max(0.0);
         let target_w = (DETACHED_TIMER_W_DP * self.dpi).min(max_avail);
         if target_w < 36.0 * self.dpi {
             return None;
@@ -806,17 +847,35 @@ impl Notch {
         );
         self.shell.set_stage_y(y);
         STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
-        self.shell.set_shadow(self.sp_sh_blur.pos * self.dpi, self.sp_sh_dy.pos * self.dpi, self.sp_sh_op.pos);
+        self.shell.set_dual_shadow(
+            self.sp_sh_blur.pos * self.dpi,
+            self.sp_sh_dy.pos * self.dpi,
+            self.sp_sh_op.pos,
+            self.sp_csh_blur.pos * self.dpi,
+            self.sp_csh_dy.pos * self.dpi,
+            self.sp_csh_op.pos,
+        );
 
-        // Keep compact left/right chrome, bottom ambient glow, and detached timer pill glued to animated edges.
+        // Keep compact left/right chrome, compact lyric viewport, bottom ambient glow, and detached timer pill glued to animated edges.
         if let Some(left_c) = &self.live_vis.compact_left {
-            let _ = left_c.SetOffset(Vector3 { X: x0.round(), Y: 0.0, Z: 0.0 });
+            let _ = left_c.SetOffset(Vector3 { X: x0, Y: 0.0, Z: 0.0 });
         }
         if let Some(right_c) = &self.live_vis.compact_right {
-            let _ = right_c.SetOffset(Vector3 { X: (x0 + w).round(), Y: 0.0, Z: 0.0 });
+            let _ = right_c.SetOffset(Vector3 { X: x0 + w, Y: 0.0, Z: 0.0 });
+        }
+        if let Some(cl) = self.live_vis.compact_lyric.as_mut() {
+            let vw = (w - cl.left_pad - cl.right_pad).max(24.0 * self.dpi);
+            cl.vw = vw;
+            let _ = cl.viewport.SetOffset(Vector3 { X: x0 + cl.left_pad, Y: 0.0, Z: 0.0 });
+            let _ = cl.viewport.SetSize(Vector2 { X: vw, Y: cl.h });
+            if !cl.active_marquee {
+                if let Some(act) = &cl.active {
+                    let _ = act.SetOffset(Vector3 { X: ((vw - cl.active_tw) / 2.0).max(0.0), Y: 0.0, Z: 0.0 });
+                }
+            }
         }
         if let Some(glow) = &self.live_vis.compact_glow {
-            let _ = glow.SetOffset(Vector3 { X: x0.round(), Y: 0.0, Z: 0.0 });
+            let _ = glow.SetOffset(Vector3 { X: x0, Y: 0.0, Z: 0.0 });
             let _ = glow.SetSize(Vector2 { X: w.ceil(), Y: h.ceil() });
         }
         if let Some(dt_vis) = &self.live_vis.detached_timer {
@@ -882,8 +941,8 @@ impl Notch {
         let mw_split = 224.0 * self.dpi;
         let cur_mw = mw_full + (mw_split - mw_full) * lp;
 
-        // Keep album art + title/artist glued to the animated left edge (zero left-edge clipping).
-        let _ = pl.left_group.SetOffset(Vector3 { X: (cur_mx - pl.base_mx).round(), Y: 0.0, Z: 0.0 });
+        // Keep album art + title/artist glued to the animated left edge (subpixel-smooth, zero jitter).
+        let _ = pl.left_group.SetOffset(Vector3 { X: cur_mx - pl.base_mx, Y: 0.0, Z: 0.0 });
 
         // Smoothly stretch/contract scrub bar + timestamps in lockstep with `sp_w`.
         if let Some(scrub) = self.live_vis.scrub.as_mut() {
@@ -906,22 +965,30 @@ impl Notch {
                 Action::ToggleMute => (cur_mx + cur_mw - 22.0 * self.dpi) * (1.0 - lp) + (cx + 2.0 * step) * lp,
                 _ => *base_bx,
             };
-            let _ = vis.SetOffset(Vector3 { X: (target_bx - *base_bx).round(), Y: dy_ctrl.round(), Z: 0.0 });
+            let _ = vis.SetOffset(Vector3 { X: target_bx - *base_bx, Y: dy_ctrl, Z: 0.0 });
         }
 
-        // Sync ambient glow dimensions & opacity with animated shell width + `sp_lyrics`.
+        // Sync ambient glow dimensions & opacity with animated shell width + `sp_lyrics`,
+        // preserving the 14 dp pitch-black outer perimeter during transitions.
         if let Some(gv) = &pl.lyrics_glow {
-            let _ = gv.SetOpacity(lp);
-            let _ = gv.SetOffset(Vector3 { X: cur_x0.round(), Y: 0.0, Z: 0.0 });
-            let _ = gv.SetSize(Vector2 { X: cur_w.ceil(), Y: cur_h.ceil() });
+            let inset = 14.0 * self.dpi;
+            let _ = gv.SetOpacity(0.78 + 0.22 * lp);
+            let _ = gv.SetOffset(Vector3 { X: cur_x0 + inset, Y: 0.0, Z: 0.0 });
+            let _ = gv.SetSize(Vector2 {
+                X: (cur_w - 2.0 * inset).max(40.0 * self.dpi).ceil(),
+                Y: (cur_h - inset).max(40.0 * self.dpi).ceil(),
+            });
         }
-        // Slide lyrics panel + 1px vertical divider smoothly into/out of the right column.
+        // Slide, gently scale, and fade lyrics panel + 1px vertical divider into/out of the right column.
         if let Some(panel) = &pl.lyrics_panel {
             let cur_div_x = cur_mx + cur_mw + 14.0 * self.dpi;
-            let slide_x = (cur_div_x - pl.base_div_x) - (1.0 - lp) * 12.0 * self.dpi;
-            let panel_op = ((lp - 0.12) / 0.88).clamp(0.0, 1.0);
+            let slide_x = (cur_div_x - pl.base_div_x) - (1.0 - lp) * 14.0 * self.dpi;
+            let panel_t = ((lp - 0.08) / 0.92).clamp(0.0, 1.0);
+            let panel_op = panel_t * panel_t * (3.0 - 2.0 * panel_t);
+            let sc = 0.965 + 0.035 * panel_op;
+            let _ = panel.SetScale(Vector3 { X: sc, Y: sc, Z: 1.0 });
             let _ = panel.SetOpacity(panel_op);
-            let _ = panel.SetOffset(Vector3 { X: slide_x.round(), Y: 0.0, Z: 0.0 });
+            let _ = panel.SetOffset(Vector3 { X: slide_x, Y: 0.0, Z: 0.0 });
         }
     }
 
@@ -939,6 +1006,9 @@ impl Notch {
         springs_moving |= self.sp_sh_blur.step(dt);
         springs_moving |= self.sp_sh_dy.step(dt);
         springs_moving |= self.sp_sh_op.step(dt);
+        springs_moving |= self.sp_csh_blur.step(dt);
+        springs_moving |= self.sp_csh_dy.step(dt);
+        springs_moving |= self.sp_csh_op.step(dt);
         springs_moving |= self.sp_timer_pill.step(dt);
 
         if springs_moving {
@@ -977,7 +1047,8 @@ impl Notch {
             if !self.lyrics_open {
                 if let Some(nav) = &self.live_vis.nav {
                     if let Ok(o) = nav.anchor.cast::<CompositionObject>() {
-                        let _ = keyframes_glide(&self.paint.comp, &o, "Opacity", 0.0, 1.0, 180, 0);
+                        let _ = keyframes_glide(&self.paint.comp, &o, "Opacity", 0.0, 1.0, 240, 0);
+                        let _ = keyframes_glide(&self.paint.comp, &o, "Offset.Y", nav.cur_cy + 4.0 * self.dpi, nav.cur_cy, 240, 0);
                     }
                 }
             }
@@ -986,6 +1057,20 @@ impl Notch {
         // Smooth scrub-bar hover bloom (track thicken + thumb expand).
         if self.sp_scrub_hover.step(dt) {
             self.update_scrub_in_place();
+            springs_moving = true;
+        }
+
+        // Smooth GPU vertical scroll + interactive scrollbar rail animations (60–120 fps).
+        let mut scroll_moved = false;
+        scroll_moved |= self.sp_scroll.step(dt);
+        scroll_moved |= self.sp_sb_hover.step(dt);
+        scroll_moved |= self.sp_sb_active.step(dt);
+        if scroll_moved {
+            if let Some(max_scroll) = self.live_vis.scroll.as_ref().map(|s| s.max_scroll) {
+                let clamped = self.sp_scroll.pos.clamp(0.0, max_scroll);
+                self.set_active_scroll_px(clamped);
+            }
+            self.sync_scroll_visual();
             springs_moving = true;
         }
 
@@ -1063,7 +1148,7 @@ impl Notch {
             media: self.has_media,
             playing: self.playing,
             lyric_line: self.lyr.as_ref().is_some_and(|l| l.synced),
-            lyrics_on: self.lyrics_open || crate::prefs::get().lyrics_compact,
+            lyrics_on: crate::prefs::get().lyrics_compact,
             // When media is active, the Detached Timer Pill displays the countdown on the right
             // so Live Lyrics / Now Playing stays intact in the main capsule.
             timer_left_s: (running && !self.has_media).then(|| self.timer.remaining_secs(self.now_ms())),
@@ -1358,7 +1443,7 @@ impl Notch {
             }
             self.todo_cal_adding = false;
             self.todo_cal_err.clear();
-            self.todo_cal_scroll = 0;
+            self.todo_cal_scroll = 0.0;
             if self.agenda.is_none() {
                 let hw = self.hwnd.0 as isize;
                 self.agenda = Some(nacre_platform::agenda::spawn(move || post(hw, WM_AGENDA)));
@@ -1384,7 +1469,7 @@ impl Notch {
             if let Some(ti) = self.todo_input.as_mut() {
                 ti.buf.clear();
             }
-            self.todo_scroll = 0;
+            self.todo_scroll = 0.0;
             self.save_todos();
             let _ = self.gtasks.commands.send(nacre_platform::gtasks::Cmd::Add {
                 local_id: item.id,
@@ -1409,7 +1494,9 @@ impl Notch {
         self.gemini_resp.clear();
         self.gemini_err.clear();
         self.gemini_streaming = true;
-        self.gemini_scroll = 0;
+        self.gemini_scroll = 0.0;
+        self.sp_scroll.snap(0.0);
+        self.gemini_auto_follow = true;
         self.gemini_copied = false;
         self.gemini_draft.clear();
         if let Some(gi) = self.gemini_input.as_mut() {
@@ -1529,6 +1616,9 @@ impl Notch {
                 nacre_platform::gemini::Event::Error { id, message } if id == self.gemini_req_id => {
                     self.gemini_streaming = false;
                     self.gemini_err = message;
+                    self.gemini_scroll = 0.0;
+                    self.sp_scroll.snap(0.0);
+                    self.gemini_auto_follow = false;
                     state_changed = true;
                 }
                 _ => {}
@@ -1541,15 +1631,31 @@ impl Notch {
             self.render();
         } else if delta {
             let has_key = nacre_platform::gemini::has_api_key();
-            views::refresh_gemini_response(
+            let cur_px = self.sp_scroll.pos;
+            let max_scroll = views::refresh_gemini_response(
                 &mut self.paint,
-                &self.live_vis,
+                &mut self.live_vis,
                 &self.gemini_resp,
                 &self.gemini_err,
                 has_key,
                 self.gemini_streaming,
-                self.gemini_scroll,
+                false,
+                cur_px,
+                self.sp_sb_hover.pos,
+                self.scroll_drag.is_some(),
+                self.sp_sb_active.pos,
             );
+            if self.gemini_auto_follow {
+                self.sp_scroll.set_target(max_scroll, SpringParams::smooth_scroll());
+                self.gemini_scroll = max_scroll;
+                self.start_frame();
+            } else {
+                let clamped = self.gemini_scroll.clamp(0.0, max_scroll);
+                self.gemini_scroll = clamped;
+                if self.sp_scroll.target > max_scroll {
+                    self.sp_scroll.set_target(clamped, SpringParams::smooth_scroll());
+                }
+            }
         }
     }
 
@@ -1908,6 +2014,11 @@ impl Notch {
         }
         if view_changed {
             self.play_glide_active = false;
+            self.scroll_drag = None;
+            self.sb_hovered = false;
+            self.sp_sb_hover.snap(0.0);
+            self.sp_sb_active.snap(0.0);
+            kill(self.hwnd, T_SCROLL_IDLE);
         }
         if view_changed && self.focus.is_active() {
             self.blur_inputs(false);
@@ -1959,6 +2070,8 @@ impl Notch {
         let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
         let (target_sh_blur, target_sh_dy, sh_op) = state::shadow(self.look);
         let target_sh_op = if self.shown { sh_op } else { 0.0 };
+        let (target_csh_blur, target_csh_dy, csh_op) = state::contact_shadow(self.look);
+        let target_csh_op = if self.shown { csh_op } else { 0.0 };
         let target_timer_pill = if self.want_detached_timer() { 1.0 } else { 0.0 };
 
         match sp {
@@ -1971,6 +2084,9 @@ impl Notch {
                 self.sp_sh_blur.snap(target_sh_blur);
                 self.sp_sh_dy.snap(target_sh_dy);
                 self.sp_sh_op.snap(target_sh_op);
+                self.sp_csh_blur.snap(target_csh_blur);
+                self.sp_csh_dy.snap(target_csh_dy);
+                self.sp_csh_op.snap(target_csh_op);
                 self.sp_timer_pill.snap(target_timer_pill);
                 self.stop_frame();
                 self.apply_springs_to_shell();
@@ -1984,6 +2100,9 @@ impl Notch {
                 self.sp_sh_blur.set_target(target_sh_blur, p);
                 self.sp_sh_dy.set_target(target_sh_dy, p);
                 self.sp_sh_op.set_target(target_sh_op, p);
+                self.sp_csh_blur.set_target(target_csh_blur, p);
+                self.sp_csh_dy.set_target(target_csh_dy, p);
+                self.sp_csh_op.set_target(target_csh_op, p);
                 self.sp_timer_pill.set_target(target_timer_pill, p);
                 self.start_frame();
             }
@@ -2093,7 +2212,7 @@ impl Notch {
                 DETACHED_TIMER_GAP_DP * self.dpi
             };
             let tx = (self.x0() + self.size.w + gap_walls).round();
-            let max_avail = (self.win.0 as f32 - t_ear - 4.0 * self.dpi - tx).max(0.0);
+            let max_avail = (self.win.0 as f32 - t_ear - SHADOW_BLEED_DP * self.dpi - tx).max(0.0);
             let tw = (DETACHED_TIMER_W_DP * self.dpi).min(max_avail);
             (tw >= 36.0 * self.dpi).then_some((tx, tw, th, self.sp_timer_pill.pos.clamp(0.0, 1.0)))
         } else {
@@ -2147,10 +2266,24 @@ impl Notch {
             gemini_error: &self.gemini_err,
             gemini_has_key,
             gemini_scroll: self.gemini_scroll,
+            gemini_auto_follow: self.gemini_auto_follow,
             gemini_model_label: &gemini_model_label,
             gemini_copied: self.gemini_copied,
+            sb_hover: self.sp_sb_hover.pos,
+            sb_active: self.sp_sb_active.pos,
+            sb_dragging: self.scroll_drag.is_some(),
         };
         views::draw(&mut self.paint, &c, self.look, f, &d, &mut self.regions, &mut self.live_vis);
+        if let Some(sv) = &self.live_vis.scroll {
+            let clamped = sv.scroll_px.clamp(0.0, sv.max_scroll);
+            self.set_active_scroll_px(clamped);
+            self.sp_scroll.snap(clamped);
+        } else {
+            self.sp_scroll.snap(0.0);
+            self.scroll_drag = None;
+            self.sb_hovered = false;
+            self.sp_sb_hover.snap(0.0);
+        }
         if self.play_glide_active && self.live_vis.play_layout.is_some() {
             self.sync_play_glide();
         }
@@ -2381,56 +2514,38 @@ impl Notch {
         let pos = self.position_ms();
         let idx = self.lyr.as_ref().and_then(|l| l.index_at(pos));
         if idx != self.lyr_idx {
-            let forward = matches!((self.lyr_idx, idx), (Some(a), Some(b)) if b == a + 1) || (self.lyr_idx.is_none() && idx == Some(0));
+            let dir = match (self.lyr_idx, idx) {
+                (Some(a), Some(b)) if b == a + 1 => 1,
+                (None, Some(0)) => 1,
+                (Some(a), Some(b)) if b < a => -1,
+                (Some(a), Some(b)) if b > a => 1,
+                _ => 0,
+            };
             self.lyr_idx = idx;
             if self.look.view == View::Compact(state::Activity::Lyrics) {
                 self.marquee_t = 0.0;
                 self.sync_adaptive_size();
-                self.swap_lyric();
+                let line = self
+                    .lyr
+                    .as_ref()
+                    .and_then(|l| l.current(pos))
+                    .unwrap_or("\u{266A}")
+                    .to_string();
+                if !views::swap_compact_lyric(&mut self.paint, &mut self.live_vis, &line, self.size.w) {
+                    self.render();
+                } else if self.live_vis.marquee.is_some() {
+                    self.start_frame();
+                }
             } else if self.mode == Mode::Open(Tab::Play) || self.look.view == View::Compact(state::Activity::Player) {
                 if self.live_vis.lyrics_host.is_some() {
                     let ly = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms: pos };
-                    views::refresh_lyrics_in_place(&mut self.paint, &mut self.live_vis, self.has_media, &ly);
+                    views::refresh_lyrics_in_place(&mut self.paint, &mut self.live_vis, self.has_media, &ly, dir);
                 } else {
                     self.render();
-                }
-                if forward {
-                    if let Some(sc) = &self.live_vis.lyric_scroll {
-                        if let Ok(o) = sc.cast::<CompositionObject>() {
-                            let _ = keyframes(&self.paint.comp, &o, "Offset.Y", self.live_vis.lyric_shift, 0.0, 320, 0);
-                        }
-                    }
                 }
             }
         }
         self.schedule_lyric();
-    }
-
-    fn swap_lyric(&mut self) {
-        let rise = state::motion::LYRIC_RISE_DP * self.dpi;
-        let ms = state::motion::LYRIC_SWAP_MS;
-        if let Some(old) = self.live_vis.lyric.take() {
-            let go = || -> windows_core::Result<()> {
-                let ghost = self.shell.ghost.Children()?;
-                ghost.RemoveAll()?;
-                self.shell.ghost.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
-                self.shell.content.Children()?.Remove(&old)?;
-                ghost.InsertAtTop(&old)?;
-                let g: CompositionObject = self.shell.ghost.cast()?;
-                keyframes(&self.paint.comp, &g, "Opacity", 1.0, 0.0, ms, 0)?;
-                keyframes(&self.paint.comp, &g, "Offset.Y", 0.0, -rise, ms, 0)
-            };
-            let _ = go();
-            timer(self.hwnd, T_GHOST, ms + 60);
-        }
-        self.render();
-        if let Some(v) = &self.live_vis.lyric {
-            if let (Ok(o), Ok(at)) = (v.cast::<CompositionObject>(), v.Offset()) {
-                let comp = &self.paint.comp;
-                let _ = keyframes(comp, &o, "Opacity", 0.0, 1.0, ms, 40);
-                let _ = keyframes(comp, &o, "Offset.Y", at.Y + rise, at.Y, ms + 40, 0);
-            }
-        }
     }
 
     fn sync_visualizer(&mut self) {
@@ -2497,12 +2612,44 @@ impl Notch {
         if !matches!(self.mode, Mode::Open(_)) {
             return false;
         }
+        // Interactive browser-style scrollbar rail: press & hold thumb or track to scrub smoothly.
+        if let Some((grab, jump_tgt)) = self.live_vis.scroll.as_ref().and_then(|sv| {
+            let bar = sv.bar.as_ref()?;
+            if !bar.hit_rail(x, y) || sv.max_scroll <= 0.5 {
+                return None;
+            }
+            if bar.hit_thumb(y) {
+                Some((y - bar.thumb_y, None))
+            } else {
+                let g = bar.thumb_h / 2.0;
+                let tgt = bar.scroll_for_thumb_top(y - g, sv.max_scroll);
+                Some((g, Some((tgt, sv.max_scroll))))
+            }
+        }) {
+            if let Some((tgt, max_scroll)) = jump_tgt {
+                if self.mode == Mode::Open(Tab::Gemini) {
+                    self.gemini_auto_follow = tgt >= max_scroll - 2.0;
+                }
+                self.sp_scroll.set_target(tgt, SpringParams::smooth_scroll());
+                self.set_active_scroll_px(tgt);
+            }
+            self.scroll_drag = Some(grab);
+            self.sb_hovered = true;
+            self.sp_sb_hover.set_target(1.0, SpringParams::tactile());
+            self.sp_sb_active.set_target(1.0, SpringParams::tactile());
+            kill(self.hwnd, T_SCROLL_IDLE);
+            self.sync_scroll_visual();
+            self.start_frame();
+            return true;
+        }
         let nav_hit = if self.nav_expanded || self.sp_nav.pos > 0.35 {
             self.live_vis.nav.as_ref().and_then(|n| n.hit_region(x, y))
         } else {
             None
         };
-        let hit = nav_hit.or_else(|| self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action));
+        let hit = nav_hit
+            .or_else(|| self.live_vis.scroll.as_ref().and_then(|s| s.hit_region(x, y)))
+            .or_else(|| self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action));
         match hit {
             Some(Action::Seek(sx, sw)) => {
                 self.seek_drag = Some((sx, sw, ((x - sx) / sw).clamp(0.0, 1.0)));
@@ -2541,12 +2688,27 @@ impl Notch {
     }
 
     fn on_drag(&mut self, x: f32, y: f32) {
-        if self.seek_drag.is_some() || self.shelf_press.is_some() {
+        if self.seek_drag.is_some() || self.shelf_press.is_some() || self.scroll_drag.is_some() {
             let down = unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 };
             if !down {
                 self.on_capture_changed();
                 return;
             }
+        }
+        if let Some(grab) = self.scroll_drag {
+            if let Some((next, max_scroll)) = self.live_vis.scroll.as_ref().and_then(|sv| {
+                sv.bar
+                    .as_ref()
+                    .map(|b| (b.scroll_for_thumb_top(y - grab, sv.max_scroll), sv.max_scroll))
+            }) {
+                if self.mode == Mode::Open(Tab::Gemini) {
+                    self.gemini_auto_follow = next >= max_scroll - 2.0;
+                }
+                self.sp_scroll.snap(next);
+                self.set_active_scroll_px(next);
+                self.sync_scroll_visual();
+            }
+            return;
         }
         if let Some((sx, sw, _)) = self.seek_drag {
             self.seek_drag = Some((sx, sw, ((x - sx) / sw).clamp(0.0, 1.0)));
@@ -2566,6 +2728,11 @@ impl Notch {
     fn on_capture_changed(&mut self) {
         self.shelf_press = None;
         self.release_press();
+        if self.scroll_drag.take().is_some() {
+            self.sync_scroll_visual();
+            timer(self.hwnd, T_SCROLL_IDLE, 650);
+            self.start_frame();
+        }
         if self.seek_drag.take().is_some() {
             self.update_scrub_in_place();
             self.sync_progress();
@@ -2575,6 +2742,12 @@ impl Notch {
     fn on_up(&mut self) -> bool {
         self.shelf_press = None;
         self.release_press();
+        if self.scroll_drag.take().is_some() {
+            self.sync_scroll_visual();
+            timer(self.hwnd, T_SCROLL_IDLE, 650);
+            self.start_frame();
+            return true;
+        }
         let Some((_, _, fr)) = self.seek_drag.take() else { return false };
         if self.dur_ms > 0 {
             let ms = (self.dur_ms as f32 * fr) as i64;
@@ -2819,11 +2992,28 @@ impl Notch {
                 return Some(r);
             }
         }
+        if let Some(r) = self.live_vis.scroll.as_ref().and_then(|s| s.find_region(act)) {
+            return Some(r);
+        }
         self.regions.iter().find(|r| r.action == act)
     }
 
     fn on_hover(&mut self, x: f32, y: f32) {
         self.update_nav_hover(x, y);
+
+        // Animated scrollbar rail hover bloom (smoothly widens from 3 dp -> 5.5 dp on hover/hold).
+        let on_sb = self.scroll_drag.is_some()
+            || self
+                .live_vis
+                .scroll
+                .as_ref()
+                .and_then(|s| s.bar.as_ref())
+                .is_some_and(|b| b.hit_rail(x, y));
+        if on_sb != self.sb_hovered {
+            self.sb_hovered = on_sb;
+            self.sp_sb_hover.set_target(if on_sb { 1.0 } else { 0.0 }, SpringParams::tactile());
+            self.start_frame();
+        }
 
         // Scrub bar hover bloom (independent of Region::vis since Seek has no scale vis).
         let on_scrub = self.regions.iter().any(|r| matches!(r.action, Action::Seek(..)) && r.hit(x, y));
@@ -2838,7 +3028,9 @@ impl Notch {
         } else {
             None
         };
-        let hit = nav_hit.or_else(|| self.regions.iter().find(|r| r.vis.is_some() && r.hit(x, y)).map(|r| r.action));
+        let hit = nav_hit
+            .or_else(|| self.live_vis.scroll.as_ref().and_then(|s| s.hit_hover_region(x, y)))
+            .or_else(|| self.regions.iter().find(|r| r.vis.is_some() && r.hit(x, y)).map(|r| r.action));
         if hit == self.hover_act {
             return;
         }
@@ -2881,7 +3073,7 @@ impl Notch {
             self.nav_collapse_armed = false;
             self.set_nav_expanded(false);
         }
-        if self.seek_drag.is_some() || self.menu.as_ref().is_some_and(|m| m.is_open()) {
+        if self.seek_drag.is_some() || self.scroll_drag.is_some() || self.menu.as_ref().is_some_and(|m| m.is_open()) {
             return;
         }
         if matches!(self.mode, Mode::Open(_)) {
@@ -2930,7 +3122,12 @@ impl Notch {
                 return;
             }
         }
-        let Some(a) = hit_act.or_else(|| self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action)) else { return };
+        let Some(a) = hit_act
+            .or_else(|| self.live_vis.scroll.as_ref().and_then(|s| s.hit_region(x, y)))
+            .or_else(|| self.regions.iter().find(|r| r.hit(x, y)).map(|r| r.action))
+        else {
+            return;
+        };
         let now = self.now_ms();
         match a {
             Action::PlayPause => {
@@ -2989,7 +3186,7 @@ impl Notch {
             Action::Tab(t) => {
                 if t == Tab::Alerts {
                     self.notifs.mark_all_read();
-                    self.alerts_scroll = 0;
+                    self.alerts_scroll = 0.0;
                 }
                 self.dispatch(Event::SelectTab(t));
             }
@@ -3026,7 +3223,7 @@ impl Notch {
             Action::SendDone => self.stop_send(),
             Action::CalDay(n) => {
                 self.cal_sel = (self.cal_sel + n).clamp(-3650, 3650);
-                self.todo_cal_scroll = 0;
+                self.todo_cal_scroll = 0.0;
                 self.todo_cal_err.clear();
                 self.cal_fetched_at = None;
                 self.cal_in_flight = false;
@@ -3035,7 +3232,7 @@ impl Notch {
             }
             Action::CalToday => {
                 self.cal_sel = 0;
-                self.todo_cal_scroll = 0;
+                self.todo_cal_scroll = 0.0;
                 self.todo_cal_err.clear();
                 self.cal_fetched_at = None;
                 self.cal_in_flight = false;
@@ -3078,6 +3275,7 @@ impl Notch {
                 if let Some((aumid, app_name, title, body)) = target {
                     if !aumid.is_empty() || !app_name.is_empty() {
                         let ok = nacre_platform::notifications::activate_notification(
+                            id,
                             &aumid,
                             &app_name,
                             &title,
@@ -3097,7 +3295,6 @@ impl Notch {
                     self.notif_peeking = false;
                     kill(self.hwnd, T_NOTIF_TOAST);
                 }
-                self.alerts_scroll = self.alerts_scroll.min(self.notifs.len().saturating_sub(1));
                 self.refresh();
                 self.update_visibility();
             }
@@ -3105,7 +3302,7 @@ impl Notch {
                 self.notifs.clear();
                 self.toast_id = None;
                 self.notif_peeking = false;
-                self.alerts_scroll = 0;
+                self.alerts_scroll = 0.0;
                 kill(self.hwnd, T_NOTIF_TOAST);
                 self.refresh();
                 self.update_visibility();
@@ -3168,8 +3365,6 @@ impl Notch {
                             local_id: deleted.id,
                             remote_id,
                         });
-                        let vis_len = self.todos.visible().len();
-                        self.todo_scroll = self.todo_scroll.min(vis_len.saturating_sub(1));
                         self.render();
                     }
                 }
@@ -3196,85 +3391,67 @@ impl Notch {
                 self.gemini_streaming = false;
                 self.gemini_resp.clear();
                 self.gemini_err.clear();
-                self.gemini_scroll = 0;
+                self.gemini_scroll = 0.0;
+                self.sp_scroll.snap(0.0);
+                self.gemini_auto_follow = true;
                 self.gemini_copied = false;
                 self.render();
             }
         }
     }
 
-    fn on_wheel(&mut self, delta: i16) {
-        if self.mode == Mode::Open(Tab::Alerts) && self.notifs.len() > 3 {
-            let max_scroll = self.notifs.len().saturating_sub(3);
-            let next = if delta < 0 {
-                (self.alerts_scroll + 1).min(max_scroll)
-            } else {
-                self.alerts_scroll.saturating_sub(1)
-            };
-            if next != self.alerts_scroll {
-                self.alerts_scroll = next;
-                self.render();
-                return;
-            }
-        }
-        if self.mode == Mode::Open(Tab::Todo) {
-            if self.todo_cal_mode {
-                let cal_len = self
-                    .cal_events
-                    .as_ref()
-                    .and_then(|(_, l)| l.as_ref())
-                    .map_or(0, Vec::len);
-                if cal_len > 4 {
-                    let max_scroll = cal_len.saturating_sub(4);
-                    let next = if delta < 0 {
-                        (self.todo_cal_scroll + 1).min(max_scroll)
-                    } else {
-                        self.todo_cal_scroll.saturating_sub(1)
-                    };
-                    if next != self.todo_cal_scroll {
-                        self.todo_cal_scroll = next;
-                        self.render();
-                        return;
-                    }
-                }
-            } else if self.todos.visible().len() > 4 {
-                let max_scroll = self.todos.visible().len().saturating_sub(4);
-                let next = if delta < 0 {
-                    (self.todo_scroll + 1).min(max_scroll)
+    fn set_active_scroll_px(&mut self, px: f32) {
+        let px = px.max(0.0);
+        match self.mode {
+            Mode::Open(Tab::Alerts) => self.alerts_scroll = px,
+            Mode::Open(Tab::Todo) => {
+                if self.todo_cal_mode {
+                    self.todo_cal_scroll = px;
                 } else {
-                    self.todo_scroll.saturating_sub(1)
-                };
-                if next != self.todo_scroll {
-                    self.todo_scroll = next;
-                    self.render();
-                    return;
+                    self.todo_scroll = px;
                 }
             }
+            Mode::Open(Tab::Gemini) => self.gemini_scroll = px,
+            _ => {}
         }
-        if self.mode == Mode::Open(Tab::Gemini) && !self.gemini_resp.is_empty() {
-            let next = if delta < 0 {
-                self.gemini_scroll.saturating_add(2)
-            } else {
-                self.gemini_scroll.saturating_sub(2)
-            };
-            if next != self.gemini_scroll {
-                self.gemini_scroll = next;
-                let has_key = nacre_platform::gemini::has_api_key();
-                views::refresh_gemini_response(
-                    &mut self.paint,
-                    &self.live_vis,
-                    &self.gemini_resp,
-                    &self.gemini_err,
-                    has_key,
-                    self.gemini_streaming,
-                    self.gemini_scroll,
-                );
-                return;
-            }
+    }
+
+    fn sync_scroll_visual(&mut self) {
+        let Some(sv) = self.live_vis.scroll.as_mut() else { return };
+        let px = self.sp_scroll.pos.clamp(0.0, sv.max_scroll);
+        sv.apply(px, self.sp_sb_hover.pos, self.scroll_drag.is_some(), self.sp_sb_active.pos);
+    }
+
+    fn on_wheel(&mut self, delta: i16) {
+        if !matches!(self.mode, Mode::Open(_)) || delta == 0 {
+            return;
         }
-        if matches!(self.mode, Mode::Open(_)) {
-            self.step_tab(if delta > 0 { -1 } else { 1 });
+        let now = self.now_ms();
+        // Axis-lock: suppress stray diagonal touchpad horizontal drift during vertical scroll.
+        self.swipe.note_vertical(now);
+
+        let Some(max_scroll) = self.live_vis.scroll.as_ref().map(|s| s.max_scroll) else {
+            return;
+        };
+        if max_scroll <= 0.5 {
+            return;
         }
+        let px_per_notch = match self.mode {
+            Mode::Open(Tab::Gemini) => 46.0 * self.dpi,
+            Mode::Open(Tab::Alerts) => 54.0 * self.dpi,
+            _ => 42.0 * self.dpi,
+        };
+        let dpx = state::wheel_delta_to_px(delta, px_per_notch);
+        let base = self.sp_scroll.target.clamp(0.0, max_scroll);
+        let next = (base + dpx).clamp(0.0, max_scroll);
+        if self.mode == Mode::Open(Tab::Gemini) {
+            self.gemini_auto_follow = next >= max_scroll - 2.0;
+        }
+        self.sp_scroll.set_target(next, SpringParams::smooth_scroll());
+        self.set_active_scroll_px(next);
+        self.sp_sb_active.set_target(1.0, SpringParams::tactile());
+        timer(self.hwnd, T_SCROLL_IDLE, 650);
+        self.start_frame();
     }
 
     fn step_tab(&mut self, dir: i32) {
@@ -3284,7 +3461,7 @@ impl Notch {
             let next = Tab::ALL[(i + dir).rem_euclid(n) as usize];
             if next == Tab::Alerts {
                 self.notifs.mark_all_read();
-                self.alerts_scroll = 0;
+                self.alerts_scroll = 0.0;
             }
             self.dispatch(Event::SelectTab(next));
         }
@@ -3328,7 +3505,7 @@ impl Notch {
                     .unwrap_or(0);
                 self.push_notification(nacre_core::notch::notif::Notification {
                     id: self.internal_notif_id,
-                    app_name: "ABRA".into(),
+                    app_name: "NOX".into(),
                     aumid: String::new(),
                     title: crate::prefs::tr("Timer selesai").into(),
                     body: String::new(),
@@ -3355,8 +3532,41 @@ impl Notch {
 
     fn pill_screen_rect(&self) -> (i32, i32, i32, i32) {
         let base = state::size(state::look(Mode::Rest, None), self.dpi);
-        let l = ((self.screen_w as f32 - base.w) / 2.0) as i32;
-        (l, 0, l + base.w as i32, (base.h + 4.0 * self.dpi) as i32)
+        let w = base.w.max(self.size.w);
+        let l = ((self.screen_w as f32 - w) / 2.0) as i32;
+        let top = island_gap(self.dpi).round() as i32;
+        (l, 0, l + w.round() as i32, top + base.h.round() as i32)
+    }
+
+    fn cursor_in_notch_zone(&self) -> bool {
+        let mut pt = windows::Win32::Foundation::POINT::default();
+        if unsafe { GetCursorPos(&mut pt) }.is_err() {
+            return false;
+        }
+        let w = self.size.w.max(200.0 * self.dpi);
+        let pad = 12.0 * self.dpi;
+        let cx = self.screen_w as f32 / 2.0;
+        let left = cx - w / 2.0 - pad;
+        let right = cx + w / 2.0 + pad;
+        let bottom = island_gap(self.dpi) + self.size.h + 10.0 * self.dpi;
+        (pt.x as f32) >= left && (pt.x as f32) <= right && pt.y >= 0 && (pt.y as f32) <= bottom
+    }
+
+    fn refresh_overlap(&mut self) {
+        let mut ov = overlap::evaluate_notch(
+            tracker::external_foreground(),
+            std::process::id(),
+            self.pill_screen_rect(),
+            sys::screen_size(),
+        );
+        if ov.fullscreen && crate::prefs::get().above_fullscreen {
+            ov.fullscreen = false;
+        }
+        if ov != self.overlap {
+            self.overlap = ov;
+            self.update_visibility();
+            self.sync_visualizer();
+        }
     }
 
     fn ensure_strip(&mut self) {
@@ -3367,7 +3577,7 @@ impl Notch {
             return;
         }
         if self.strip.is_none() {
-            if let Ok(s) = Strip::new(self.hwnd, STRIP_ENTER, STRIP_LEAVE) {
+            if let Ok(s) = Strip::new_notch(self.hwnd, STRIP_ENTER, STRIP_LEAVE) {
                 self._strip_drop = drop::register_for(s.hwnd(), self.hwnd, WM_DND, self.dnd.clone());
                 self.strip = Some(s);
             }
@@ -3377,11 +3587,19 @@ impl Notch {
 
     fn place_strip(&self) {
         if let Some(s) = &self.strip {
-            let w = (200.0 * self.dpi).round() as i32;
-            let h = (3.0 * self.dpi).round().clamp(2.0, 5.0) as i32;
+            let w = ((240.0 * self.dpi).round() as i32).max(self.size.w.round() as i32);
+            let h = if crate::prefs::get().menubar {
+                (6.0 * self.dpi).round().clamp(4.0, 10.0) as i32
+            } else {
+                (4.0 * self.dpi).round().clamp(3.0, 6.0) as i32
+            };
             let x = ((self.screen_w - w) / 2).max(0);
             s.place(x, 0, w, h);
-            s.set_visible(!self.overlap.fullscreen && !self.off);
+            let show_strip = !self.shown && !self.overlap.fullscreen && !self.off;
+            s.set_visible(show_strip);
+            if show_strip {
+                s.to_top();
+            }
         }
     }
 
@@ -3390,6 +3608,7 @@ impl Notch {
             || matches!(self.mode, Mode::Open(_) | Mode::Drop)
             || self.grace
             || self.seek_drag.is_some()
+            || self.scroll_drag.is_some()
             || self.dragging_out
             || self.pinned
             || self.focus.is_active()
@@ -3407,34 +3626,54 @@ impl Notch {
             revealing: self.notif_peeking,
         };
         let hide = self.off || should_hide(self.vis, &inputs);
-        if let Some(s) = &self.strip {
-            s.set_visible(!self.overlap.fullscreen && !self.off);
-        }
         if hide && self.shown {
             self.shown = false;
+            self.edge_armed = false;
+            self.grace = false;
+            kill(self.hwnd, T_EDGE);
+            kill(self.hwnd, T_GRACE);
+            kill(self.hwnd, T_DWELL);
+            if self.mode == Mode::Peek {
+                self.dispatch(Event::Leave);
+            }
             let y = -(self.size.h + 12.0 * self.dpi);
             self.sp_y.set_target(y, SpringParams::stage_hide());
             self.sp_sh_op.set_target(0.0, SpringParams::stage_hide());
+            self.sp_csh_op.set_target(0.0, SpringParams::stage_hide());
             self.start_frame();
             self.publish_notch();
             self.sync_visualizer();
             log::line("notch", "sembunyi");
         } else if !hide && !self.shown {
             self.shown = true;
+            self.rgn_rect = (-1, -1, -1, -1);
+            self.rgn_timer = (-1, -1, -1, -1);
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.shell.set_visible(true, self.hwnd);
             crate::topmost::request_raise();
             let (sh_blur, sh_dy, sh_op) = state::shadow(self.look);
+            let (csh_blur, csh_dy, csh_op) = state::contact_shadow(self.look);
             self.sp_y.set_target(island_gap(self.dpi), SpringParams::stage_show());
             self.sp_sh_blur.set_target(sh_blur, SpringParams::stage_show());
             self.sp_sh_dy.set_target(sh_dy, SpringParams::stage_show());
             self.sp_sh_op.set_target(sh_op, SpringParams::stage_show());
+            self.sp_csh_blur.set_target(csh_blur, SpringParams::stage_show());
+            self.sp_csh_dy.set_target(csh_dy, SpringParams::stage_show());
+            self.sp_csh_op.set_target(csh_op, SpringParams::stage_show());
+            self.apply_springs_to_shell();
             self.start_frame();
             self.publish_notch();
             self.sync_visualizer();
             log::line("notch", "tampil");
+        }
+        if let Some(s) = &self.strip {
+            let show_strip = !self.shown && !self.overlap.fullscreen && !self.off;
+            s.set_visible(show_strip);
+            if show_strip {
+                s.to_top();
+            }
         }
     }
 
@@ -3469,11 +3708,11 @@ impl Notch {
     fn set_reserved(&mut self, on: bool) {
         self.reserved = on;
         if on {
-            let strip = (34.0 * self.dpi).ceil() as i32;
+            let strip = (island_gap(self.dpi) + 34.0 * self.dpi).ceil() as i32;
             let r = nacre_platform::shell::appbar::reserve_top(self.hwnd, self.screen_w, strip);
             log::line("appbar", &format!("atas strip={strip} hasil={r:?}"));
         } else {
-            nacre_platform::shell::appbar::release_top();
+            nacre_platform::shell::appbar::release_top_if_owner(self.hwnd);
         }
     }
 
@@ -3487,11 +3726,18 @@ impl Notch {
                 self.starting = false;
             }
             self.ensure_strip();
+        } else {
+            self.place_strip();
         }
-        if reserve != self.reserved {
-            self.set_reserved(reserve);
+        if reserve {
+            if !self.reserved || !nacre_platform::shell::appbar::is_top_owner(self.hwnd) {
+                self.set_reserved(true);
+            }
+        } else if self.reserved {
+            self.set_reserved(false);
         }
         self.shell.apply_material(self.tier);
+        self.refresh_overlap();
         self.update_visibility();
         self.publish_notch();
         self.sync_download_watch();
@@ -3536,6 +3782,7 @@ impl Notch {
             self.set_reserved(true);
         }
         self.place_strip();
+        self.refresh_overlap();
         self.publish_notch();
         if changed {
             self.first = true;
@@ -3588,8 +3835,14 @@ impl Notch {
                 self.nav_collapse_armed = false;
                 self.set_nav_expanded(false);
             }
+            T_SCROLL_IDLE => {
+                if self.scroll_drag.is_none() {
+                    self.sp_sb_active.set_target(0.0, SpringParams::tactile());
+                    self.start_frame();
+                }
+            }
             T_DWELL => {
-                if self.tracking && !self.cursor_on_media_button() {
+                if (self.tracking || (self.grace && self.cursor_in_notch_zone())) && !self.cursor_on_media_button() {
                     self.dispatch(Event::Dwell);
                 }
             }
@@ -3608,28 +3861,29 @@ impl Notch {
                 self.charging_fresh = false;
                 self.refresh();
             }
-            T_WINCHG => {
-                let mut ov = overlap::evaluate(tracker::external_foreground(), std::process::id(), self.pill_screen_rect(), sys::screen_size());
-                if ov.fullscreen && crate::prefs::get().above_fullscreen {
-                    ov = overlap::Overlap { overlapped: false, fullscreen: false };
-                }
-                if ov != self.overlap {
-                    self.overlap = ov;
-                    self.update_visibility();
-                    self.sync_visualizer();
-                }
-            }
+            T_WINCHG => self.refresh_overlap(),
             T_RECONF => self.on_reconfigure(),
             T_EDGE => {
                 self.edge_armed = true;
+                self.grace = true;
+                timer(self.hwnd, T_GRACE, 650);
                 self.update_visibility();
                 if self.vis == Vis::OnDemand && crate::prefs::get().notch_hover_open && self.mode == Mode::Rest {
                     self.dispatch(Event::Enter);
+                    if self.mode == Mode::Peek {
+                        timer(self.hwnd, T_DWELL, motion::DWELL_MS);
+                    }
                 }
             }
             T_GRACE => {
-                self.grace = false;
-                self.update_visibility();
+                self.edge_armed = false;
+                if self.shown && self.cursor_in_notch_zone() {
+                    self.grace = true;
+                    timer(self.hwnd, T_GRACE, 220);
+                } else {
+                    self.grace = false;
+                    self.update_visibility();
+                }
             }
             T_START => {
                 self.starting = false;
@@ -3779,6 +4033,37 @@ fn xy(lp: LPARAM) -> (f32, f32) {
     ((lp.0 as i16) as f32, ((lp.0 >> 16) as i16) as f32 - stage_y)
 }
 
+/// Exact capsule/visor hit-test so all shadow-bleed margin and outside rounded-corner areas
+/// strictly return `HTTRANSPARENT` while the active capsule body remains interactive.
+fn point_in_capsule(cx: f32, cy: f32, x0: f32, w: f32, h: f32, r: f32, ear: f32) -> bool {
+    if cy < 0.0 || cy > h {
+        return false;
+    }
+    let ew = if ear > 0.5 { ear.min(h * 0.56) } else { 0.0 };
+    if cx < x0 - ew || cx > x0 + w + ew {
+        return false;
+    }
+    // Outside the main vertical walls: only interactive inside the upper shoulder band.
+    if cx < x0 || cx > x0 + w {
+        let eh = (ew * 1.08).min(h * 0.56);
+        return cy <= eh;
+    }
+    // Exclude outside the bottom rounded corners so clicks just outside the curve pass through.
+    let cr = r.clamp(0.0, (w * 0.5).min(h * 0.5));
+    if cr > 1.0 && cy > h - cr {
+        let dy = cy - (h - cr);
+        if cx < x0 + cr {
+            let dx = (x0 + cr) - cx;
+            return dx * dx + dy * dy <= cr * cr;
+        }
+        if cx > x0 + w - cr {
+            let dx = cx - (x0 + w - cr);
+            return dx * dx + dy * dy <= cr * cr;
+        }
+    }
+    true
+}
+
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_NCHITTEST => {
@@ -3798,9 +4083,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if !d.shown || cy < 0.0 {
                     return false;
                 }
-                let in_main = cx >= x0 - ear && cx <= x0 + w + ear && cy <= h;
+                let in_main = point_in_capsule(cx, cy, x0, w, h, r, ear);
                 let in_detached = d.detached_timer_geom(x0, w, h, r, ear).is_some_and(
-                    |(tx, tw, th, _, te, _)| cx >= tx - te && cx <= tx + tw + te && cy <= th,
+                    |(tx, tw, th, tr, te, _)| point_in_capsule(cx, cy, tx, tw, th, tr, te),
                 );
                 in_main || in_detached
             })
@@ -3994,7 +4279,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSEWHEEL => {
             let delta = (wp.0 >> 16) as i16;
-            with(hwnd, |d| d.on_wheel(delta));
+            let shift = (wp.0 & 0x0004) != 0; // MK_SHIFT
+            with(hwnd, |d| {
+                if shift {
+                    d.on_hwheel(delta.saturating_neg());
+                } else {
+                    d.on_wheel(delta);
+                }
+            });
             LRESULT(0)
         }
         WM_MOUSEHWHEEL => {
@@ -4017,7 +4309,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if d.edge_armed {
                     d.edge_armed = false;
                     d.grace = true;
-                    timer(hwnd, T_GRACE, if d.vis == Vis::OnDemand { 380 } else { 800 });
+                    timer(hwnd, T_GRACE, if d.vis == Vis::OnDemand { 550 } else { 700 });
                     d.update_visibility();
                 }
             });
@@ -4043,7 +4335,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             with(hwnd, |d| {
                 d.shell.raise_behind(hwnd);
                 if let Some(s) = &d.strip {
-                    s.to_top();
+                    if !d.shown && !d.overlap.fullscreen && !d.off {
+                        s.to_top();
+                    }
                 }
             });
             LRESULT(0)

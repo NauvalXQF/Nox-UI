@@ -128,32 +128,41 @@ impl Painter {
         rgb: [u8; 3],
         compact: bool,
     ) -> Option<SpriteVisual> {
-        let key = format!("glow2|{compact}|{rgb:?}");
+        let key = format!("glow3|{compact}|{rgb:?}");
         let surf = match self.cache.get(&key) {
             Some((s, _, _)) => s.clone(),
             None => {
                 const GW: u32 = 128;
                 const GH: u32 = 64;
                 let mut bgra = vec![0u8; (GW * GH * 4) as usize];
+                let smoothstep = |e0: f32, e1: f32, v: f32| {
+                    let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
+                    t * t * (3.0 - 2.0 * t)
+                };
                 for yy in 0..GH {
                     for xx in 0..GW {
                         let nx = (xx as f32 + 0.5) / GW as f32;
                         let ny = (yy as f32 + 0.5) / GH as f32;
                         let wash = if compact {
-                            // Subtle Nusa-style bottom bloom fading into pure pitch-black top bezel.
-                            let v = ((ny - 0.16) / 0.84).clamp(0.0, 1.0).powf(1.9);
-                            let edge = 1.0 - 0.15 * ((nx - 0.5) * 2.0).abs();
-                            0.42 * v * edge
+                            // Subtle bottom bloom that fades cleanly to pure #000000 at all outer edges.
+                            let ex = smoothstep(0.0, 0.14, nx) * smoothstep(1.0, 0.86, nx);
+                            let ey = smoothstep(0.18, 0.72, ny) * smoothstep(1.0, 0.86, ny);
+                            0.36 * ex * ey
                         } else {
-                            // Expanded OLED canvas glow: pitch-black top, rich warm bleed along bottom & under album art.
-                            let v = ((ny - 0.22) / 0.78).clamp(0.0, 1.0).powf(2.15);
-                            let dx = (nx - 0.18) * 1.1;
-                            let dy = (ny - 0.88) * 1.35;
+                            // Expanded OLED canvas glow: strictly fades to pure #000000 before the outer
+                            // perimeter so the notch silhouette stays razor-sharp against any backdrop.
+                            let ex = smoothstep(0.0, 0.16, nx) * smoothstep(1.0, 0.84, nx);
+                            let ey = smoothstep(0.06, 0.34, ny) * smoothstep(1.0, 0.80, ny);
+                            let perim = ex * ey;
+                            let dx = (nx - 0.24) * 1.45;
+                            let dy = (ny - 0.52) * 1.65;
                             let art_halo = (1.0 - (dx * dx + dy * dy).sqrt().min(1.0)).powi(2);
-                            let right_corner = ((nx - 0.55) / 0.45).clamp(0.0, 1.0).powi(2) * v * 0.22;
-                            0.34 * v + 0.24 * art_halo + right_corner
+                            let cx = (nx - 0.52) * 1.35;
+                            let cy = (ny - 0.60) * 1.75;
+                            let core = (1.0 - (cx * cx + cy * cy).sqrt().min(1.0)).powi(2);
+                            (0.38 * art_halo + 0.22 * core) * perim
                         };
-                        let a = (wash.clamp(0.0, 0.52) * 255.0).round() as u32;
+                        let a = (wash.clamp(0.0, 0.44) * 255.0).round() as u32;
                         let i = ((yy * GW + xx) * 4) as usize;
                         bgra[i] = (rgb[2] as u32 * a / 255) as u8;
                         bgra[i + 1] = (rgb[1] as u32 * a / 255) as u8;

@@ -4,10 +4,14 @@ use windows::Win32::Security::Credentials::{
     CRED_TYPE_GENERIC,
 };
 
-pub const TARGET_GEMINI_KEY: &str = "ABRA/Gemini/ApiKey";
-pub const TARGET_GTASKS_TOKENS: &str = "ABRA/GoogleTasks/Tokens";
-pub const TARGET_GTASKS_CLIENT_ID: &str = "ABRA/GoogleTasks/ClientId";
-pub const TARGET_GTASKS_CLIENT_SECRET: &str = "ABRA/GoogleTasks/ClientSecret";
+pub const TARGET_GEMINI_KEY: &str = "NOX/Gemini/ApiKey";
+pub const TARGET_GTASKS_TOKENS: &str = "NOX/GoogleTasks/Tokens";
+pub const TARGET_GTASKS_CLIENT_ID: &str = "NOX/GoogleTasks/ClientId";
+pub const TARGET_GTASKS_CLIENT_SECRET: &str = "NOX/GoogleTasks/ClientSecret";
+
+fn legacy_target(target: &str) -> Option<String> {
+    target.strip_prefix("NOX/").map(|rest| format!("ABRA/{rest}"))
+}
 
 pub fn write_secret(target: &str, secret: &str) -> bool {
     let trimmed = secret.trim();
@@ -15,7 +19,7 @@ pub fn write_secret(target: &str, secret: &str) -> bool {
         return delete_secret(target);
     }
     let mut target_w: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut user_w: Vec<u16> = "ABRA".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut user_w: Vec<u16> = "NOX".encode_utf16().chain(std::iter::once(0)).collect();
     let mut blob = trimmed.as_bytes().to_vec();
     let cred = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
@@ -29,7 +33,7 @@ pub fn write_secret(target: &str, secret: &str) -> bool {
     unsafe { CredWriteW(&cred, 0).is_ok() }
 }
 
-pub fn read_secret(target: &str) -> Option<String> {
+fn read_secret_raw(target: &str) -> Option<String> {
     let target_h = HSTRING::from(target);
     let mut ptr: *mut CREDENTIALW = std::ptr::null_mut();
     unsafe {
@@ -48,9 +52,29 @@ pub fn read_secret(target: &str) -> Option<String> {
     }
 }
 
+pub fn read_secret(target: &str) -> Option<String> {
+    if let Some(v) = read_secret_raw(target) {
+        return Some(v);
+    }
+    if let Some(old) = legacy_target(target) {
+        if let Some(v) = read_secret_raw(&old) {
+            let _ = write_secret(target, &v);
+            return Some(v);
+        }
+    }
+    None
+}
+
 pub fn delete_secret(target: &str) -> bool {
     let target_h = HSTRING::from(target);
-    unsafe { CredDeleteW(&target_h, CRED_TYPE_GENERIC, Some(0)).is_ok() }
+    let ok = unsafe { CredDeleteW(&target_h, CRED_TYPE_GENERIC, Some(0)).is_ok() };
+    if let Some(old) = legacy_target(target) {
+        let old_h = HSTRING::from(old);
+        unsafe {
+            let _ = CredDeleteW(&old_h, CRED_TYPE_GENERIC, Some(0));
+        }
+    }
+    ok
 }
 
 pub fn mask_secret(s: &str) -> String {

@@ -1512,9 +1512,9 @@ impl Dock {
         let general = info.item.is_none() && !info.trash && (info.special.is_none() || info.special == Some(START_KEY));
         if general {
             items.push(menu::Item::action(CMD_ADD, crate::prefs::tr("Tambah app ke Deck…"), true));
-            items.push(menu::Item::action(CMD_SETTINGS, crate::prefs::tr("Pengaturan ABRA…"), true));
+            items.push(menu::Item::action(CMD_SETTINGS, crate::prefs::tr("Pengaturan NOX…"), true));
             items.push(menu::Item::separator());
-            items.push(menu::Item::action(CMD_QUIT, crate::prefs::tr("Keluar dari ABRA"), true));
+            items.push(menu::Item::action(CMD_QUIT, crate::prefs::tr("Keluar dari NOX"), true));
         }
         while items.last().is_some_and(|i| i.separator) {
             items.pop();

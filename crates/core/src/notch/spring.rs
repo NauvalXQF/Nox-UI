@@ -39,13 +39,18 @@ impl SpringParams {
         Self::from_response(0.42, 0.96)
     }
 
-    /// Silky horizontal glide for toggling the lyrics panel (395 <-> 530 dp, ~380-420ms).
+    /// Silky horizontal glide for toggling the lyrics panel (395 <-> 530 dp, ~360ms).
     pub fn lyrics_glide() -> Self {
-        Self::from_response(0.46, 0.95)
+        Self::from_response(0.36, 0.94)
     }
 
     pub fn tactile() -> Self {
         Self::from_response(0.20, 0.76)
+    }
+
+    /// Critically-damped silky smooth scroll glide (~160ms settle, zero overshoot).
+    pub fn smooth_scroll() -> Self {
+        Self::from_response(0.16, 1.0)
     }
 
     pub fn stage_show() -> Self {
@@ -63,15 +68,32 @@ pub struct Spring {
     pub vel: f32,
     pub target: f32,
     pub params: SpringParams,
+    pos_eps: f32,
+    vel_eps: f32,
 }
 
 impl Spring {
+    /// Pixel-space spring (`pos_eps = 0.15 px`, `vel_eps = 0.5 px/s`).
     pub fn new(initial: f32, params: SpringParams) -> Self {
         Self {
             pos: initial,
             vel: 0.0,
             target: initial,
             params,
+            pos_eps: 0.15,
+            vel_eps: 0.5,
+        }
+    }
+
+    /// Normalized `0.0..1.0` spring with fine tolerance (`0.002`) so animations never snap early.
+    pub fn new_unit(initial: f32, params: SpringParams) -> Self {
+        Self {
+            pos: initial,
+            vel: 0.0,
+            target: initial,
+            params,
+            pos_eps: 0.002,
+            vel_eps: 0.01,
         }
     }
 
@@ -87,7 +109,7 @@ impl Spring {
     }
 
     pub fn is_settled(&self) -> bool {
-        (self.pos - self.target).abs() <= 0.15 && self.vel.abs() <= 0.5
+        (self.pos - self.target).abs() <= self.pos_eps && self.vel.abs() <= self.vel_eps
     }
 
     pub fn step(&mut self, dt_s: f32) -> bool {
@@ -163,5 +185,22 @@ mod tests {
             min_close = min_close.min(close.pos);
         }
         assert!(min_close > -2.0, "min_close={min_close}");
+    }
+
+    #[test]
+    fn unit_spring_settles_smoothly_without_early_snap() {
+        let mut s = Spring::new_unit(0.0, SpringParams::lyrics_glide());
+        s.set_target(1.0, SpringParams::lyrics_glide());
+        let mut last_before_settle = 0.0f32;
+        for _ in 0..240 {
+            let prev = s.pos;
+            if !s.step(1.0 / 120.0) {
+                last_before_settle = prev;
+                break;
+            }
+        }
+        assert!(s.is_settled());
+        assert_eq!(s.pos, 1.0);
+        assert!(last_before_settle > 0.99, "unit spring snapped too early at {last_before_settle}");
     }
 }
