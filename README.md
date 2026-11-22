@@ -1,27 +1,29 @@
 <p align="center">
-  <img src="assets/logo-rounded.png" alt="ABRA" width="200">
+  <img src="assets/logo-rounded.png" alt="NOX" width="200">
 </p>
 
-<h1 align="center">ABRA</h1>
+<h1 align="center">NOX</h1>
 
 > [!IMPORTANT]
-> **Disclaimer.** ABRA is an independent, fan‑made project. It is **not affiliated with, endorsed by or sponsored by
-> Apple Inc.** in any way. ABRA uses its own names (Deck, Visor, Rail, Scene, Quick Search, Quick Panel, Crystal and so on).
+> **Disclaimer.** NOX is an independent, fan‑made project. It is **not affiliated with, endorsed by, or sponsored by
+> Apple Inc.** in any way. NOX uses its own names (Deck, Notch, Rail, Scene, Quick Search, Quick Panel, Crystal, and so on).
 > “Apple”, “macOS”, “Tahoe”, “Liquid Glass”, “Dynamic Island”, “Stage Manager”, “Mission Control”, “Spotlight”,
-> “Launchpad”, “AirDrop”, “AirPlay” and related names are trademarks of Apple Inc. ABRA ships no Apple code, icons,
-> fonts or other assets.
+> “Launchpad”, “AirDrop”, “AirPlay” and related names are trademarks of Apple Inc. NOX ships no Apple code, icons,
+> fonts, or other assets.
 
 <p align="center">
-  <b>A modern glass desktop for Windows 11.</b><br>
-  Deck · Visor · Rail · Quick Panel · Quick Search · Scene · Widgets — native, written in Rust, about 15 MB of RAM.
+  <b>A modern glass desktop shell for Windows 11.</b><br>
+  Deck · Notch · Rail · Quick Panel · Quick Search · Scene · Widgets — native, written in Rust, ~15 MB of RAM.<br>
+  <sub>Built by <a href="https://opankcs.com">opankcs.com</a></sub>
 </p>
 
 <p align="center">
-  <a href="https://github-release-stats.ghostbyte.dev/abdeealfarizi/abra"><img alt="Total downloads" src="https://img.shields.io/github/downloads/abdeealfarizi/abra/total?label=downloads&color=brightgreen"></a>  <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white">
+  <a href="https://github.com/NauvalXQF/Nox-UI/releases/latest"><img alt="Latest Release" src="https://img.shields.io/github/v/release/NauvalXQF/Nox-UI?label=release&color=brightgreen"></a>
+  <a href="https://github.com/NauvalXQF/Nox-UI/releases"><img alt="Total Downloads" src="https://img.shields.io/github/downloads/NauvalXQF/Nox-UI/total?label=downloads&color=brightgreen"></a>
+  <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust">
   <img alt="License" src="https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue">
   <img alt="Telemetry" src="https://img.shields.io/badge/data%20collected-none-success">
-  <a href="https://saweria.co/kreativadev"><img alt="Buy me a coffee" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-Saweria-faae2b?logo=buymeacoffee&logoColor=black"></a>
 </p>
 
 <p align="center">
@@ -31,73 +33,59 @@
   <a href="#-privacy">Privacy</a> ·
   <a href="#-built-with">Built with</a> ·
   <a href="#-build-from-source">Build</a> ·
-  <a href="#-support-abra">Support</a>
+  <a href="#-license">License</a>
 </p>
 
 ---
 
-## ✨ What is ABRA?
+## ✨ What is NOX?
 
-ABRA turns Windows 11 into a clean, modern desktop:
+NOX turns Windows 11 into a clean, fluid glass desktop shell:
 
 - a magnifying **Deck** for your apps,
-- a **Visor** at the top of the screen that shows what is going on (music with live lyrics, downloads, timers, files),
-- a **Rail** with real app menus, Wi‑Fi and battery,
-- a **Quick Panel** for toggles and sliders, **Quick Search**, **Scene**, **Overview** and desktop **Widgets**,
+- an interactive **Notch** at the top of the screen for music with live lyrics, instant native notifications, Pomodoro timer, Google Tasks & Calendar, Ask Gemini AI, downloads, and file drops,
+- a **Rail** with real app menus, Wi‑Fi, and battery,
+- a **Quick Panel** for toggles and sliders, **Quick Search**, **Scene**, **Overview**, and desktop **Widgets**,
 
-all drawn with a frosted glass material and springy animations.
+all drawn with frosted glass materials and springy GPU‑composited animations.
 
-It is one small native program: no Electron, no web view, no background services, no account. At idle it uses about
-**15 MB** of private memory.
+It is a single lightweight native program: no Electron, no WebView, no background telemetry services, no account required. At idle it uses roughly **15 MB** of private memory.
 
 <p align="center">
-  <img src="assets/screenshots/desktop.png" alt="ABRA desktop: Deck, Rail, Visor and widgets" width="900">
+  <img src="assets/screenshots/desktop.png" alt="NOX desktop: Deck, Rail, Notch and widgets" width="900">
 </p>
 
-### 🆕 New in 0.4.1
+### 🆕 What’s New in NOX v0.4.1
 
-- **New look out of the box**: a fresh install now starts with the Rail, Visor and Deck together, with an auto‑hiding
-  Deck. Settings you already changed are kept.
-- **Fixes**: the Visor battery percentage keeps updating instead of freezing after the first reading, and the Wi‑Fi and
-  Bluetooth controls in the Quick Panel open their menus again instead of closing straight away.
-
-### In 0.4.0
-
-- **Desktop widgets**: Clock, World Clock, Today, Month, Digital Clock, Battery and System Monitor, in the **Original** or
-  **Crystal** material. Add them from a widget gallery; they snap to a tidy grid with a placeholder while you drag.
-- **Capsule**: an optional floating, pill‑shaped Visor.
-- **Global scale** (100 · 125 · 150%) for the Deck, Visor, Rail and Quick Panel.
-- **Quick Panel editing**: drag controls to rearrange them (neighbours slide out of the way) and drag the glass corner
-  handle to resize any control — Wi‑Fi down to a single circle, sliders vertical or wide, Playing from a play button up
-  to a large card.
-- **Wi‑Fi**: connect to your saved networks without location access, live signal strength, and new Wi‑Fi and battery icons
-  in the Rail with the battery percentage inside, outside or hidden.
-- **Windows** open and close with an animation; Scene cards fly in from where they sit.
-- **Settings** redesigned with a floating glass sidebar, and your own image as the Rail logo.
-- **Own names** for every part: Deck, Visor, Rail, Scene, Quick Search, Quick Panel, Overview and App Grid.
-- **Fixes**: Deck pins survive app updates (Microsoft Store and auto‑updating apps), closed apps can be removed from the
-  Deck, opening apps no longer freezes ABRA, the Visor and Deck always stay above other windows, and text can no longer be
-  garbled by third‑party fonts.
-- **Lighter**: about a third of the memory of the previous development build.
+- **NOX Rebrand & Liquid Glass Identity**: new `nox.` icon, renamed binaries (`nox.exe`, `nox-guard.exe`), config stored in `%APPDATA%\NOX`, and automatic seamless migration from legacy `%APPDATA%\ABRA` settings and credentials.
+- **Instant Native Notifications & Deep‑Link Activation**: reads Windows 11 notifications natively via WinRT `UserNotificationListener` (with automatic UI Automation Zero‑Config fallback), and activates notifications directly via Windows Toast COM (`INotificationActivationCallback`) to jump straight into the exact WhatsApp, Telegram, or Discord chat room instantaneously.
+- **Refined Notch & 4 Visibility Modes**: choose **Notch** (attached to top edge) or **Capsule** (floating) with **Fixed**, **Overlay**, **Smart** (auto‑hides when any window is maximized or overlaps the Notch), and **Auto‑hide** modes, pure OLED `#000000` edges, and dual‑layer GPU shadow.
+- **Live Lyrics & Adaptive Now Playing**: adaptive album‑art color tint, staggered 4‑layer Apple Music–style lyrics transitions, and [LRCLIB](https://lrclib.net) + local `.lrc` support.
+- **Productivity & Integrations**: Pomodoro timer with an adaptive Detached Timer Pill, **Google Tasks & Calendar** sync, **Ask Gemini AI** with live model selection, and a dedicated **Integrations** tab in Settings.
+- **120fps Smooth Settings**: GPU‑smooth inertial scrolling with a draggable animated scrollbar across all 9 Settings tabs (English & Indonesian).
+- **1‑Click Native Setup**: extract the release ZIP and double‑click `Install-NOX.cmd` to install into `%LOCALAPPDATA%\NOX`, register the Windows Sparse Package Identity (`Opankcs.NoxShell`), and launch NOX automatically.
 
 <details>
-<summary><b>In 0.3.0</b></summary>
+<summary><b>Earlier milestones (0.4.0 & 0.3.0)</b></summary>
 
-- A brand‑new Visor with **Play**, **Shelf** and **Timer** tabs, live lyrics, a music idle mode and download progress.
-- **Send to phone**: drop files on the Visor and scan a QR code with any Android or iPhone.
-- Wi‑Fi and Bluetooth pickers, the ABRA app icon and a **Buy me a coffee** button.
+- **Desktop widgets**: Clock, World Clock, Today, Month, Digital Clock, Battery, and System Monitor in **Original** or **Crystal** material with snap‑to‑grid placement.
+- **Global scale** (100 · 125 · 150%) for Deck, Notch, Rail, and Quick Panel.
+- **Quick Panel editing**: drag controls to rearrange and resize them from a glass corner handle.
+- **Wi‑Fi & Bluetooth**: connect to saved networks without location access, live signal strength, and one‑click Bluetooth audio connect.
+- **Send to phone**: drop files onto the Notch and scan a QR code from Android or iPhone over local Wi‑Fi.
+- **Window animations & Scene**: smooth open/close animations and live tilted Scene cards.
 </details>
 
 ---
 
 ## 🧩 Modular: turn off what you don’t want
 
-Every part of ABRA is independent. Keep only the pieces you like:
+Every part of NOX is independent. Keep only the pieces you like:
 
 | Part | Where to turn it off |
 |---|---|
 | Deck | *Settings → Deck → Enable Deck* |
-| Visor | *Settings → Visor → Enable Visor* |
+| Notch | *Settings → Notch → Enable Notch* |
 | Rail | *Settings → Rail → Enable Rail* |
 | Widgets | Right‑click a widget → *Remove Widget* |
 | Scene | *Settings → Scene*, or the Quick Panel control |
@@ -106,7 +94,7 @@ Every part of ABRA is independent. Keep only the pieces you like:
 | Window animations | *Settings → General → Window animations* |
 | Recent apps in the Deck | *Settings → Deck → Recent apps* |
 
-Use only the Deck with your normal taskbar, only the Visor, only the Rail — any mix works.
+Use only the Notch with your normal taskbar, only the Deck, only the Rail — any combination works.
 
 ---
 
@@ -114,138 +102,116 @@ Use only the Deck with your normal taskbar, only the Visor, only the Rail — an
 
 > Requires **Windows 11** (build 22000 or newer), 64‑bit.
 
-Download from the **[Releases](https://github.com/abdeealfarizi/abra/releases)** page:
+Download **`NOX-v0.4.1-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
 
-| File | Best for |
-|---|---|
-| `ABRA-Setup-0.4.1.exe` | Most people. Per‑user install, **no administrator rights**, optional Start menu shortcut and “launch at sign‑in”, clean uninstall from *Windows Settings → Apps*. |
-| `ABRA-0.4.1-win-x64.zip` | Portable. Extract anywhere and keep `abra.exe`, `abra-guard.exe` and the `fonts` folder **together**. |
+| Mode | How to run | Best for |
+|---|---|---|
+| **1‑Click Native Setup** *(Recommended)* | Extract the ZIP → double‑click **`Install-NOX.cmd`** | Most people. Installs to `%LOCALAPPDATA%\NOX`, registers Windows Sparse Package Identity (`Opankcs.NoxShell`) for **Native WinRT notifications & instant deep‑link activation**, and launches NOX automatically. |
+| **Portable / Zero‑Config** | Extract the ZIP → double‑click **`nox.exe`** | Trying NOX without installation. Keep `nox.exe` and `nox-guard.exe` in the same folder. Notifications still work automatically via UI Automation (Zero‑Config). |
 
-### Installer
+### Step‑by‑step (Recommended)
 
-1. Run `ABRA-Setup-0.4.1.exe`.
-2. Windows SmartScreen may warn about an unsigned app: choose **More info → Run anyway** (only for files from this repository).
-3. Pick the options you want (Start menu shortcut, launch at sign‑in) and finish. ABRA starts.
-
-### Portable
-
-1. Extract the zip to a folder you keep, for example `Documents\ABRA`.
-2. Double‑click `abra.exe`.
+1. Download **`NOX-v0.4.1-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
+2. Extract the entire ZIP to any folder (do not run directly from inside the ZIP preview).
+3. Double‑click **`Install-NOX.cmd`**.
+   - If Windows SmartScreen warns about an unsigned app, click **More info → Run anyway** (only for official releases from this repository).
+4. Follow the brief prompt — NOX installs to `%LOCALAPPDATA%\NOX` and starts automatically.
+5. When Windows asks for notification access, click **Allow** so the Notch can display live notifications and open chats instantaneously.
 
 ### First run
 
-- The Windows taskbar hides and the Rail, Visor and Deck appear. The Deck hides itself until you move the pointer to the
-  bottom of the screen (turn the takeover off in *Settings → General* if you prefer your taskbar).
-- Open **Settings**: right‑click the Deck → **ABRA Settings…**, or click the logo in the Rail.
+- The Windows taskbar hides and the Rail, Notch, and Deck appear (turn off taskbar hiding anytime in *Settings → General*).
+- Open **Settings**: right‑click the Deck → **NOX Settings…**, or click the logo in the Rail.
 - Language: *Settings → General → Language* (**English** or **Indonesia**).
+- Optional integrations (Google Tasks/Calendar & Ask Gemini AI): configure in *Settings → Integrations*.
 
-### Updating from an older version
+### Updating & Migration
 
-Install 0.4.1 over the old version. Your settings, pinned apps and Quick Panel layout are kept.
+- Extract the new ZIP and run `Install-NOX.cmd` again — your existing settings, pinned apps, Quick Panel layout, and credentials are preserved.
+- Existing configurations from `%APPDATA%\ABRA` are automatically migrated to `%APPDATA%\NOX` on first launch.
 
-### Quit and uninstall
+### Quit and Uninstall
 
-- **Quit**: right‑click an empty part of the Deck (or the Start icon) → **Quit ABRA**. The taskbar comes back automatically.
-  If ABRA is ever killed, `abra-guard.exe` restores the taskbar and any windows it moved.
-- **Uninstall**: *Windows Settings → Apps → Installed apps → ABRA → Uninstall* (installer), or quit ABRA and delete the folder
-  (portable). Your settings are in `%APPDATA%\ABRA`; delete that folder too for a clean removal.
+- **Quit**: right‑click an empty area of the Deck (or the Start icon) → **Quit NOX**. The Windows taskbar returns automatically. If NOX is ever force‑closed, `nox-guard.exe` restores the taskbar and any parked windows.
+- **Uninstall**: double‑click **`Uninstall-NOX.cmd`** (in the extracted folder or `%LOCALAPPDATA%\NOX\Uninstall-NOX.cmd`). To remove settings as well, delete `%APPDATA%\NOX`.
 
 ---
 
 ## 📖 How to use each feature
 
 <details open>
-<summary><b>🎛 Deck</b></summary>
+<summary><b>🕳 Notch</b></summary>
 
-- **Open / switch apps**: click an icon. Running apps have a dot. Hover to magnify; hover a running app for live window previews.
-- **Keep / remove**: right‑click an app → *Keep in Deck* / *Remove from Deck*. Drag icons to reorder.
-- **Recent apps** you closed appear on the right; right‑click → *Remove from Deck*, or turn them off in *Settings → Deck*.
-- **Close an app**: right‑click it → **Close**. **Quit ABRA** appears when you right‑click an empty area or the Start icon.
-- **Minimize** a window and it flies into the Deck with a **Funnel** (or **Scale**) effect.
-- **App Grid** button, a **Downloads** stack and a glass **Trash** (right‑click → *Empty Trash*).
-- **Custom icons**: right‑click an app → *Change icon…*.
-- **Size, magnification, behaviour (Fixed · Overlay · Smart)**: *Settings → Deck*.
+The interactive glass island at the top center of your screen. Choose **Notch** (attached to the top edge) or **Capsule** (floating) and visibility behavior (**Fixed · Overlay · Smart · Auto‑hide**) in *Settings → Notch*.
+
+<p align="center">
+  <img src="assets/screenshots/visor-capsule.png" alt="NOX Notch in Capsule shape" width="480">
+</p>
+
+- **Hover** to peek, **rest the cursor ~0.3 s** (or click) to expand the panel. Scroll the mouse wheel to switch tabs.
+- **When idle**: greeting with time, date, and battery; **music & lyrics** while a song is loaded; or a compact pill.
+
+<p align="center">
+  <img src="assets/screenshots/notch-idle-greeting.png" alt="Notch idle: greeting" width="300">
+  <img src="assets/screenshots/notch-music-lyrics.png" alt="Notch idle: music and lyrics" width="480">
+</p>
+
+- **Play & Live Lyrics**: song card (adaptive album‑art tint, title, seekable progress, controls) and staggered synced lyrics. Put custom `Artist - Title.lrc` files in `%APPDATA%\NOX\lyrics`, or let NOX fetch them from [LRCLIB](https://lrclib.net).
+
+<p align="center">
+  <img src="assets/screenshots/notch-play.png" alt="Notch Play tab with song card and lyrics" width="560">
+</p>
+
+- **Notifications & Instant Deep‑Link**: incoming Windows 11 notifications pop seamlessly into the Notch; clicking a notification (WhatsApp, Telegram, Discord, etc.) activates its native Windows Toast COM callback to jump straight into the exact conversation without delay.
+- **Downloads**: Microsoft Store, Steam, and browser downloads with a live progress ring.
+- **Shelf & Send to Phone (Android & iPhone, no app)**: drag files onto the Notch and drop them on **Keep on Shelf** · **Send** · **Copy to…** · **Open with…**. Scan the QR code from your phone on the **same Wi‑Fi** to download immediately.
+
+<p align="center">
+  <img src="assets/screenshots/notch-drop-zones.png" alt="Drop zones when dragging files onto the Notch" width="480">
+  <img src="assets/screenshots/notch-send-qr.png" alt="Send to phone: QR code and progress" width="480">
+</p>
+
+- **Timer, Tasks & Calendar**: Pomodoro timer with a floating Detached Timer Pill when minimized, plus upcoming events and **Google Tasks & Calendar** sync.
+- **Ask Gemini AI**: ask quick questions directly from the Notch using your own Gemini API key (*Settings → Integrations*).
 </details>
 
 <details open>
-<summary><b>🕳 Visor</b></summary>
+<summary><b>🎛 Deck</b></summary>
 
-The glass pill at the top center of the screen. Choose **Visor** (attached to the top edge) or **Capsule** (floating) in
-*Settings → Visor → Shape*.
-
-<p align="center">
-  <img src="assets/screenshots/visor-capsule.png" alt="The Visor in the Capsule shape" width="480">
-</p>
-
-- **Hover** to peek, **rest the cursor ~0.3 s** (or click) to open the panel. Scroll the mouse wheel to switch tabs.
-- **When idle**: a greeting with the time, date and battery; **music & lyrics** while a song is loaded; or just the pill.
-
-<p align="center">
-  <img src="assets/screenshots/notch-idle-greeting.png" alt="Visor idle: greeting" width="300">
-  <img src="assets/screenshots/notch-music-lyrics.png" alt="Visor idle: music & lyrics" width="480">
-</p>
-
-- **Play tab**: song card (artwork, title, seekable progress, controls) and big **lyrics** that scroll with the song.
-  Put your own `Artist - Title.lrc` files in `%APPDATA%\ABRA\lyrics`, or let ABRA look them up on [LRCLIB](https://lrclib.net).
-
-<p align="center">
-  <img src="assets/screenshots/notch-play.png" alt="Visor Play tab with song card and lyrics" width="560">
-</p>
-
-- **Downloads**: Microsoft Store, Steam and browser downloads with a progress ring.
-- **Shelf tab**: drag files onto the Visor and drop them on **Keep on Shelf** · **Send** · **Copy to…** · **Open with…**.
-
-<p align="center">
-  <img src="assets/screenshots/notch-drop-zones.png" alt="Drop zones when dragging files onto the Visor" width="480">
-</p>
-
-- **Send to phone (Android & iPhone, no app)**: drop files on **Send**, scan the QR code with your phone’s camera and tap
-  **Download**. Both devices must be on the **same Wi‑Fi**; allow ABRA on **Private networks** if Windows Firewall asks.
-
-<p align="center">
-  <img src="assets/screenshots/notch-send-qr.png" alt="Send to phone: QR code and progress" width="560">
-</p>
-
-- **Timer tab**: a timer next to a calendar strip with your Windows calendar events.
+- **Open / switch apps**: click an icon. Running apps show a dot. Hover to magnify; hover a running app for live window previews.
+- **Keep / remove**: right‑click an app → *Keep in Deck* / *Remove from Deck*. Drag icons to reorder.
+- **Recent apps**: recently closed apps appear on the right; right‑click → *Remove from Deck*, or toggle in *Settings → Deck*.
+- **Close an app**: right‑click it → **Close**. **Quit NOX** appears when you right‑click an empty area or the Start icon.
+- **Minimize** a window and it flies into the Deck with a **Funnel** or **Scale** effect.
+- **App Grid**, **Downloads** stack, glass **Trash** (right‑click → *Empty Trash*), and custom icons (right‑click → *Change icon…*).
+- **Size, magnification, behaviour (Fixed · Overlay · Smart)**: *Settings → Deck*.
 </details>
 
 <details open>
 <summary><b>📋 Rail</b></summary>
 
-- **Logo menu**: About this PC, System Settings, Microsoft Store, ABRA Settings, App Grid, Overview, Force Quit, Sleep,
-  Restart, Shut Down, Lock Screen. Use your own image as the logo in *Settings → Rail → Rail logo*.
-- **App name and menus**: the active app’s real menus (File, Edit…) when it has classic menus.
-- **Right side**: battery, **Wi‑Fi**, Quick Search, Quick Panel and the clock. The Wi‑Fi icon shows live signal strength;
-  the battery percentage can sit inside the icon, next to it, or be hidden (*Settings → Rail*).
-- **Background**: transparent (with a soft shade), light, dark or the glass material.
-
-
-- **Wi‑Fi menu**: a switch, your **saved networks** (click one to connect) and live signal strength for the current one.
-  Windows only lists *nearby* networks to apps when **Location** is allowed; ABRA asks with a button and never reads or
-  stores your location.
-
+- **Logo menu**: About this PC, System Settings, Microsoft Store, NOX Settings, App Grid, Overview, Force Quit, Sleep, Restart, Shut Down, Lock Screen. Use your own image as the logo in *Settings → Rail → Rail logo*.
+- **App name and menus**: the active app’s native classic menus (File, Edit, etc.).
+- **Right side**: battery (percentage inside, outside, or hidden), **Wi‑Fi** with live signal strength, Quick Search, Quick Panel, and clock.
+- **Background**: transparent (with a soft shade), light, dark, or glass material.
+- **Wi‑Fi menu**: toggle, saved networks (click to connect), and live signal strength. Windows only exposes *nearby* networks when **Location** is enabled; NOX never reads or stores your location.
 </details>
 
 <details open>
 <summary><b>🎚 Quick Panel</b></summary>
 
 - Click the two‑switch icon in the Rail.
-- **Wi‑Fi / Bluetooth**: click the round icon to switch on/off; click the rest to open the network / device picker.
-  Bluetooth **headphones and speakers connect with one click**.
-- **Display / Sound sliders**, a **sound output** button, Playing, Dark Mode, Scene, Overview, Screenshot and more.
+- **Wi‑Fi / Bluetooth**: click the round icon to toggle; click the card to open the network / device picker. Bluetooth **headphones and speakers connect in one click**.
+- **Display / Sound sliders**, **sound output** switcher, Playing, Dark Mode, Scene, Overview, Screenshot, and more.
 
 <p align="center">
   <img src="assets/screenshots/quick-panel.png" alt="Quick Panel" width="320">
 </p>
 
-- **Edit Controls…**:
-  - remove a control with **−**,
-  - **drag** a control to a new place — the others slide out of the way,
-  - **drag the glass corner handle** horizontally, vertically or diagonally to resize it,
-  - add more from the searchable gallery.
+- **Edit Controls…**: remove with **−**, drag to rearrange, drag the glass corner handle to resize horizontally/vertically/diagonally, or add controls from the searchable gallery.
 
 <p align="center">
-  <img src="assets/screenshots/quick-panel-edit.png" alt="Quick Panel in Edit Controls mode with resize handles and the gallery" width="820">
+  <img src="assets/screenshots/quick-panel-edit.png" alt="Quick Panel in Edit Controls mode" width="820">
 </p>
 </details>
 
@@ -253,63 +219,50 @@ The glass pill at the top center of the screen. Choose **Visor** (attached to th
 <summary><b>🧱 Widgets</b></summary>
 
 - Open the gallery from *Settings → Widgets → Add widgets*, or right‑click a widget → *Edit Widgets…*.
-- **Click** a widget in the gallery to add it, or **drag** it onto the desktop; a placeholder shows the grid slot it will snap to.
-- Drag widgets to move them, click one to open the matching app, right‑click → *Remove Widget*.
-- Material: **Original** (solid light and dark cards) or **Crystal** (glass), in *Settings → Widgets*.
-- Widgets only show the time, your calendar date, battery and CPU/memory usage. They read no personal data.
+- **Click** or **drag** widgets onto the desktop with snap‑to‑grid placement.
+- Material: **Original** (solid light/dark cards) or **Crystal** (frosted glass) in *Settings → Widgets*.
 
 <p align="center">
-  <img src="assets/screenshots/widgets-desktop.png" alt="Widgets in the Original material" width="360">
-  <img src="assets/screenshots/widgets-crystal.png" alt="Widgets in the Crystal material" width="360">
+  <img src="assets/screenshots/widgets-desktop.png" alt="Widgets in Original material" width="360">
+  <img src="assets/screenshots/widgets-crystal.png" alt="Widgets in Crystal material" width="360">
 </p>
 </details>
 
-<details>
+<details open>
 <summary><b>🔍 Quick Search</b></summary>
 
-- `Ctrl` + `Space` opens it. Type to search **Apps**, **Files**, **Actions** and **Clipboard** (switch with `Ctrl` + `1`…`4`).
-- Built‑in calculator, recent files with thumbnails, file‑type filters and “Show more”.
-- **Actions**: your own quick keys (*Settings → Quick Search*). **Clipboard history** is optional and kept in memory only.
+- Press `Ctrl` + `Space` to search **Apps**, **Files**, **Actions**, and **Clipboard** (switch tabs with `Ctrl` + `1`…`4`).
+- Built‑in calculator, recent files with thumbnails, file‑type filters, custom quick actions, and optional in‑memory clipboard history.
 
 <p align="center">
   <img src="assets/screenshots/quick-search.png" alt="Quick Search" width="560">
 </p>
 </details>
 
-<details>
-<summary><b>🎬 Scene</b></summary>
+<details open>
+<summary><b>🎬 Scene · 🪟 Overview · App Grid · Screen Corners · HUD</b></summary>
 
-- Turn it on from the Quick Panel or *Settings → Scene*.
-- Other windows become **live, tilted cards** in a side strip; click one to fly it back to the stage, Shift‑click to group.
-- Click the wallpaper to tuck everything away. `Alt` + `Tab` shows ABRA’s switcher while it is on.
-
-</details>
-
-<details>
-<summary><b>🪟 Overview, App Grid, Screen Corners, HUD</b></summary>
-
-- **Overview** (`Ctrl` + `↑`): every window and your virtual desktops at a glance.
-- **App Grid** (`Ctrl` + `Shift` + `Space` or the Deck button): a full‑screen grid of installed apps.
-- **Screen Corners**: move the pointer into a screen corner to run an action.
-- **Volume & brightness HUD**: a glass card with your output device name.
+- **Scene**: other windows become live, tilted cards in a side strip; click one to fly it back, Shift‑click to group, click wallpaper to clear stage, and `Alt` + `Tab` uses NOX’s switcher while Scene is active.
+- **Overview** (`Ctrl` + `↑`): all windows and virtual desktops at a glance.
+- **App Grid** (`Ctrl` + `Shift` + `Space` or Deck button): full‑screen grid of installed apps.
+- **Screen Corners**: move the pointer to a screen corner to trigger an action.
+- **Volume & brightness HUD**: glass card showing your active output device.
 
 <p align="center">
   <img src="assets/screenshots/apps.png" alt="App Grid" width="560">
 </p>
 </details>
 
-<details>
+<details open>
 <summary><b>🎨 Appearance & ⚙️ Settings</b></summary>
 
-- *Settings → Appearance*: Auto · Light · Dark, accent color, icon style (Default · Dark · Clear · Tinted), the glass
-  material (**Blur**, **Crystal** or **Black**), a separate Visor material, blur, transparency, the **scale** of the Deck,
-  Visor, Rail and Quick Panel, and an optional **icon pack** (`%APPDATA%\ABRA\iconpack`, nothing is bundled).
-- Settings has a floating glass sidebar with search, back / forward buttons, English and Indonesian.
-- **Quick shortcuts**: `` Alt+` `` cycles windows of the same app, `Ctrl+Alt+H` hides, `Ctrl+Alt+M` minimizes,
-  `Ctrl+Alt+Q` quits the active app (*Settings → General*).
+- *Settings → Appearance*: Auto · Light · Dark, accent color, icon style (Default · Dark · Clear · Tinted), glass material (**Blur**, **Crystal**, or **Black**), separate Notch material, blur, transparency, **global scale**, and optional icon packs (`%APPDATA%\NOX\iconpack`).
+- *Settings → Integrations*: configure **Google Tasks & Calendar** OAuth and **Ask Gemini AI** (with live model selector).
+- 9 tabs in a floating glass sidebar with search, back/forward navigation, 120fps smooth scrolling with draggable scrollbar, and **English / Indonesian** UI.
+- **Quick shortcuts**: `` Alt+` `` cycles windows of the same app, `Ctrl+Alt+H` hides, `Ctrl+Alt+M` minimizes, `Ctrl+Alt+Q` quits the active app (*Settings → General*).
 
 <p align="center">
-  <img src="assets/screenshots/settings.png" alt="ABRA Settings" width="640">
+  <img src="assets/screenshots/settings.png" alt="NOX Settings" width="640">
 </p>
 </details>
 
@@ -321,44 +274,35 @@ The glass pill at the top center of the screen. Choose **Visor** (attached to th
 | `Ctrl` + `Shift` + `Space` | App Grid |
 | `Ctrl` + `1` … `4` | Inside Quick Search: Apps · Files · Actions · Clipboard |
 | `Ctrl` + `↑` | Overview |
-| `Alt` + `Tab` | ABRA window switcher (while Scene is on) |
+| `Alt` + `Tab` | NOX window switcher (while Scene is on) |
 | `Esc` | Close the active overlay |
 
-The complete guide in Indonesian is in [`docs/PANDUAN.md`](docs/PANDUAN.md).
+Indonesian guide: [`docs/PANDUAN.md`](docs/PANDUAN.md).
 
 ---
 
 ## 🔒 Privacy
 
-**ABRA does not collect, store or send any data about you.** There is no telemetry, no analytics, no account and no ads.
-Everything ABRA knows stays on your PC, in `%APPDATA%\ABRA`.
+**NOX does not collect telemetry, analytics, or ads.** All settings live locally in `%APPDATA%\NOX`, and optional OAuth tokens / API keys are stored securely in **Windows Credential Manager** (`NOX/...`).
 
-- **Lyrics** are the only internet request ABRA makes on its own: if a song has no local `.lrc` file, ABRA asks
-  [LRCLIB](https://lrclib.net) using only the title, artist, album and length. You can turn it off (*Settings → Visor*).
-- **Send to phone** runs a tiny temporary web server on your **local network only**, under a random link, serving only the files
-  you dropped. It stops when you click Done, after 15 idle minutes, or when ABRA quits.
-- **Read‑only, on demand**: saved Wi‑Fi network names and signal strength, Bluetooth devices, calendar events, download
-  progress (file names and sizes only), and which apps use the microphone / camera. ABRA never reads your location.
-- **Clipboard history** is optional, text only, kept in memory for 8 hours and never written to disk.
-- A keyboard hook is used **only** to catch `Alt+Tab` while Scene is on. Keystrokes are never logged or sent.
-- Release builds are checked so that they contain no paths or user names from the developer’s PC.
+- **Lyrics**: if a song has no local `.lrc` file, NOX queries [LRCLIB](https://lrclib.net) using only title, artist, album, and duration. You can disable online lyrics in *Settings → Notch*.
+- **Google Tasks/Calendar & Ask Gemini AI** *(opt‑in)*: completely inactive until you enter your own Google OAuth credentials or Gemini API key in *Settings → Integrations*. Requests go directly from your PC to Google APIs with no intermediary server.
+- **Notifications**: read locally via Windows `UserNotificationListener` / UI Automation and local read‑only `wpndatabase.db` lookup for instant deep‑link activation. Notification contents never leave your device.
+- **Send to phone**: spawns a temporary HTTP server on your **local Wi‑Fi network only** under a random URL, serving only dropped files, and shuts down automatically when done, after 15 idle minutes, or when NOX quits.
+- **Clipboard history**: optional, text only, kept in RAM for 8 hours, never written to disk.
+- **Keyboard hook**: active only to intercept `Alt+Tab` while Scene is enabled; keystrokes are never logged or sent.
 
 ---
 
 ## 🛠 Built with
 
-- **[Rust](https://www.rust-lang.org)** — the whole app, in five crates.
-- **[windows‑rs](https://github.com/microsoft/windows-rs)** — direct access to Win32 and WinRT APIs.
-- **Windows.UI.Composition** — GPU‑composited visuals, springs and blur for the glass materials and all animations, with
-  one shared graphics device for the whole app.
-- **Win32 / WinRT platform APIs** — WASAPI, System Media Transport Controls, WLAN, Bluetooth, network information, WIC,
-  GDI text rendering, OLE drag and drop.
-- **[Inno Setup](https://jrsoftware.org/isinfo.php)** — the installer.
-- Bundled font: **[Inter](https://rsms.me/inter/)** (SIL Open Font License), with Segoe UI Variable as the fallback.
-  ABRA never uses fonts you installed yourself, so a broken third‑party font can’t garble its text.
+- **[Rust](https://www.rust-lang.org)** — entire workspace across five crates.
+- **[windows‑rs](https://github.com/microsoft/windows-rs)** — direct Win32 and WinRT bindings.
+- **Windows.UI.Composition & D3D11** — GPU‑composited visuals, spring animations, dual‑layer shadows, and glass materials on a shared graphics device.
+- **Win32 / WinRT Platform APIs** — WASAPI, System Media Transport Controls, `UserNotificationListener`, Windows Toast COM (`INotificationActivationCallback`), WLAN, Bluetooth, WIC, DirectWrite / GDI text rendering, OLE drag‑and‑drop.
+- **Bundled font**: **[Inter](https://rsms.me/inter/)** (SIL Open Font License 1.1), with Segoe UI Variable fallback.
 
-No Electron, no web view, no .NET runtime. Self‑written pieces include the QR‑code encoder, the LRC lyrics parser and the
-small HTTP server for *Send to phone*.
+No Electron, no WebView, no .NET runtime.
 
 ---
 
@@ -369,52 +313,45 @@ small HTTP server for *Send to phone*.
 
 ### 1. Install the toolchain
 
-1. Install **Rust** with [rustup](https://rustup.rs) and select the MSVC toolchain:
+1. Install **Rust** via [rustup](https://rustup.rs) with the MSVC target:
    ```powershell
    rustup default stable-x86_64-pc-windows-msvc
    ```
-2. Install **Visual Studio Build Tools** with the workload **Desktop development with C++** (includes `link.exe` and the Windows 11 SDK).
+2. Install **Visual Studio Build Tools** with the **Desktop development with C++** workload (includes `link.exe` and Windows 11 SDK).
 3. Install **Git**.
 
 ### 2. Clone and build
 
 ```powershell
-git clone https://github.com/abdeealfarizi/abra.git
-cd abra
-cargo build --release
-.\target\release\abra.exe
+git clone https://github.com/NauvalXQF/Nox-UI.git
+cd Nox-UI
+cargo build --release --workspace
+.\target\release\nox.exe
 ```
 
-You get `abra.exe` and `abra-guard.exe` in `target\release\`.
+This produces `nox.exe` and `nox-guard.exe` in `target\release\`.
 
-> **“link.exe not found”?** Install the C++ workload above, or create a local `.cargo\config.toml` that points Cargo at `rust-lld`
-> and your MSVC / Windows SDK library folders. `.cargo/` is git‑ignored because it holds machine‑specific paths.
-
-### 3. Tests and release build
+### 3. Tests and release package
 
 ```powershell
 cargo test --workspace
-
-winget install JRSoftware.InnoSetup                            # once
-powershell -File installer\build-installer.ps1 -Version 0.4.1
+powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
 ```
 
-The release script rebuilds ABRA with local paths stripped, **refuses to continue** if a binary still contains your user
-name or a local path, and writes `dist\ABRA-Setup-0.4.1.exe` and `dist\ABRA-0.4.1-win-x64.zip`.
+The packaging script builds the release workspace and generates `dist\NOX-v0.4.1-win64\` and `dist\NOX-v0.4.1-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
 
-### 4. Safe experiments
+### 4. Safe isolated testing
 
-Run an **isolated** instance that does not touch your real settings:
+Run an isolated instance that does not touch your live settings:
 
 ```powershell
 $env:NACRE_CONFIG_DIR = "$PWD\target\cfg-test"
-.\target\release\abra.exe --keep-taskbar --exit-after 30
+.\target\release\nox.exe --keep-taskbar --exit-after 30
 ```
 
-Useful flags: `--keep-taskbar`, `--no-dock`, `--no-island`, `--no-hud`, `--open-settings`, `--open-widgets`,
-`--exit-after <seconds>`, `--add-app <path>`, `--set-icon <app|start|launchpad> <image>`.
+Useful flags: `--keep-taskbar`, `--no-dock`, `--no-island`, `--no-hud`, `--open-settings`, `--open-widgets`, `--exit-after <seconds>`, `--add-app <path>`, `--set-icon <app|start|launchpad> <image>`.
 
-> With Scene on, ABRA moves your real windows. Let a test instance exit normally (`--exit-after`) instead of killing it.
+> With Scene enabled, NOX moves your real windows. Let test instances exit normally (`--exit-after`) rather than force‑killing them.
 
 </details>
 
@@ -422,55 +359,37 @@ Useful flags: `--keep-taskbar`, `--no-dock`, `--no-island`, `--no-hud`, `--open-
 
 | Path | Contents |
 |---|---|
-| `crates/core` | Pure, unit‑tested logic: Visor state, lyrics, QR codes, Deck layout, widgets, settings, i18n, icons |
-| `crates/platform` | Win32 / WinRT wrappers: windows, media, audio, Wi‑Fi, Bluetooth, downloads, icons, text, local send server |
-| `crates/ui` | The glass materials on `Windows.UI.Composition`, the shared graphics device and live window capture |
-| `crates/app` | The `abra` app: Deck, Visor, Rail, Quick Panel, Quick Search, Scene, Widgets, Settings |
-| `crates/guard` | `abra-guard`, the watchdog that restores the taskbar and moved windows |
-| `docs/` · `installer/` · `tools/` | Indonesian user guide, installer and release script, taskbar safety test |
+| `crates/core` | Pure, unit‑tested logic: Notch state, lyrics, QR codes, Deck layout, widgets, settings, i18n, icons |
+| `crates/platform` | Win32 / WinRT wrappers: windows, notifications & Toast COM activation, media, audio, Wi‑Fi, Bluetooth, downloads, Google/Gemini APIs, local send server |
+| `crates/ui` | Glass materials on `Windows.UI.Composition`, shared D3D11 device, live window capture |
+| `crates/app` | `nox` executable: Deck, Notch, Rail, Quick Panel, Quick Search, Scene, Widgets, Settings |
+| `crates/guard` | `nox-guard`, watchdog that restores the taskbar and parked windows |
+| `packaging/` | 1‑click `Install-NOX.cmd`, `Uninstall-NOX.cmd`, Sparse Package registration, and release bundler |
+| `docs/` · `tools/` | Indonesian user guide and taskbar safety test |
 
-Internal crates are named `nacre-*` (the former codename), and some internal names (settings keys, window classes, flags such
-as `--no-dock`) keep their original words so existing settings keep working.
+Internal crates retain the `nacre-*` namespace so existing config keys and CLI flags remain compatible.
 
 ---
 
 ## ⚙️ Configuration & troubleshooting
 
-Settings live in `%APPDATA%\ABRA\settings.cfg` (plain `key=value`), next to `pins.txt` (Deck), `icons.txt` (custom icons),
-`cc_layout.txt` (Quick Panel), `widgets.txt` (widget positions), `actions.txt` (Quick Search quick keys),
-`stage_exclude.txt`, `lyrics\` and `abra.log`. Set `NACRE_CONFIG_DIR` to use another folder.
+Settings are stored in `%APPDATA%\NOX\settings.cfg` (plain `key=value`), alongside `pins.txt`, `icons.txt`, `cc_layout.txt`, `widgets.txt`, `actions.txt`, `stage_exclude.txt`, `lyrics\`, and `nox.log`. Override the directory with `NACRE_CONFIG_DIR`.
 
-- **Taskbar missing after a crash** — start `abra.exe` and quit normally, or let `abra-guard.exe` do it.
-- **A window seems to have vanished** — Scene parked it. Start ABRA again; it restores parked windows.
-- **Phone can’t open the Send link** — same Wi‑Fi on both? Allow ABRA in Windows Firewall for Private networks.
-- **Wi‑Fi menu shows only saved networks** — Windows needs *Location* allowed before apps can see nearby networks.
-- **A hotkey does nothing** — another program owns the shortcut (see `abra.log`).
+- **Notifications not showing in the Notch** — run `Install-NOX.cmd` to register Windows Sparse Package Identity (`Opankcs.NoxShell`), then click **Allow** when Windows prompts for notification access (or enable NOX in *Windows Settings → Privacy & security → Notifications*).
+- **Taskbar missing after a crash** — start `nox.exe` and quit normally, or let `nox-guard.exe` restore it.
+- **A window seems to have vanished** — Scene parked it. Start NOX again to restore parked windows.
+- **Phone can’t open the Send link** — ensure both devices are on the same Wi‑Fi and allow NOX on Private networks in Windows Firewall.
+- **Wi‑Fi menu shows only saved networks** — Windows requires *Location* enabled for apps to scan nearby networks.
+- **A hotkey does nothing** — another application already owns the shortcut (check `nox.log`).
 
-**Known limitations**: dragging a Scene card onto the stage isn’t implemented (Shift‑click to group); Focus, Hotspot,
-Nearby Sharing and Airplane mode open the matching Windows Settings page; only Bluetooth audio devices connect from the menu;
-*Send to phone* sends files, not folders; the World Clock uses fixed time zones without daylight saving; tested on Windows 11
-with a single primary display.
+**Known limitations**: dragging a Scene card onto the stage isn’t implemented (Shift‑click to group); Focus, Hotspot, Nearby Sharing, and Airplane mode open the matching Windows Settings page; only Bluetooth audio devices connect from the menu; *Send to phone* sends files, not folders; World Clock uses fixed time zones without DST; primary development and testing target Windows 11 primary displays.
 
 ---
 
 ## 📄 License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE.md). You may use, study, modify and share ABRA for **noncommercial** purposes;
-commercial use needs written permission from the copyright holder. This is a *source‑available* license, not an OSI‑approved open
-source license. The bundled **Inter** font is © The Inter Project Authors, under the SIL Open Font License 1.1
-(`assets/fonts/Inter-LICENSE.txt`).
+[PolyForm Noncommercial License 1.0.0](LICENSE.md). You may use, study, modify, and share this software for **noncommercial** purposes; commercial use requires written permission from the copyright holder. This is a *source‑available* license, not an OSI‑approved open‑source license. The bundled **Inter** font is © The Inter Project Authors under the SIL Open Font License 1.1 (`assets/fonts/Inter-LICENSE.txt`).
+
+NOX fork & rebrand built by **[opankcs.com](https://opankcs.com)**.
 
 Required Notice: Copyright (c) 2026 Abdee Alfarizi
-
----
-
-## ☕ Support ABRA
-
-ABRA is free and built in spare time by **[kreativa.dev](https://saweria.co/kreativadev)**. If it makes your desktop nicer,
-you can buy me a coffee — it keeps the project going. Terima kasih! 🙏
-
-<p align="center">
-  <a href="https://saweria.co/kreativadev">
-    <img alt="Buy me a coffee on Saweria" src="https://img.shields.io/badge/%E2%98%95%20Buy%20me%20a%20coffee-saweria.co%2Fkreativadev-faae2b?style=for-the-badge">
-  </a>
-</p>
