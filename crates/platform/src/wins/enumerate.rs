@@ -20,6 +20,43 @@ const HIDDEN_EXES: &[&str] = &[
     "systemsettingsbroker.exe",
 ];
 
+/// Extracts the Chromium PWA `_crx_<id>` token (e.g. `_crx_hnpfjngllnobngcgfapefoaidbinmjnm`)
+/// from a window AUMID or `shell:AppsFolder\...` path.
+pub fn extract_crx_id(s: &str) -> Option<&str> {
+    let lower = s.to_ascii_lowercase();
+    let start = lower.find("_crx_")?;
+    let rest = &s[start + 5..];
+    let len = rest.bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
+    if len >= 8 {
+        Some(&s[start..start + 5 + len])
+    } else {
+        None
+    }
+}
+
+/// Returns `true` if a Chromium browser window's `PKEY_AppUserModel_ID` identifies an installed
+/// PWA / web app window rather than a regular browser window.
+/// - Edge MSIX PWAs end with `!App` (e.g. `www.youtube.com-54E21B02_... !App`)
+/// - Chrome / Brave / Vivaldi / Opera / Edge desktop PWAs contain `_crx_<id>`
+///   (e.g. `Chrome._crx_hnpfjngllnobngcgfapefoaidbinmjnm` or with `.UserData.Profile1`).
+pub fn is_browser_pwa_aumid(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    lower.ends_with("!app") || extract_crx_id(id).is_some()
+}
+
+fn clean_pwa_title(title: &str) -> String {
+    let mut t = title.trim();
+    for suffix in [" - Google Chrome", " - Microsoft Edge", " - Brave", " - Vivaldi", " - Opera", " - Chromium"] {
+        if let Some(base) = t.strip_suffix(suffix) {
+            if !base.trim().is_empty() {
+                t = base.trim();
+                break;
+            }
+        }
+    }
+    t.to_string()
+}
+
 fn text_of(hwnd: HWND) -> String {
     let mut buf = [0u16; 512];
     let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
@@ -136,16 +173,23 @@ unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
             Some(id) => super::identity::shell_path(&id),
             None => format!("{path}?{title}"),
         };
-    } else if matches!(file, "msedge.exe" | "chrome.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe") {
+    } else if matches!(file, "msedge.exe" | "chrome.exe" | "chrome_proxy.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe" | "chromium.exe") {
         if let Some(id) = super::identity::aumid(hwnd.0 as isize) {
-            if id.to_ascii_lowercase().ends_with("!app") {
-                path = super::identity::shell_path(&id);
+            if is_browser_pwa_aumid(&id) {
+                let candidate = super::identity::shell_path(&id);
+                if crate::apps::name_for_path(&candidate).is_some() {
+                    path = candidate;
+                } else if let Some(crx) = extract_crx_id(&id) {
+                    path = crate::apps::find_crx_cached(crx).map(|a| a.path).unwrap_or(candidate);
+                } else {
+                    path = candidate;
+                }
                 pwa = true;
             }
         }
     }
     let mut name = if pwa {
-        crate::apps::name_for_path(&path).unwrap_or_else(|| title.clone())
+        crate::apps::name_for_path(&path).unwrap_or_else(|| clean_pwa_title(&title))
     } else {
         super::names::friendly(&path)
     };
@@ -167,4 +211,27 @@ pub fn list(own_pid: u32) -> Vec<Win> {
         let _ = EnumWindows(Some(each), LPARAM(&mut ctx as *mut Ctx as isize));
     }
     ctx.out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_chrome_edge_and_brave_pwa_aumids_without_false_positives() {
+        assert!(is_browser_pwa_aumid("Chrome._crx_hnpfjngllnobngcgfapefoaidbinmjnm"));
+        assert!(is_browser_pwa_aumid("Chrome._crx_agimnkijcaahngcdmfeangaknmldooml.UserData.Profile1"));
+        assert!(is_browser_pwa_aumid("Brave._crx_abcdefgh12345678"));
+        assert!(is_browser_pwa_aumid("www.youtube.com-54E21B02_pd8mbgmqs65xy!App"));
+        assert!(!is_browser_pwa_aumid("Chrome"));
+        assert!(!is_browser_pwa_aumid("Chrome.Y24ABCDEF12345"));
+        assert!(!is_browser_pwa_aumid("MSEdge"));
+
+        assert_eq!(
+            extract_crx_id("shell:AppsFolder\\Chrome._crx_hnpfjngllnobngcgfapefoaidbinmjnm.UserData.Profile1"),
+            Some("_crx_hnpfjngllnobngcgfapefoaidbinmjnm")
+        );
+        assert_eq!(clean_pwa_title("WhatsApp - Google Chrome"), "WhatsApp");
+        assert_eq!(clean_pwa_title("YouTube Music"), "YouTube Music");
+    }
 }

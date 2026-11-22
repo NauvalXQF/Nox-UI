@@ -94,6 +94,19 @@ pub fn find_prefix(prefix: &str) -> Option<App> {
     g.as_ref()?.iter().find(|a| a.path.to_ascii_lowercase().starts_with(prefix)).cloned()
 }
 
+/// Non-blocking cache lookup for a Chromium PWA `_crx_<id>` token inside `shell:AppsFolder`.
+pub fn find_crx_cached(crx_token: &str) -> Option<App> {
+    let needle = crx_token.to_ascii_lowercase();
+    let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref()?.iter().find(|a| a.path.to_ascii_lowercase().contains(&needle)).cloned()
+}
+
+/// Loads `shell:AppsFolder` if needed and finds a Chromium PWA matching `_crx_<id>`.
+pub fn find_crx(crx_token: &str) -> Option<App> {
+    ensure_loaded();
+    find_crx_cached(crx_token)
+}
+
 /// Finds an installed Windows app by display name (exact match first, then substring/token match).
 pub fn find_by_name(query: &str) -> Option<App> {
     let q = query.trim().to_ascii_lowercase();
