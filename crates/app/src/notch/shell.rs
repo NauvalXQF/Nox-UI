@@ -367,4 +367,10 @@ impl Shell {
         let _ = self.stage.SetOffset(off);
         let _ = self.sh_stage.SetOffset(off);
     }
+
+    pub fn set_stage_opacity(&self, opacity: f32) {
+        let op = opacity.clamp(0.0, 1.0);
+        let _ = self.stage.SetOpacity(op);
+        let _ = self.sh_stage.SetOpacity(op);
+    }
 }

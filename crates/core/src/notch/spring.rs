@@ -59,10 +59,20 @@ impl SpringParams {
     }
 
     pub fn stage_show() -> Self {
-        Self::from_response(0.32, 0.82)
+        Self::from_response(0.36, 0.84)
     }
 
     pub fn stage_hide() -> Self {
+        Self::from_response(0.36, 0.96)
+    }
+
+    /// Synchronized critically-damped fold when an open panel closes directly into auto-hide.
+    pub fn hide_collapse() -> Self {
+        Self::from_response(0.31, 0.96)
+    }
+
+    /// Crisp zero-flash opacity ramp when emerging from hidden state.
+    pub fn vis_show() -> Self {
         Self::from_response(0.22, 0.98)
     }
 }
@@ -207,5 +217,20 @@ mod tests {
         assert!(s.is_settled());
         assert_eq!(s.pos, 1.0);
         assert!(last_before_settle > 0.99, "unit spring snapped too early at {last_before_settle}");
+    }
+
+    #[test]
+    fn stage_hide_and_collapse_settle_smoothly_without_bounce() {
+        for params in [SpringParams::stage_hide(), SpringParams::hide_collapse()] {
+            let mut s = Spring::new(186.0, params);
+            s.set_target(2.0, params);
+            let mut min_pos = 186.0f32;
+            for _ in 0..240 {
+                s.step(1.0 / 120.0);
+                min_pos = min_pos.min(s.pos);
+            }
+            assert!(s.is_settled());
+            assert!(min_pos >= 1.2, "hide spring bounced too far below target: min={min_pos}");
+        }
     }
 }

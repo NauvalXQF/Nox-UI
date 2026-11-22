@@ -391,6 +391,7 @@ pub struct Notch {
     sp_ear: Spring,
     sp_island: Spring,
     sp_y: Spring,
+    sp_vis: Spring,
     sp_sh_blur: Spring,
     sp_sh_dy: Spring,
     sp_sh_op: Spring,
@@ -450,6 +451,7 @@ pub struct Notch {
     pinned: bool,
     lyrics_open: bool,
     play_glide_active: bool,
+    content_hidden_for_retract: bool,
     swipe: state::SwipeLatch,
     last_pub_half: i32,
     todo_adding: bool,
@@ -570,7 +572,20 @@ impl Notch {
             let init_gap = island_gap(dpi);
             let off = !crate::prefs::get().notch_enabled;
             let start_hidden = off || opts.mode == Vis::OnDemand;
-            let init_y = if start_hidden { -(init_size.h + 12.0 * dpi) } else { init_gap };
+            let init_isl = crate::prefs::get().notch_island;
+            let (init_w, init_h, init_r, init_y) = if start_hidden {
+                if init_isl {
+                    let hw = (init_size.w * 0.84).max(120.0 * dpi);
+                    let hh = (init_size.h * 0.74).max(18.0 * dpi);
+                    let hr = (init_size.radius * 0.74).min(hh * 0.5);
+                    (hw, hh, hr, -(hh + 10.0 * dpi))
+                } else {
+                    ((init_size.w * 0.74).max(110.0 * dpi), 2.0 * dpi, 2.0 * dpi, -4.0 * dpi)
+                }
+            } else {
+                (init_size.w, init_size.h, init_size.radius, init_gap)
+            };
+            let init_vis = if start_hidden { 0.0 } else { 1.0 };
             let (init_sh_blur, init_sh_dy, rest_sh_op) = state::shadow(rest);
             let init_sh_op = if start_hidden { 0.0 } else { rest_sh_op };
             let (init_csh_blur, init_csh_dy, rest_csh_op) = state::contact_shadow(rest);
@@ -599,15 +614,16 @@ impl Notch {
                 tracking: false,
                 hover_act: None,
                 regions: Vec::new(),
-                sp_w: Spring::new(init_size.w, SpringParams::swap()),
-                sp_h: Spring::new(init_size.h, SpringParams::swap()),
-                sp_r: Spring::new(init_size.radius, SpringParams::swap()),
+                sp_w: Spring::new(init_w, SpringParams::swap()),
+                sp_h: Spring::new(init_h, SpringParams::swap()),
+                sp_r: Spring::new(init_r, SpringParams::swap()),
                 sp_ear: Spring::new(init_ear, SpringParams::swap()),
                 sp_island: Spring::new_unit(
-                    if crate::prefs::get().notch_island { 1.0 } else { 0.0 },
+                    if init_isl { 1.0 } else { 0.0 },
                     SpringParams::shape_morph(),
                 ),
                 sp_y: Spring::new(init_y, SpringParams::stage_show()),
+                sp_vis: Spring::new_unit(init_vis, SpringParams::stage_show()),
                 sp_sh_blur: Spring::new(init_sh_blur, SpringParams::swap()),
                 sp_sh_dy: Spring::new(init_sh_dy, SpringParams::swap()),
                 sp_sh_op: Spring::new_unit(init_sh_op, SpringParams::swap()),
@@ -678,6 +694,7 @@ impl Notch {
                 pinned: false,
                 lyrics_open: crate::prefs::get().lyrics_panel_open,
                 play_glide_active: false,
+                content_hidden_for_retract: false,
                 swipe: state::SwipeLatch::default(),
                 last_pub_half: -1,
                 todo_adding: false,
@@ -836,7 +853,7 @@ impl Notch {
         if p <= 0.02 || !matches!(self.look.view, View::Rest | View::Compact(_)) {
             return None;
         }
-        let th = h.min(36.0 * self.dpi).max(28.0 * self.dpi);
+        let th = h.min(36.0 * self.dpi).max(2.0);
         let t_ear = if ear > 0.5 { (ear * 0.65).min(th * 0.42) } else { 0.0 };
         let ew_main = if ear > 0.5 { ear.min(h * 0.52) } else { 0.0 };
         let gap_walls = if ear > 0.5 {
@@ -855,11 +872,33 @@ impl Notch {
         Some((tx, tw, th, tr, t_ear, p))
     }
 
+    /// Computes the tucked-away `(w, h, r, y)` pose when hidden:
+    /// - Bezel-attached Notch: collapses liquidly straight into the top bezel (`h -> 2dp, y -> -4dp`)
+    ///   so concave bezel ears stay flush & curved all the way until fully absorbed.
+    /// - Floating Pill/Capsule: gently gathers (`0.84x` w, `0.74x` h) while lifting above the top edge
+    ///   as stage opacity dissolves weightlessly.
+    fn hidden_pose(&self, z: Size) -> (f32, f32, f32, f32) {
+        if crate::prefs::get().notch_island {
+            let w = (z.w * 0.84).max(120.0 * self.dpi);
+            let h = (z.h * 0.74).max(18.0 * self.dpi);
+            let r = (z.radius * 0.74).min(h * 0.5);
+            let y = -(h + 10.0 * self.dpi);
+            (w, h, r, y)
+        } else {
+            let w = (z.w * 0.74).max(110.0 * self.dpi);
+            let h = 2.0 * self.dpi;
+            let r = 2.0 * self.dpi;
+            let y = -4.0 * self.dpi;
+            (w, h, r, y)
+        }
+    }
+
     fn apply_springs_to_shell(&mut self) {
         let w = self.sp_w.pos.max(8.0);
-        let h = self.sp_h.pos.max(8.0);
+        let h = self.sp_h.pos.max(2.0);
         let r = self.sp_r.pos.max(0.0);
         let isl = self.sp_island.pos.clamp(0.0, 1.0);
+        let vis = self.sp_vis.pos.clamp(0.0, 1.0);
         let smoothstep = |e0: f32, e1: f32, v: f32| {
             let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
             t * t * (3.0 - 2.0 * t)
@@ -871,6 +910,10 @@ impl Notch {
         let ear = (EAR_DP * self.dpi).ceil() * smoothstep(0.46, 0.0, isl);
         let top_r = r * smoothstep(0.42, 1.0, isl);
         let y = self.sp_y.pos;
+        // Bezel-attached Notch stays crisp solid black while absorbing into the bezel and dissolves only
+        // on the final 35% tuck; Floating Pill dissolves smoothly across 88%..0% for weightless float-out.
+        let fade_edge = 0.35 + 0.53 * isl;
+        let stage_op = smoothstep(0.0, fade_edge, vis);
         let x0 = self.x0_for(w);
         let detached = self.detached_timer_geom(x0, w, h, r, ear);
         let detached_top_r = |tr: f32| tr * smoothstep(0.42, 1.0, isl);
@@ -885,6 +928,7 @@ impl Notch {
             detached.map(|(tx, tw, th, tr, te, _)| (tx, tw, th, tr, detached_top_r(tr), te)),
         );
         self.shell.set_stage_y(y);
+        self.shell.set_stage_opacity(stage_op);
         STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
         self.shell.set_dual_shadow(
             self.sp_sh_blur.pos * self.dpi,
@@ -939,7 +983,20 @@ impl Notch {
             self.publish_notch_for_width(w, false);
         }
 
-        if !self.shown && self.sp_y.is_settled() {
+        let fully_gone = (self.sp_y.is_settled()
+            && self.sp_h.is_settled()
+            && self.sp_vis.is_settled()
+            && self.sp_sh_op.is_settled())
+            || (stage_op <= 0.002 && self.sp_sh_op.pos <= 0.005 && self.sp_csh_op.pos <= 0.005);
+        if !self.shown && fully_gone {
+            self.sp_w.snap(self.sp_w.target);
+            self.sp_h.snap(self.sp_h.target);
+            self.sp_r.snap(self.sp_r.target);
+            self.sp_y.snap(self.sp_y.target);
+            self.sp_vis.snap(0.0);
+            self.sp_sh_op.snap(0.0);
+            self.sp_csh_op.snap(0.0);
+            self.sp_timer_pill.snap(0.0);
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
@@ -1129,6 +1186,7 @@ impl Notch {
         springs_moving |= self.sp_ear.step(dt);
         springs_moving |= self.sp_island.step(dt);
         springs_moving |= self.sp_y.step(dt);
+        springs_moving |= self.sp_vis.step(dt);
         springs_moving |= self.sp_sh_blur.step(dt);
         springs_moving |= self.sp_sh_dy.step(dt);
         springs_moving |= self.sp_sh_op.step(dt);
@@ -2031,7 +2089,7 @@ impl Notch {
                 let line = self
                     .lyr
                     .as_ref()
-                    .and_then(|l| l.current(self.position_ms()))
+                    .and_then(|l| l.current(self.lyric_pos_ms()))
                     .unwrap_or("\u{266A}");
                 let text_px = self.paint.measure_dwrite(line, 13.0, 600).max(self.paint.measure(line, 13.0, 600));
                 let chrome_px = 108.0 * self.dpi;
@@ -2202,15 +2260,28 @@ impl Notch {
             }
         }
         let sp = (!first).then(|| Self::spring_for(old, new));
+        let hiding_now = !first && self.shown && self.will_hide();
         if view_changed && !first {
             let closing = matches!(old.view, View::Open(_) | View::Drop) && !matches!(new.view, View::Open(_) | View::Drop);
-            self.retire_content_dir(if closing { motion::CLOSE_FADE_MS } else { motion::SWAP_FADE_MS }, tab_dir, closing);
+            let fade_ms = if hiding_now {
+                135
+            } else if closing {
+                motion::CLOSE_FADE_MS
+            } else {
+                motion::SWAP_FADE_MS
+            };
+            self.retire_content_dir(fade_ms, tab_dir, closing || hiding_now);
         }
         self.apply_size(sp);
         self.publish_notch();
         self.render();
         self.sync_glance();
-        if view_changed && !first {
+        if hiding_now {
+            // Keep incoming compact/glance content hidden while the Notch smoothly retracts away
+            // so Glance text never flashes in right before disappearing.
+            let _ = self.shell.content.SetOpacity(0.0);
+            self.content_hidden_for_retract = true;
+        } else if view_changed && !first {
             let opening = matches!(new.view, View::Open(_) | View::Drop) && !matches!(old.view, View::Open(_) | View::Drop);
             self.intro(opening, tab_dir);
         }
@@ -2222,21 +2293,27 @@ impl Notch {
         let gap = island_gap(self.dpi);
         let target_ear = ear_px(self.dpi);
         let target_isl = if crate::prefs::get().notch_island { 1.0 } else { 0.0 };
-        let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
+        let (target_w, target_h, target_r, target_y, target_vis) = if self.shown {
+            (z.w, z.h, z.radius, gap, 1.0)
+        } else {
+            let (hw, hh, hr, hy) = self.hidden_pose(z);
+            (hw, hh, hr, hy, 0.0)
+        };
         let (target_sh_blur, target_sh_dy, sh_op) = state::shadow(self.look);
         let target_sh_op = if self.shown { sh_op } else { 0.0 };
         let (target_csh_blur, target_csh_dy, csh_op) = state::contact_shadow(self.look);
         let target_csh_op = if self.shown { csh_op } else { 0.0 };
-        let target_timer_pill = if self.want_detached_timer() { 1.0 } else { 0.0 };
+        let target_timer_pill = if self.shown && self.want_detached_timer() { 1.0 } else { 0.0 };
 
         match sp {
             None => {
-                self.sp_w.snap(z.w);
-                self.sp_h.snap(z.h);
-                self.sp_r.snap(z.radius);
+                self.sp_w.snap(target_w);
+                self.sp_h.snap(target_h);
+                self.sp_r.snap(target_r);
                 self.sp_ear.snap(target_ear);
                 self.sp_island.snap(target_isl);
                 self.sp_y.snap(target_y);
+                self.sp_vis.snap(target_vis);
                 self.sp_sh_blur.snap(target_sh_blur);
                 self.sp_sh_dy.snap(target_sh_dy);
                 self.sp_sh_op.snap(target_sh_op);
@@ -2256,19 +2333,21 @@ impl Notch {
                 } else {
                     SpringParams::stage_show()
                 };
-                self.sp_w.set_target(z.w, p);
-                self.sp_h.set_target(z.h, p);
-                self.sp_r.set_target(z.radius, if shape_changing { SpringParams::shape_morph() } else { p });
+                let dim_sp = if !self.shown { SpringParams::stage_hide() } else { p };
+                self.sp_w.set_target(target_w, dim_sp);
+                self.sp_h.set_target(target_h, dim_sp);
+                self.sp_r.set_target(target_r, if shape_changing { SpringParams::shape_morph() } else { dim_sp });
                 self.sp_ear.set_target(target_ear, SpringParams::shape_morph());
                 self.sp_island.set_target(target_isl, SpringParams::shape_morph());
                 self.sp_y.set_target(target_y, y_sp);
-                self.sp_sh_blur.set_target(target_sh_blur, p);
-                self.sp_sh_dy.set_target(target_sh_dy, p);
-                self.sp_sh_op.set_target(target_sh_op, p);
-                self.sp_csh_blur.set_target(target_csh_blur, p);
-                self.sp_csh_dy.set_target(target_csh_dy, p);
-                self.sp_csh_op.set_target(target_csh_op, p);
-                self.sp_timer_pill.set_target(target_timer_pill, p);
+                self.sp_vis.set_target(target_vis, if self.shown { SpringParams::vis_show() } else { SpringParams::stage_hide() });
+                self.sp_sh_blur.set_target(target_sh_blur, dim_sp);
+                self.sp_sh_dy.set_target(target_sh_dy, dim_sp);
+                self.sp_sh_op.set_target(target_sh_op, dim_sp);
+                self.sp_csh_blur.set_target(target_csh_blur, dim_sp);
+                self.sp_csh_dy.set_target(target_csh_dy, dim_sp);
+                self.sp_csh_op.set_target(target_csh_op, dim_sp);
+                self.sp_timer_pill.set_target(target_timer_pill, dim_sp);
                 self.start_frame();
             }
         }
@@ -2285,6 +2364,7 @@ impl Notch {
         self.gemini_input = None;
         let c = self.shell.content.clone();
         if matches!(self.mode, Mode::Open(_)) {
+            self.content_hidden_for_retract = false;
             let _ = c.SetOpacity(1.0);
         }
         if let Ok(k) = c.Children() {
@@ -2345,7 +2425,7 @@ impl Notch {
             tint: self.tint,
             drag: self.seek_drag.map(|(_, _, fr)| fr),
         });
-        let lyrics = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms };
+        let lyrics = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms: self.lyric_pos_ms() };
         let shelf = self.shelf.items().iter().map(|i| (i.name(), self.shelf_icons.get(&i.path))).collect();
         let drop_count = if self.mode == Mode::Drop { self.dnd.borrow().len() } else { 0 };
         let now_unix = std::time::SystemTime::now()
@@ -2583,6 +2663,13 @@ impl Notch {
         }
     }
 
+    /// Playback position offset by the user's configured lyric lead time (`lyrics_lead_ms`)
+    /// so synced lyrics appear slightly earlier to compensate for SMTC / Bluetooth audio lag.
+    fn lyric_pos_ms(&self) -> i64 {
+        let lead = crate::prefs::get().lyrics_lead_ms.min(2000) as i64;
+        self.position_ms().saturating_add(lead)
+    }
+
     fn on_media(&mut self) {
         let was_playing = self.playing;
         let mut changed = false;
@@ -2675,14 +2762,14 @@ impl Notch {
         if !l.synced || !self.playing {
             return;
         }
-        let pos = self.position_ms();
+        let pos = self.lyric_pos_ms();
         if let Some(next) = l.next_change_ms(pos) {
             timer(self.hwnd, T_LYRIC, ((next - pos).max(10) + 15).min(60_000) as u32);
         }
     }
 
     fn on_lyric_tick(&mut self) {
-        let pos = self.position_ms();
+        let pos = self.lyric_pos_ms();
         let idx = self.lyr.as_ref().and_then(|l| l.index_at(pos));
         if idx != self.lyr_idx {
             let dir = match (self.lyr_idx, idx) {
@@ -3443,6 +3530,10 @@ impl Notch {
                     kill(self.hwnd, T_NOTIF_TOAST);
                 }
                 if matches!(self.mode, Mode::Open(_)) && !self.pinned {
+                    if !self.cursor_in_notch_zone() {
+                        self.grace = false;
+                        kill(self.hwnd, T_GRACE);
+                    }
                     self.dispatch(Event::Leave);
                 } else {
                     self.refresh();
@@ -3832,7 +3923,7 @@ impl Notch {
             || self.menu.as_ref().is_some_and(|m| m.is_open())
     }
 
-    fn update_visibility(&mut self) {
+    fn will_hide(&self) -> bool {
         // In Auto-hide (`Vis::OnDemand`), keep the compact media/lyrics pill visible whenever
         // lyrics are enabled in the media player and a track is actively playing (except fullscreen),
         // showing Live Lyrics when synced lyrics exist and falling back to the compact Music pill otherwise.
@@ -3852,7 +3943,11 @@ impl Notch {
                 || (!self.overlap.fullscreen && self.prayer_peeking)
                 || auto_hide_lyrics_reveal,
         };
-        let hide = self.off || should_hide(self.vis, &inputs);
+        self.off || should_hide(self.vis, &inputs)
+    }
+
+    fn update_visibility(&mut self) {
+        let hide = self.will_hide();
         if hide && self.shown {
             self.shown = false;
             self.edge_armed = false;
@@ -3863,10 +3958,24 @@ impl Notch {
             if self.mode == Mode::Peek {
                 self.dispatch(Event::Leave);
             }
-            let y = -(self.size.h + 12.0 * self.dpi);
-            self.sp_y.set_target(y, SpringParams::stage_hide());
-            self.sp_sh_op.set_target(0.0, SpringParams::stage_hide());
-            self.sp_csh_op.set_target(0.0, SpringParams::stage_hide());
+            let (hw, hh, hr, hy) = self.hidden_pose(self.size);
+            let from_large = self.sp_h.pos > self.size.h + 12.0 * self.dpi || self.sp_w.pos > self.size.w + 24.0 * self.dpi;
+            // In Floating Pill mode, fold a large panel slightly ahead of the upward float;
+            // in Bezel-attached Notch mode, collapse width/height/y in lockstep straight into the top bezel.
+            let dim_sp = if from_large && crate::prefs::get().notch_island {
+                SpringParams::hide_collapse()
+            } else {
+                SpringParams::stage_hide()
+            };
+            let hide_sp = SpringParams::stage_hide();
+            self.sp_w.set_target(hw, dim_sp);
+            self.sp_h.set_target(hh, dim_sp);
+            self.sp_r.set_target(hr, dim_sp);
+            self.sp_y.set_target(hy, hide_sp);
+            self.sp_vis.set_target(0.0, hide_sp);
+            self.sp_sh_op.set_target(0.0, hide_sp);
+            self.sp_csh_op.set_target(0.0, hide_sp);
+            self.sp_timer_pill.set_target(0.0, hide_sp);
             self.start_frame();
             self.publish_notch();
             self.sync_visualizer();
@@ -3875,20 +3984,50 @@ impl Notch {
             self.shown = true;
             self.rgn_rect = (-1, -1, -1, -1);
             self.rgn_timer = (-1, -1, -1, -1);
+            // If emerging from a fully settled hidden state (not reversing mid-hide), park springs cleanly
+            // at the tucked hidden pose for the current size so emergence begins immediately with zero dead air.
+            if !self.frame_active || self.sp_vis.pos <= 0.02 {
+                let (hw, hh, hr, hy) = self.hidden_pose(self.size);
+                self.sp_w.snap(hw);
+                self.sp_h.snap(hh);
+                self.sp_r.snap(hr);
+                self.sp_y.snap(hy);
+                self.sp_vis.snap(0.0);
+                self.sp_sh_op.snap(0.0);
+                self.sp_csh_op.snap(0.0);
+            }
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.shell.set_visible(true, self.hwnd);
             crate::topmost::request_raise();
+            let show_sp = if matches!(self.look.view, View::Open(_) | View::Drop) {
+                SpringParams::open()
+            } else {
+                SpringParams::stage_show()
+            };
             let (sh_blur, sh_dy, sh_op) = state::shadow(self.look);
             let (csh_blur, csh_dy, csh_op) = state::contact_shadow(self.look);
+            self.sp_w.set_target(self.size.w, show_sp);
+            self.sp_h.set_target(self.size.h, show_sp);
+            self.sp_r.set_target(self.size.radius, show_sp);
             self.sp_y.set_target(island_gap(self.dpi), SpringParams::stage_show());
-            self.sp_sh_blur.set_target(sh_blur, SpringParams::stage_show());
-            self.sp_sh_dy.set_target(sh_dy, SpringParams::stage_show());
-            self.sp_sh_op.set_target(sh_op, SpringParams::stage_show());
-            self.sp_csh_blur.set_target(csh_blur, SpringParams::stage_show());
-            self.sp_csh_dy.set_target(csh_dy, SpringParams::stage_show());
-            self.sp_csh_op.set_target(csh_op, SpringParams::stage_show());
+            self.sp_vis.set_target(1.0, SpringParams::vis_show());
+            self.sp_sh_blur.set_target(sh_blur, show_sp);
+            self.sp_sh_dy.set_target(sh_dy, show_sp);
+            self.sp_sh_op.set_target(sh_op, show_sp);
+            self.sp_csh_blur.set_target(csh_blur, show_sp);
+            self.sp_csh_dy.set_target(csh_dy, show_sp);
+            self.sp_csh_op.set_target(csh_op, show_sp);
+            self.sp_timer_pill.set_target(if self.want_detached_timer() { 1.0 } else { 0.0 }, show_sp);
+            if self.content_hidden_for_retract {
+                self.content_hidden_for_retract = false;
+                if let Ok(c) = self.shell.content.cast::<CompositionObject>() {
+                    let _ = self.shell.content.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 });
+                    let _ = self.shell.content.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 });
+                    let _ = keyframes(&self.paint.comp, &c, "Opacity", 0.0, 1.0, 180, 30);
+                }
+            }
             self.apply_springs_to_shell();
             self.start_frame();
             self.publish_notch();
@@ -3986,6 +4125,10 @@ impl Notch {
             }
         }
         self.update_visibility();
+        if self.lyr.is_some() {
+            self.lyr_idx = self.lyr.as_ref().and_then(|l| l.index_at(self.lyric_pos_ms()));
+            self.schedule_lyric();
+        }
         log::line("notch", &format!("pengaturan: perilaku={vis:?} cadangan={reserve} mati={}", self.off));
     }
 
@@ -4157,6 +4300,13 @@ impl Notch {
             }
             T_LEAVE => {
                 if !self.tracking && !self.send_pinned() && !self.pinned && !self.dragging_out && !self.focus.is_active() {
+                    // Open panel already waited `LEAVE_GRACE_MS` (260ms) since pointer left;
+                    // drop leftover leave-grace so Auto-hide / overlapped Smart mode folds and
+                    // tucks away in ONE continuous fluid motion instead of pausing mid-air as a pill.
+                    if !self.cursor_in_notch_zone() {
+                        self.grace = false;
+                        kill(self.hwnd, T_GRACE);
+                    }
                     self.dispatch(Event::Leave);
                 }
             }

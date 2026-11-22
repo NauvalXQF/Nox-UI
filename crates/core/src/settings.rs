@@ -275,6 +275,7 @@ pub struct Settings {
     pub lyrics_compact: bool,
     pub lyrics_panel_open: bool,
     pub lyrics_online: bool,
+    pub lyrics_lead_ms: u16,
     pub notch_downloads: bool,
     pub notch_send: bool,
     pub mac_shortcuts: bool,
@@ -318,7 +319,7 @@ impl Default for Settings {
             dock_material: Material::Glass,
             dock_round: 62,
             notch_material: Material::Black,
-            notch_round: 60,
+            notch_round: 80,
             autostart: false,
             dock_size: 48,
             dock_gap: 8,
@@ -351,6 +352,7 @@ impl Default for Settings {
             lyrics_compact: true,
             lyrics_panel_open: true,
             lyrics_online: true,
+            lyrics_lead_ms: 0,
             notch_downloads: true,
             notch_send: true,
             mac_shortcuts: true,
@@ -467,6 +469,9 @@ impl Settings {
                     if let Some(b) = parse_bool(v) {
                         s.lyrics_online = b;
                     }
+                }
+                "lyrics_lead_ms" => {
+                    s.lyrics_lead_ms = v.parse::<i32>().map(|n| n.clamp(0, 2000) as u16).unwrap_or(s.lyrics_lead_ms);
                 }
                 "notch_downloads" => {
                     if let Some(b) = parse_bool(v) {
@@ -705,7 +710,7 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -756,6 +761,7 @@ impl Settings {
             self.lyrics_compact,
             self.lyrics_panel_open,
             self.lyrics_online,
+            self.lyrics_lead_ms,
             self.notch_downloads,
             self.notch_send,
             self.ui_scale,
@@ -1001,8 +1007,9 @@ dock_margin=900");
         assert_eq!(Settings::parse("notch_idle=9\n").notch_idle, 2);
         let d = Settings::default();
         assert!(d.lyrics_compact && d.lyrics_online, "lirik online aktif bawaan (keputusan pengguna)");
-        let off = Settings::parse(&Settings::parse("lyrics_online=false\nlyrics_compact=0\nnotch_downloads=0\n").serialize());
-        assert!(!off.lyrics_online && !off.lyrics_compact && !off.notch_downloads);
+        let off = Settings::parse(&Settings::parse("lyrics_online=false\nlyrics_compact=0\nlyrics_lead_ms=500\nnotch_downloads=0\n").serialize());
+        assert!(!off.lyrics_online && !off.lyrics_compact && off.lyrics_lead_ms == 500 && !off.notch_downloads);
+        assert_eq!(Settings::parse("lyrics_lead_ms=9999\n").lyrics_lead_ms, 2000);
         assert!(d.notch_downloads, "unduhan di notch aktif bawaan");
         assert!(d.notch_send, "zona Kirim aktif bawaan");
         assert!(!Settings::parse(&Settings::parse("notch_send=0\n").serialize()).notch_send);

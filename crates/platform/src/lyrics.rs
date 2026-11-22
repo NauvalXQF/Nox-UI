@@ -7,7 +7,7 @@ use windows::Web::Http::HttpClient;
 use windows_core::HSTRING;
 
 const NONE_TTL: Duration = Duration::from_secs(3 * 24 * 3600);
-const TIMEOUT: Duration = Duration::from_secs(8);
+const TIMEOUT: Duration = Duration::from_secs(6);
 
 pub struct Request {
     pub track: Track,
@@ -18,6 +18,9 @@ pub struct Request {
 pub enum Source {
     Local,
     Lrclib,
+    BetterLyrics,
+    NetEase,
+    LyricsOvh,
     None,
 }
 
@@ -70,10 +73,24 @@ fn finish(status: impl Fn() -> Option<i32>, cancel: impl Fn(), limit: Duration) 
 }
 
 fn http_get(url: &str) -> Option<(i32, String)> {
+    http_get_with(url, None)
+}
+
+fn http_get_with(url: &str, referer: Option<&str>) -> Option<(i32, String)> {
     let client = HttpClient::new().ok()?;
     if let Ok(h) = client.DefaultRequestHeaders() {
         if let Ok(ua) = h.UserAgent() {
-            let _ = ua.TryParseAdd(&HSTRING::from(concat!("NOX/", env!("CARGO_PKG_VERSION"))));
+            let ua_str = if referer.is_some() {
+                "Mozilla/5.0"
+            } else {
+                concat!("NOX/", env!("CARGO_PKG_VERSION"))
+            };
+            let _ = ua.TryParseAdd(&HSTRING::from(ua_str));
+        }
+        if let Some(ref_url) = referer {
+            if let Ok(uri) = Uri::CreateUri(&HSTRING::from(ref_url)) {
+                let _ = h.SetReferer(&uri);
+            }
         }
     }
     let op = client.GetAsync(&Uri::CreateUri(&HSTRING::from(url)).ok()?).ok()?;
@@ -90,23 +107,106 @@ fn http_get(url: &str) -> Option<(i32, String)> {
 }
 
 fn ask_lrclib(t: &Track) -> Result<Option<lrclib::Found>, ()> {
+    let mut plain_fallback: Option<lrclib::Found> = None;
+    let mut had_err = false;
     if let Some(url) = lrclib::get_url(t) {
         match http_get(&url) {
             Some((200, body)) => {
                 if let Some(f) = lrclib::parse_get(&body) {
-                    return Ok(Some(f));
+                    if f.synced.is_some() || f.instrumental {
+                        return Ok(Some(f));
+                    }
+                    plain_fallback = Some(f);
                 }
             }
             Some((404, _)) => {}
-            Some(_) | None => return Err(()),
+            _ => had_err = true,
         }
     }
-    let Some(url) = lrclib::search_url(t) else { return Ok(None) };
+    if let Some(url) = lrclib::search_url(t) {
+        match http_get(&url) {
+            Some((200, body)) => {
+                if let Some(f) = lrclib::pick_search(&body, t.duration_s) {
+                    if f.synced.is_some() || f.instrumental {
+                        return Ok(Some(f));
+                    }
+                    if plain_fallback.is_none() {
+                        plain_fallback = Some(f);
+                    }
+                }
+            }
+            Some((404, _)) => {}
+            _ => had_err = true,
+        }
+    }
+    if let Some(url) = lrclib::fuzzy_search_url(t) {
+        match http_get(&url) {
+            Some((200, body)) => {
+                if let Some(f) = lrclib::pick_fuzzy_search(&body, t) {
+                    if f.synced.is_some() || f.instrumental {
+                        return Ok(Some(f));
+                    }
+                    if plain_fallback.is_none() {
+                        plain_fallback = Some(f);
+                    }
+                }
+            }
+            Some((404, _)) => {}
+            _ => had_err = true,
+        }
+    }
+    if let Some(f) = plain_fallback {
+        Ok(Some(f))
+    } else if had_err {
+        Err(())
+    } else {
+        Ok(None)
+    }
+}
+
+fn ask_better_lyrics(t: &Track) -> Result<Option<lrclib::Found>, ()> {
+    let Some(url) = lrclib::better_lyrics_url(t) else { return Ok(None) };
     match http_get(&url) {
-        Some((200, body)) => Ok(lrclib::pick_search(&body, t.duration_s)),
+        Some((200, body)) => Ok(lrclib::parse_better_lyrics(&body)),
         Some((404, _)) => Ok(None),
         _ => Err(()),
     }
+}
+
+fn ask_netease(t: &Track) -> Result<Option<lrclib::Found>, ()> {
+    let Some(search_url) = lrclib::netease_search_url(t) else { return Ok(None) };
+    let referer = Some("https://music.163.com/");
+    let sid = match http_get_with(&search_url, referer) {
+        Some((200, body)) => match lrclib::pick_netease_id(&body, t) {
+            Some(id) => id,
+            None => return Ok(None),
+        },
+        Some((404, _)) => return Ok(None),
+        _ => return Err(()),
+    };
+    let lyric_url = lrclib::netease_lyric_url(sid);
+    match http_get_with(&lyric_url, referer) {
+        Some((200, body)) => Ok(lrclib::parse_netease_lyric(&body)),
+        Some((404, _)) => Ok(None),
+        _ => Err(()),
+    }
+}
+
+fn ask_lyrics_ovh(t: &Track) -> Result<Option<lrclib::Found>, ()> {
+    let Some(url) = lrclib::lyrics_ovh_url(t) else { return Ok(None) };
+    match http_get(&url) {
+        Some((200, body)) => Ok(lrclib::parse_lyrics_ovh(&body)),
+        Some((404, _)) => Ok(None),
+        _ => Err(()),
+    }
+}
+
+fn cache_and_return(cache: &Path, hit: &Path, key: String, f: lrclib::Found, source: Source) -> Answer {
+    let text = f.text();
+    let _ = std::fs::create_dir_all(cache);
+    let _ = std::fs::write(hit, &text);
+    crate::log::line("lirik", &format!("{source:?}: ditemukan ({} byte)", text.len()));
+    Answer { key, text: Some(text), source }
 }
 
 fn lookup(dir: &Path, req: &Request) -> Answer {
@@ -120,7 +220,8 @@ fn lookup(dir: &Path, req: &Request) -> Answer {
     if let Ok(s) = std::fs::read_to_string(&hit) {
         return Answer { key, text: Some(s), source: Source::Lrclib };
     }
-    let none = cache.join(format!("{key}.none"));
+    // v2 negative cache so tracks previously missed by LRCLIB-only retry across backup providers.
+    let none = cache.join(format!("{key}.none2"));
     let fresh_none = std::fs::metadata(&none)
         .and_then(|m| m.modified())
         .ok()
@@ -129,25 +230,66 @@ fn lookup(dir: &Path, req: &Request) -> Answer {
     if fresh_none || !req.online {
         return Answer { key, text: None, source: Source::None };
     }
-    match ask_lrclib(t) {
-        Ok(Some(f)) => {
-            let text = f.text();
-            let _ = std::fs::create_dir_all(&cache);
-            let _ = std::fs::write(&hit, &text);
-            crate::log::line("lirik", &format!("LRCLIB: ditemukan ({} byte)", text.len()));
-            Answer { key, text: Some(text), source: Source::Lrclib }
+
+    let mut plain_backup: Option<(lrclib::Found, Source)> = None;
+    let mut had_net_err = false;
+
+    // 1. BetterLyrics (Primary — Apple Music synced TTML, ~170ms)
+    match ask_better_lyrics(t) {
+        Ok(Some(f)) if f.synced.is_some() => {
+            return cache_and_return(&cache, &hit, key, f, Source::BetterLyrics);
         }
-        Ok(None) => {
-            let _ = std::fs::create_dir_all(&cache);
-            let _ = std::fs::write(&none, b"");
-            crate::log::line("lirik", "LRCLIB: tidak ada");
-            Answer { key, text: None, source: Source::None }
-        }
-        Err(()) => {
-            crate::log::line("lirik", "LRCLIB: gagal (jaringan/batas waktu)");
-            Answer { key, text: None, source: Source::None }
-        }
+        Ok(Some(f)) => plain_backup = Some((f, Source::BetterLyrics)),
+        Ok(None) => {}
+        Err(()) => had_net_err = true,
     }
+
+    // 2. LRCLIB (Backup #1 — exact -> structured search -> fuzzy search)
+    match ask_lrclib(t) {
+        Ok(Some(f)) if f.synced.is_some() || f.instrumental => {
+            return cache_and_return(&cache, &hit, key, f, Source::Lrclib);
+        }
+        Ok(Some(f)) => {
+            if plain_backup.is_none() {
+                plain_backup = Some((f, Source::Lrclib));
+            }
+        }
+        Ok(None) => {}
+        Err(()) => had_net_err = true,
+    }
+
+    // 3. NetEase Cloud Music (Backup #2 — synced LRC, strong Asian/Indie/Global catalog)
+    match ask_netease(t) {
+        Ok(Some(f)) if f.synced.is_some() => {
+            return cache_and_return(&cache, &hit, key, f, Source::NetEase);
+        }
+        Ok(Some(f)) => {
+            if plain_backup.is_none() {
+                plain_backup = Some((f, Source::NetEase));
+            }
+        }
+        Ok(None) => {}
+        Err(()) => had_net_err = true,
+    }
+
+    // 4. Plain-text fallback: use earlier plain hit if any, otherwise query Lyrics.ovh
+    if let Some((f, src)) = plain_backup {
+        return cache_and_return(&cache, &hit, key, f, src);
+    }
+    match ask_lyrics_ovh(t) {
+        Ok(Some(f)) => return cache_and_return(&cache, &hit, key, f, Source::LyricsOvh),
+        Ok(None) => {}
+        Err(()) => had_net_err = true,
+    }
+
+    if !had_net_err {
+        let _ = std::fs::create_dir_all(&cache);
+        let _ = std::fs::write(&none, b"");
+        crate::log::line("lirik", "semua sumber: tidak ada");
+    } else {
+        crate::log::line("lirik", "pencarian lirik gagal (jaringan/batas waktu)");
+    }
+    Answer { key, text: None, source: Source::None }
 }
 
 pub fn spawn(dir: PathBuf, notify: impl Fn() + Send + 'static) -> Lyrics {

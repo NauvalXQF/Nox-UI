@@ -113,6 +113,7 @@ enum Action {
     GeminiFetchModels,
     GeminiCycleFetched,
     LyricsOnline,
+    LyricsLead(u16),
     LyricsDir,
     Close,
     Takeover,
@@ -1077,11 +1078,31 @@ impl Win {
                 ));
                 groups.push((
                     Some(prefs::tr("Lirik")),
-                    vec![
-                        RowDef::Toggle(prefs::tr("Tampilkan lirik di Notch"), s.lyrics_compact, Action::LyricsCompact),
-                        RowDef::Toggle(prefs::tr("Cari lirik online (LRCLIB)"), s.lyrics_online, Action::LyricsOnline),
-                        RowDef::Pick(prefs::tr("Folder lirik (.lrc)"), prefs::tr("Buka").to_string(), Action::LyricsDir),
-                    ],
+                    {
+                        let lead_sel = match s.lyrics_lead_ms {
+                            0..=149 => 0,
+                            150..=399 => 1,
+                            400..=649 => 2,
+                            650..=899 => 3,
+                            _ => 4,
+                        };
+                        vec![
+                            RowDef::Toggle(prefs::tr("Tampilkan lirik di Notch"), s.lyrics_compact, Action::LyricsCompact),
+                            RowDef::Toggle(prefs::tr("Cari lirik online (BetterLyrics + cadangan)"), s.lyrics_online, Action::LyricsOnline),
+                            RowDef::Seg(
+                                prefs::tr("Lirik lebih awal"),
+                                vec![
+                                    ("0s", Action::LyricsLead(0)),
+                                    ("0.3s", Action::LyricsLead(300)),
+                                    ("0.5s", Action::LyricsLead(500)),
+                                    ("0.8s", Action::LyricsLead(800)),
+                                    ("1s", Action::LyricsLead(1000)),
+                                ],
+                                lead_sel,
+                            ),
+                            RowDef::Pick(prefs::tr("Folder lirik (.lrc)"), prefs::tr("Buka").to_string(), Action::LyricsDir),
+                        ]
+                    },
                 ));
                 groups.push((
                     Some(prefs::tr("Jadwal Shalat")),
@@ -2189,6 +2210,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                 }
                 Some(Action::LyricsOnline) => prefs::update(|s| s.lyrics_online = !s.lyrics_online),
+                Some(Action::LyricsLead(ms)) => prefs::update(|s| s.lyrics_lead_ms = ms.min(2000)),
                 Some(Action::MenuLogoPick) => {
                     let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                     let picked = nacre_platform::pick::open_file(prefs::tr("Pilih gambar"), &[(prefs::tr("Gambar logo"), "*.png;*.jpg;*.jpeg;*.bmp;*.ico;*.gif;*.webp;*.tif;*.tiff")]);

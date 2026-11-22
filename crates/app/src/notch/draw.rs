@@ -128,16 +128,12 @@ impl Painter {
         rgb: [u8; 3],
         compact: bool,
     ) -> Option<SpriteVisual> {
-        let key = format!("glow4|{compact}|{rgb:?}");
+        let key = format!("glow5|{compact}|{rgb:?}");
         let surf = match self.cache.get(&key) {
             Some((s, _, _)) => s.clone(),
             None => {
-                let (gw, gh): (u32, u32) = if compact { (128, 64) } else { (256, 128) };
+                let (gw, gh): (u32, u32) = if compact { (160, 64) } else { (256, 128) };
                 let mut bgra = vec![0u8; (gw * gh * 4) as usize];
-                let smoothstep = |e0: f32, e1: f32, v: f32| {
-                    let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
-                    t * t * (3.0 - 2.0 * t)
-                };
                 // 2x2 Bayer matrix in [-0.375, +0.375] LSB to eliminate 8-bit gradient banding on dark OLED washes.
                 const BAYER2: [[f32; 2]; 2] = [[-0.375, 0.125], [0.375, -0.125]];
                 for yy in 0..gh {
@@ -145,10 +141,12 @@ impl Painter {
                         let nx = (xx as f32 + 0.5) / gw as f32;
                         let ny = (yy as f32 + 0.5) / gh as f32;
                         let (wash, max_a) = if compact {
-                            // Subtle bottom bloom that fades cleanly to pure #000000 at all outer edges.
-                            let ex = smoothstep(0.0, 0.14, nx) * smoothstep(1.0, 0.86, nx);
-                            let ey = smoothstep(0.18, 0.72, ny) * smoothstep(1.0, 0.86, ny);
-                            (0.36 * ex * ey, 0.44)
+                            // Full-bleed bottom-up OLED pill glow: pure #000000 across the top bezel edge,
+                            // rising smoothly across the entire width all the way into both rounded bottom corners.
+                            let v_ramp = ((ny - 0.14) / 0.86).clamp(0.0, 1.0);
+                            let vert = v_ramp.powf(1.85);
+                            let h_mod = 0.96 + 0.04 * (1.0 - (2.0 * nx - 1.0).powi(2));
+                            (0.48 * vert * h_mod, 0.50)
                         } else {
                             // Bottom-up OLED atmospheric wash: pure #000000 across the top ~28% bezel/ears,
                             // smoothly blooming into rich album-art warmth along the entire bottom curve.
