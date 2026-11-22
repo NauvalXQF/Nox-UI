@@ -336,9 +336,11 @@ fn auto_tier(over: Option<Tier>) -> Tier {
     })
 }
 
+const ISLAND_GAP_DP: f32 = 7.0;
+
 fn island_gap(dpi: f32) -> f32 {
     if crate::prefs::get().notch_island {
-        (7.0 * dpi).round()
+        (ISLAND_GAP_DP * dpi).round()
     } else {
         0.0
     }
@@ -356,7 +358,8 @@ fn win_size(dpi: f32, screen_w: i32) -> (i32, i32) {
     let pad_x = (SHADOW_PAD_X * dpi).round() as i32;
     let pad_b = (SHADOW_PAD_B * dpi).round() as i32;
     let w = ((WIN_W * dpi).round() as i32 + 2 * pad_x).min(screen_w);
-    let h = (WIN_H * dpi + island_gap(dpi)).ceil() as i32 + pad_b;
+    // Always reserve floating-pill headroom so Notch <-> Capsule morphs inside the same GPU canvas with zero HWND resize blink.
+    let h = (WIN_H * dpi + (ISLAND_GAP_DP * dpi).round()).ceil() as i32 + pad_b;
     (w, h)
 }
 
@@ -386,6 +389,7 @@ pub struct Notch {
     sp_h: Spring,
     sp_r: Spring,
     sp_ear: Spring,
+    sp_island: Spring,
     sp_y: Spring,
     sp_sh_blur: Spring,
     sp_sh_dy: Spring,
@@ -599,6 +603,10 @@ impl Notch {
                 sp_h: Spring::new(init_size.h, SpringParams::swap()),
                 sp_r: Spring::new(init_size.radius, SpringParams::swap()),
                 sp_ear: Spring::new(init_ear, SpringParams::swap()),
+                sp_island: Spring::new_unit(
+                    if crate::prefs::get().notch_island { 1.0 } else { 0.0 },
+                    SpringParams::shape_morph(),
+                ),
                 sp_y: Spring::new(init_y, SpringParams::stage_show()),
                 sp_sh_blur: Spring::new(init_sh_blur, SpringParams::swap()),
                 sp_sh_dy: Spring::new(init_sh_dy, SpringParams::swap()),
@@ -851,18 +859,30 @@ impl Notch {
         let w = self.sp_w.pos.max(8.0);
         let h = self.sp_h.pos.max(8.0);
         let r = self.sp_r.pos.max(0.0);
-        let ear = self.sp_ear.pos.max(0.0);
+        let isl = self.sp_island.pos.clamp(0.0, 1.0);
+        let smoothstep = |e0: f32, e1: f32, v: f32| {
+            let t = ((v - e0) / (e1 - e0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        // Continuous liquid morph (Notch <-> Floating Pill):
+        // 0.00..0.46: concave bezel ears gracefully retract to 0px while detaching downward;
+        // 0.42..1.00: top corners smoothly round from 0px into a full floating pill (`top_r -> r`).
+        // Both phases meet continuously at `(ear = 0, top_r = 0)` -> zero geometry pop or blink!
+        let ear = (EAR_DP * self.dpi).ceil() * smoothstep(0.46, 0.0, isl);
+        let top_r = r * smoothstep(0.42, 1.0, isl);
         let y = self.sp_y.pos;
         let x0 = self.x0_for(w);
         let detached = self.detached_timer_geom(x0, w, h, r, ear);
+        let detached_top_r = |tr: f32| tr * smoothstep(0.42, 1.0, isl);
 
         self.shell.set_geometry_with_detached(
             x0,
             w,
             h,
             r,
+            top_r,
             ear,
-            detached.map(|(tx, tw, th, tr, te, _)| (tx, tw, th, tr, te)),
+            detached.map(|(tx, tw, th, tr, te, _)| (tx, tw, th, tr, detached_top_r(tr), te)),
         );
         self.shell.set_stage_y(y);
         STAGE_Y_BITS.store(y.to_bits(), Ordering::Relaxed);
@@ -1107,6 +1127,7 @@ impl Notch {
         springs_moving |= self.sp_h.step(dt);
         springs_moving |= self.sp_r.step(dt);
         springs_moving |= self.sp_ear.step(dt);
+        springs_moving |= self.sp_island.step(dt);
         springs_moving |= self.sp_y.step(dt);
         springs_moving |= self.sp_sh_blur.step(dt);
         springs_moving |= self.sp_sh_dy.step(dt);
@@ -2200,6 +2221,7 @@ impl Notch {
         self.size = z;
         let gap = island_gap(self.dpi);
         let target_ear = ear_px(self.dpi);
+        let target_isl = if crate::prefs::get().notch_island { 1.0 } else { 0.0 };
         let target_y = if self.shown { gap } else { -(z.h + 12.0 * self.dpi) };
         let (target_sh_blur, target_sh_dy, sh_op) = state::shadow(self.look);
         let target_sh_op = if self.shown { sh_op } else { 0.0 };
@@ -2213,6 +2235,7 @@ impl Notch {
                 self.sp_h.snap(z.h);
                 self.sp_r.snap(z.radius);
                 self.sp_ear.snap(target_ear);
+                self.sp_island.snap(target_isl);
                 self.sp_y.snap(target_y);
                 self.sp_sh_blur.snap(target_sh_blur);
                 self.sp_sh_dy.snap(target_sh_dy);
@@ -2225,11 +2248,20 @@ impl Notch {
                 self.apply_springs_to_shell();
             }
             Some(p) => {
+                let shape_changing = (self.sp_island.target - target_isl).abs() > 0.01;
+                let y_sp = if !self.shown {
+                    SpringParams::stage_hide()
+                } else if shape_changing {
+                    SpringParams::shape_morph()
+                } else {
+                    SpringParams::stage_show()
+                };
                 self.sp_w.set_target(z.w, p);
                 self.sp_h.set_target(z.h, p);
-                self.sp_r.set_target(z.radius, p);
-                self.sp_ear.set_target(target_ear, p);
-                self.sp_y.set_target(target_y, if self.shown { SpringParams::stage_show() } else { SpringParams::stage_hide() });
+                self.sp_r.set_target(z.radius, if shape_changing { SpringParams::shape_morph() } else { p });
+                self.sp_ear.set_target(target_ear, SpringParams::shape_morph());
+                self.sp_island.set_target(target_isl, SpringParams::shape_morph());
+                self.sp_y.set_target(target_y, y_sp);
                 self.sp_sh_blur.set_target(target_sh_blur, p);
                 self.sp_sh_dy.set_target(target_sh_dy, p);
                 self.sp_sh_op.set_target(target_sh_op, p);
@@ -3943,8 +3975,16 @@ impl Notch {
             }
         }
         let look = state::look(self.mode, state::activity(&self.live()));
-        self.apply_size(Some(SpringParams::swap()));
-        self.transition(look);
+        let target_isl = if s.notch_island { 1.0 } else { 0.0 };
+        let shape_changed = (self.sp_island.target - target_isl).abs() > 0.01;
+        if look != self.look {
+            self.transition(look);
+        } else {
+            self.apply_size(Some(if shape_changed { SpringParams::shape_morph() } else { SpringParams::swap() }));
+            if !shape_changed {
+                self.render();
+            }
+        }
         self.update_visibility();
         log::line("notch", &format!("pengaturan: perilaku={vis:?} cadangan={reserve} mati={}", self.off));
     }

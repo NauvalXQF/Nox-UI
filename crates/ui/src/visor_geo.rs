@@ -70,21 +70,24 @@ fn bezier(c1: Vector2, c2: Vector2, end: Vector2) -> D2D1_BEZIER_SEGMENT {
     D2D1_BEZIER_SEGMENT { point1: c1, point2: c2, point3: end }
 }
 
-/// Builds a unified filled `CompositionPath` for either Visor (`ear > 0.5`: top-attached with
-/// smooth continuous cubic Bézier shoulders and -1px top bezel overlap) or Capsule (`ear <= 0.5`).
+/// Builds a unified filled `CompositionPath` for either Visor (`ear > 0.3`: top-attached with
+/// smooth continuous cubic Bézier shoulders and -1px top bezel overlap) or Capsule (`ear <= 0.3`,
+/// with continuous `top_radius` from `0.0` to `radius` so Notch <-> Pill morphs seamlessly).
 pub fn visor_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
-    build_visor_multi(x0, y0, w, h, radius, ear, None, false)
+    let top_r = if ear > 0.3 { 0.0 } else { radius };
+    build_visor_multi(x0, y0, w, h, radius, top_r, ear, None, false)
 }
 
-/// Builds the `1px` inner-rim stroke `CompositionPath`. In Visor mode (`ear > 0.5`), the figure is
+/// Builds the `1px` inner-rim stroke `CompositionPath`. In Visor mode (`ear > 0.3`), the figure is
 /// left **open** along the top (`y = 0`) so no horizontal seam line is ever drawn at the screen bezel.
 pub fn visor_rim_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
-    build_visor_multi(x0, y0, w, h, radius, ear, None, true)
+    let top_r = if ear > 0.3 { 0.0 } else { radius };
+    build_visor_multi(x0, y0, w, h, radius, top_r, ear, None, true)
 }
 
 /// Builds a filled `CompositionPath` containing the primary Visor capsule plus an optional
-/// detached right-hand pill (`(tx, tw, th, tr, t_ear)`) in a single GPU geometry so geometric clip,
-/// GPU DropShadow mask, and inner rim stay 100% synchronized.
+/// detached right-hand pill (`(tx, tw, th, tr, t_top_r, t_ear)`) in a single GPU geometry so
+/// geometric clip, GPU DropShadow mask, and inner rim stay 100% synchronized.
 #[allow(clippy::too_many_arguments)]
 pub fn visor_path_with_detached(
     x0: f32,
@@ -92,14 +95,15 @@ pub fn visor_path_with_detached(
     w: f32,
     h: f32,
     radius: f32,
+    top_radius: f32,
     ear: f32,
-    detached: Option<(f32, f32, f32, f32, f32)>,
+    detached: Option<(f32, f32, f32, f32, f32, f32)>,
 ) -> Result<CompositionPath> {
-    build_visor_multi(x0, y0, w, h, radius, ear, detached, false)
+    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, detached, false)
 }
 
 /// Builds the `1px` inner-rim stroke `CompositionPath` for both the primary Visor capsule and an
-/// optional detached right-hand pill (`(tx, tw, th, tr, t_ear)`).
+/// optional detached right-hand pill (`(tx, tw, th, tr, t_top_r, t_ear)`).
 #[allow(clippy::too_many_arguments)]
 pub fn visor_rim_path_with_detached(
     x0: f32,
@@ -107,10 +111,11 @@ pub fn visor_rim_path_with_detached(
     w: f32,
     h: f32,
     radius: f32,
+    top_radius: f32,
     ear: f32,
-    detached: Option<(f32, f32, f32, f32, f32)>,
+    detached: Option<(f32, f32, f32, f32, f32, f32)>,
 ) -> Result<CompositionPath> {
-    build_visor_multi(x0, y0, w, h, radius, ear, detached, true)
+    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, detached, true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,15 +126,15 @@ unsafe fn append_visor_figure(
     w: f32,
     h: f32,
     radius: f32,
+    top_radius: f32,
     ear: f32,
     open_top_rim: bool,
 ) {
     let w = w.max(2.0);
     let h = h.max(2.0);
-    if ear > 0.5 {
-        // Overlap 1px above y = 0 for both filled silhouette and open-top rim so DPI rounding never
-        // leaves a seam or bright corner lip at the top screen bezel.
-        let top_y = y0 - 1.0;
+    if ear > 0.25 {
+        // Overlap up to 1px above y = 0 when attached to the bezel, smoothly releasing as `ear -> 0`.
+        let top_y = y0 - (ear / 2.5).clamp(0.0, 1.0);
         let ew = ear.min(h * 0.56);
         let eh = (ew * 1.08).min(h * 0.56);
         let r = radius.clamp(0.0, (w * 0.5).min((h - eh).max(0.0)));
@@ -163,26 +168,34 @@ unsafe fn append_visor_figure(
         ));
         sink.EndFigure(if open_top_rim { D2D1_FIGURE_END_OPEN } else { D2D1_FIGURE_END_CLOSED });
     } else {
-        let r = radius.clamp(0.0, (w * 0.5).min(h * 0.5));
+        // Continuous morph figure: bottom corners stay at `rb`, while top corners smoothly round
+        // from `rt = 0.0` (seamless meeting point with `ear = 0`) up to `rt = rb` (floating Pill).
+        let rb = radius.clamp(0.0, (w * 0.5).min(h * 0.5));
+        let rt = top_radius.clamp(0.0, (w * 0.5).min((h - rb).max(0.0)));
         let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
-        if r <= 0.5 {
-            sink.BeginFigure(pt(x0, y0), begin);
-            sink.AddLine(pt(x0 + w, y0));
-            sink.AddLine(pt(x0 + w, y0 + h));
-            sink.AddLine(pt(x0, y0 + h));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-        } else {
-            sink.BeginFigure(pt(x0 + r, y0), begin);
-            sink.AddLine(pt(x0 + w - r, y0));
-            sink.AddArc(&arc(x0 + w, y0 + r, r, true));
-            sink.AddLine(pt(x0 + w, y0 + h - r));
-            sink.AddArc(&arc(x0 + w - r, y0 + h, r, true));
-            sink.AddLine(pt(x0 + r, y0 + h));
-            sink.AddArc(&arc(x0, y0 + h - r, r, true));
-            sink.AddLine(pt(x0, y0 + r));
-            sink.AddArc(&arc(x0 + r, y0, r, true));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+
+        sink.BeginFigure(pt(x0 + rt, y0), begin);
+        sink.AddLine(pt(x0 + w - rt, y0));
+        if rt > 0.35 {
+            sink.AddArc(&arc(x0 + w, y0 + rt, rt, true));
         }
+        if h - rb > rt + 0.01 {
+            sink.AddLine(pt(x0 + w, y0 + h - rb));
+        }
+        if rb > 0.35 {
+            sink.AddArc(&arc(x0 + w - rb, y0 + h, rb, true));
+        }
+        sink.AddLine(pt(x0 + rb, y0 + h));
+        if rb > 0.35 {
+            sink.AddArc(&arc(x0, y0 + h - rb, rb, true));
+        }
+        if h - rb > rt + 0.01 {
+            sink.AddLine(pt(x0, y0 + rt));
+        }
+        if rt > 0.35 {
+            sink.AddArc(&arc(x0 + rt, y0, rt, true));
+        }
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
     }
 }
 
@@ -193,8 +206,9 @@ fn build_visor_multi(
     w: f32,
     h: f32,
     radius: f32,
+    top_radius: f32,
     ear: f32,
-    detached: Option<(f32, f32, f32, f32, f32)>,
+    detached: Option<(f32, f32, f32, f32, f32, f32)>,
     open_top_rim: bool,
 ) -> Result<CompositionPath> {
     let fac = factory()?;
@@ -202,10 +216,10 @@ fn build_visor_multi(
     let sink = unsafe { path.Open()? };
 
     unsafe {
-        append_visor_figure(&sink, x0, y0, w, h, radius, ear, open_top_rim);
-        if let Some((tx, tw, th, tr, t_ear)) = detached {
+        append_visor_figure(&sink, x0, y0, w, h, radius, top_radius, ear, open_top_rim);
+        if let Some((tx, tw, th, tr, t_top_r, t_ear)) = detached {
             if tw > 2.0 && th > 2.0 {
-                append_visor_figure(&sink, tx, y0, tw, th, tr, t_ear, open_top_rim);
+                append_visor_figure(&sink, tx, y0, tw, th, tr, t_top_r, t_ear, open_top_rim);
             }
         }
         sink.Close()?;

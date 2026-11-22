@@ -44,6 +44,11 @@ impl SpringParams {
         Self::from_response(0.40, 0.98)
     }
 
+    /// Liquid continuous morph between bezel-attached Notch and floating Pill/Capsule (~440ms).
+    pub fn shape_morph() -> Self {
+        Self::from_response(0.46, 0.88)
+    }
+
     pub fn tactile() -> Self {
         Self::from_response(0.20, 0.76)
     }

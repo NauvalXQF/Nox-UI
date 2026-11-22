@@ -332,13 +332,14 @@ impl Shell {
         w: f32,
         h: f32,
         radius: f32,
+        top_radius: f32,
         ear: f32,
-        detached: Option<(f32, f32, f32, f32, f32)>,
+        detached: Option<(f32, f32, f32, f32, f32, f32)>,
     ) {
-        if let Ok(path) = nacre_ui::visor_geo::visor_path_with_detached(x0, 0.0, w, h, radius, ear, detached) {
+        if let Ok(path) = nacre_ui::visor_geo::visor_path_with_detached(x0, 0.0, w, h, radius, top_radius, ear, detached) {
             let _ = self.path_geo.SetPath(&path);
         }
-        if let Ok(rim) = nacre_ui::visor_geo::visor_rim_path_with_detached(x0, 0.0, w, h, radius, ear, detached) {
+        if let Ok(rim) = nacre_ui::visor_geo::visor_rim_path_with_detached(x0, 0.0, w, h, radius, top_radius, ear, detached) {
             let _ = self.rim_geo.SetPath(&rim);
         }
     }
