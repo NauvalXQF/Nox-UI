@@ -246,9 +246,11 @@ pub struct SwipeLatch {
 }
 
 impl SwipeLatch {
-    pub const THRESHOLD: i32 = 60;
-    pub const IDLE_RESET_MS: i64 = 120;
-    pub const COOLDOWN_MS: i64 = 420;
+    pub const THRESHOLD: i32 = 80;
+    pub const IDLE_RESET_MS: i64 = 140;
+    pub const COOLDOWN_MS: i64 = 460;
+    pub const INERTIA_EXTEND_GAP_MS: i64 = 180;
+    pub const INERTIA_EXTEND_MS: i64 = 200;
     pub const VSCROLL_SUPPRESS_MS: i64 = 220;
 
     /// Records active vertical scroll input to prevent diagonal touchpad drift from switching tabs.
@@ -273,16 +275,32 @@ impl SwipeLatch {
         let dir = if delta > 0 { 1 } else { -1 };
         if now_ms < self.locked_until_ms {
             if dir == self.locked_dir {
-                // Continuous inertia stream in the same direction keeps the lock alive briefly.
-                if gap < 95 {
-                    self.locked_until_ms = self.locked_until_ms.max(now_ms + 150);
+                // Continuous decelerating inertia stream in the same direction keeps the lock alive
+                // and cancels any accidental opposite-sign finger-lift jitter.
+                self.accum = 0;
+                if gap < Self::INERTIA_EXTEND_GAP_MS {
+                    self.locked_until_ms = self.locked_until_ms.max(now_ms + Self::INERTIA_EXTEND_MS);
                 }
                 return 0;
-            } else if gap < 60 {
+            }
+            if gap < 60 {
                 return 0;
             }
-            // Deliberate opposite-direction swipe after a short pause breaks the lock.
-            self.locked_until_ms = 0;
+            // Only break the lock on a full deliberate opposite-direction swipe (reaching THRESHOLD),
+            // never on a tiny single-tick finger-lift bounce/jitter.
+            if self.accum != 0 && self.accum.signum() != dir {
+                self.accum = 0;
+            }
+            self.accum += delta as i32;
+            if self.accum.abs() >= Self::THRESHOLD {
+                self.accum = 0;
+                self.locked_dir = dir;
+                self.locked_until_ms = now_ms + Self::COOLDOWN_MS;
+                return dir;
+            }
+            return 0;
+        }
+        if self.accum != 0 && self.accum.signum() != dir {
             self.accum = 0;
         }
         self.accum += delta as i32;
@@ -548,16 +566,19 @@ mod tests {
     #[test]
     fn swipe_latch_absorbs_touchpad_inertia_and_steps_once() {
         let mut s = SwipeLatch::default();
-        // Realistic touchpad burst + inertia tail over 400ms -> strictly 1 step!
+        // Realistic touchpad burst + decelerating inertia tail (including >100ms late gaps) -> strictly 1 step!
         assert_eq!(s.feed(40, 100), 0);
         assert_eq!(s.feed(40, 116), 1);
-        for t in [132, 160, 200, 250, 310, 380, 450] {
+        for t in [132, 160, 200, 260, 350, 470, 610] {
             assert_eq!(s.feed(60, t), 0, "inertia pada t={t} harus diserap");
         }
         // Distinct new swipe after fingers lifted & cooldown settled -> steps once again.
-        assert_eq!(s.feed(120, 900), 1);
-        // Reversing direction cleanly after short pause steps backward.
-        assert_eq!(s.feed(-120, 980), -1);
+        assert_eq!(s.feed(120, 1100), 1);
+        // Finger-lift micro-reversal jitter (-8 at gap=75ms) must NOT break lock and let trailing +90 double-step!
+        assert_eq!(s.feed(-8, 1175), 0);
+        assert_eq!(s.feed(90, 1210), 0, "ekor inersia setelah jitter angkat jari tidak boleh melompat tab");
+        // Deliberate full opposite-direction swipe after a short pause cleanly steps backward.
+        assert_eq!(s.feed(-120, 1290), -1);
     }
 
     #[test]
@@ -569,7 +590,7 @@ mod tests {
         assert_eq!(s.feed(40, 1050), 0);
         assert_eq!(s.feed(80, 1180), 0);
         // After suppression window elapses, intentional horizontal swipe works normally.
-        assert_eq!(s.feed(70, 1250), 1);
+        assert_eq!(s.feed(85, 1250), 1);
     }
 
     #[test]

@@ -90,12 +90,6 @@ fn class_of(h: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-fn raise(h: isize) {
-    unsafe {
-        let _ = SetWindowPos(HWND(h as *mut _), Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-}
-
 pub fn raise_all() {
     let fg = nacre_platform::wins::focus::foreground();
     if nacre_platform::wins::overlap::is_shell_flyout(fg) {
@@ -117,21 +111,55 @@ pub fn raise_all() {
         let _ = EnumWindows(Some(collect), LPARAM(&mut v as *mut _ as isize));
     }
     let classes: Vec<String> = v.iter().map(|h| class_of(HWND(*h as *mut _))).collect();
-    for layer in BASE_LAYERS {
+    let hc_strips = crate::hotcorners::strip_hwnds();
+
+    // Build the desired Z-order strictly TOP-MOST -> BOTTOM-MOST and apply with `insert_after`
+    // chaining so lower layers (e.g. AbraMenuBar) never momentarily jump above higher layers
+    // (e.g. AbraNotch) and trigger spurious WM_MOUSELEAVE flickers.
+    let mut ordered: Vec<isize> = Vec::with_capacity(v.len() + hc_strips.len());
+    let mut push_unique = |h: isize| {
+        if !ordered.contains(&h) {
+            ordered.push(h);
+        }
+    };
+
+    // 1. Popups / transient overlays stay above everything else (preserving EnumWindows top-down order).
+    for (h, c) in v.iter().zip(&classes) {
+        if !BASE_LAYERS.contains(&c.as_str()) {
+            push_unique(*h);
+        }
+    }
+    // 2. Hot-corner trigger strips sit right below popups, above base shell layers.
+    for h in &hc_strips {
+        push_unique(*h);
+    }
+    // 3. Base shell layers from highest (AbraNotch) down to lowest (AbraWidget).
+    for layer in BASE_LAYERS.into_iter().rev() {
         if layer == "AbraWidget" && crate::widgets::floating() {
             continue;
         }
         for (h, c) in v.iter().zip(&classes) {
             if c == layer {
-                raise(*h);
+                push_unique(*h);
             }
         }
     }
-    crate::hotcorners::raise_strips();
-    for (h, c) in v.iter().zip(&classes).rev() {
-        if !BASE_LAYERS.contains(&c.as_str()) {
-            raise(*h);
+
+    let mut after = HWND_TOPMOST;
+    for h in ordered {
+        let hwnd = HWND(h as *mut _);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
+        after = hwnd;
     }
 }
 

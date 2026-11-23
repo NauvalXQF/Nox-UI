@@ -997,6 +997,7 @@ impl Notch {
             self.sp_sh_op.snap(0.0);
             self.sp_csh_op.snap(0.0);
             self.sp_timer_pill.snap(0.0);
+            self.shell.set_stage_opacity(0.0);
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
@@ -3338,13 +3339,15 @@ impl Notch {
         if self.seek_drag.is_some() || self.scroll_drag.is_some() || self.menu.as_ref().is_some_and(|m| m.is_open()) {
             return;
         }
+        // Arm grace BEFORE dispatching Event::Leave so dispatch()'s update_visibility() does not
+        // momentarily hide and immediately re-show the Notch (which caused a 1-frame blink).
+        self.grace = true;
+        timer(self.hwnd, T_GRACE, if self.vis == Vis::OnDemand { 380 } else { 800 });
         if matches!(self.mode, Mode::Open(_)) {
             timer(self.hwnd, T_LEAVE, motion::LEAVE_GRACE_MS);
         } else {
             self.dispatch(Event::Leave);
         }
-        self.grace = true;
-        timer(self.hwnd, T_GRACE, if self.vis == Vis::OnDemand { 380 } else { 800 });
         self.update_visibility();
     }
 
@@ -4000,11 +4003,6 @@ impl Notch {
                 self.sp_sh_op.snap(0.0);
                 self.sp_csh_op.snap(0.0);
             }
-            unsafe {
-                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            }
-            self.shell.set_visible(true, self.hwnd);
-            crate::topmost::request_raise();
             let show_sp = if matches!(self.look.view, View::Open(_) | View::Drop) {
                 SpringParams::open()
             } else {
@@ -4032,7 +4030,15 @@ impl Notch {
                     let _ = keyframes(&self.paint.comp, &c, "Opacity", 0.0, 1.0, 180, 30);
                 }
             }
+            // Commit initial hidden/emerging geometry, opacity, and hit-region BEFORE un-hiding HWNDs
+            // so DWM never presents a stale pre-animation frame.
             self.apply_springs_to_shell();
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            self.shell.set_visible(true, self.hwnd);
+            crate::topmost::request_raise();
             self.start_frame();
             self.publish_notch();
             self.sync_visualizer();
@@ -4552,7 +4558,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let ear = d.sp_ear.pos.max(0.0);
                 let x0 = d.x0_for(w);
                 let cx = pt.x as f32;
-                let cy = pt.y as f32 - d.sp_y.pos;
+                // In bezel-attached Notch mode, clamp micro spring overshoot above y=0 so a cursor
+                // resting on the top screen bezel (pt.y == 0) never falls through as HTTRANSPARENT.
+                let hit_y = if d.sp_island.pos < 0.5 { d.sp_y.pos.min(0.0) } else { d.sp_y.pos };
+                let cy = pt.y as f32 - hit_y;
                 if !d.shown || cy < 0.0 {
                     return false;
                 }

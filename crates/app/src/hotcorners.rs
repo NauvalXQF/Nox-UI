@@ -39,14 +39,12 @@ pub fn raise() {
     apply();
 }
 
-pub fn raise_strips() {
+pub fn strip_hwnds() -> Vec<isize> {
     HC.with(|c| {
         let g = c.borrow();
-        let Some(hc) = g.as_ref() else { return };
-        for s in hc.strips.iter().flatten() {
-            s.to_top();
-        }
-    });
+        let Some(hc) = g.as_ref() else { return Vec::new() };
+        hc.strips.iter().flatten().map(|s| s.hwnd().0 as isize).collect()
+    })
 }
 
 fn apply() {

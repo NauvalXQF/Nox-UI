@@ -51,12 +51,21 @@ all drawn with frosted glass materials and springy GPU‑composited animations.
 
 It is a single lightweight native program: no Electron, no WebView, no background telemetry services, no account required. At idle it uses roughly **15 MB** of private memory.
 
-### 🆕 What’s New in NOX v0.5.0
+### 🆕 What’s New in NOX v0.5.1
+
+- **Zero‑Blink Auto‑Hide Notch & Top‑Down Z‑Order**: eliminated the 1‑frame blink when hovering into Auto‑hide Notch on high‑refresh displays (e.g. 120Hz) by arming leave‑grace before state dispatch, clamping bezel‑edge hit‑testing against spring micro‑overshoot, committing emerging pose before `ShowWindow`, and applying Z‑order strictly top‑down so the Rail never briefly jumps above the Notch.
+- **Precision Touchpad Tab Swipe Fix**: refined `SwipeLatch` inertia absorption and finger‑lift jitter immunity so swiping from Media Player to Alerts never accidentally skips to Shelf.
+- **High‑DPI Quick Panel Auto‑Fit & Chrome/Chromium PWA Deck Support**: Quick Panel automatically scales proportionally on high‑DPI / compact screens (such as `1920×1200 @ 150%`), and Chrome / Brave / Vivaldi / Opera PWAs (`_crx_*`) now appear as separate pinned/running apps in the Deck and Rail with native window icons.
+- **Notch Polish & Multi‑Source Lyrics**: continuous liquid Notch ↔ Capsule morphing, multi‑source synced lyrics (BetterLyrics TTML primary + LRCLIB + NetEase + Lyrics.ovh), configurable lyric lead time (`0s – 1s`), full‑bleed bottom‑up OLED compact lyrics glow, default 80% Notch corner roundness, and fixed empty‑player lyrics toggle crash.
+
+<details>
+<summary><b>In NOX v0.5.0</b></summary>
 
 - **Prayer / Jadwal Shalat Tab**: native 100% offline astronomical prayer schedule (default **Kemenag RI**, plus MWL, Makkah, ISNA, Egyptian) with an anti‑aliased solar arc, glowing sun orb, adaptive time‑of‑day OLED gradients, manual city search (70+ built‑in cities + online geocoding), optional Windows Location / IP auto‑detect, and **10‑minute, 5‑minute, & Adzan alerts** (Champagne Gold / Emerald Mist Auto‑hide peek + toggleable harmonic chime sound).
 - **Customizable Notch Tabs (Re‑arrange & Hide)**: reorder all 7 Notch tabs (`↑` / `↓`), hide unused tabs, and automatically open your #1 tab by default from *Settings → Notch → Notch Tabs*.
 - **Upgraded Gemini AI Tab**: two‑tone **Sapphire → Violet** bottom‑up OLED aura (brightens while streaming), gradient Send pill, frosted glass model badge & reading card, and **3 smart one‑click quick actions** (*Summarize*, *Translate ID ↔ EN*, *Polish*) that operate on your typed input or automatically fall back to your clipboard.
 - **Silky Lyrics Toggle & Bottom‑Up OLED Gradients**: critically‑damped zero‑pop lyrics expansion/collapse animation (unified GPU icon scaling, edge‑glued Pin/waveform, clipped title glide, choreographed bottom dots), full‑bleed bottom‑up OLED gradients across Media Player & Pomodoro, and **Auto‑hide lyrics control** (keeps compact Live Lyrics / Music pill visible in Auto‑hide while lyrics are enabled and playing, and hides completely when toggled off or paused).
+</details>
 
 <details>
 <summary><b>In NOX v0.4.1</b></summary>
@@ -104,7 +113,7 @@ Use only the Notch with your normal taskbar, only the Deck, only the Rail — an
 
 > Requires **Windows 11** (build 22000 or newer), 64‑bit.
 
-Download **`NOX-v0.5.0-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
+Download **`NOX-v0.5.1-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
 
 | Mode | How to run | Best for |
 |---|---|---|
@@ -113,7 +122,7 @@ Download **`NOX-v0.5.0-win64.zip`** from the **[Releases](https://github.com/Nau
 
 ### Step‑by‑step (Recommended)
 
-1. Download **`NOX-v0.5.0-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
+1. Download **`NOX-v0.5.1-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
 2. Extract the entire ZIP to any folder (do not run directly from inside the ZIP preview).
 3. Double‑click **`Install-NOX.cmd`**.
    - If Windows SmartScreen warns about an unsigned app, click **More info → Run anyway** (only for official releases from this repository).
@@ -297,7 +306,7 @@ cargo test --workspace
 powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
 ```
 
-The packaging script builds the release workspace and generates `dist\NOX-v0.5.0-win64\` and `dist\NOX-v0.5.0-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
+The packaging script builds the release workspace and generates `dist\NOX-v0.5.1-win64\` and `dist\NOX-v0.5.1-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
 
 ### 4. Safe isolated testing
 
