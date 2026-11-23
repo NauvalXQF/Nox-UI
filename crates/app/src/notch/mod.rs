@@ -3792,9 +3792,10 @@ impl Notch {
         if !matches!(self.mode, Mode::Open(_)) || delta == 0 {
             return;
         }
-        let step = self.swipe.feed(delta, self.now_ms());
+        let now = self.now_ms();
+        let step = self.swipe.feed(delta, now);
         if step != 0 {
-            log::line("notch", &format!("swipe dir={step} delta={delta} mode={:?}", self.mode));
+            log::line("notch", &format!("swipe dir={step} delta={delta} t={now}ms mode={:?}", self.mode));
             self.step_tab(step);
         }
     }
