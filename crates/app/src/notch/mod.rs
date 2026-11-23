@@ -3797,6 +3797,19 @@ impl Notch {
         if step != 0 {
             log::line("notch", &format!("swipe dir={step} delta={delta} t={now}ms mode={:?}", self.mode));
             self.step_tab(step);
+            // Re-anchor lock timestamps AFTER transition()+render() completes and drain any
+            // same-swipe WM_MOUSEHWHEEL ticks that piled up / coalesced during rendering.
+            let after = self.now_ms();
+            self.swipe.rearm_after_step(after);
+            unsafe {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, Some(self.hwnd), WM_MOUSEHWHEEL, WM_MOUSEHWHEEL, PM_REMOVE).as_bool() {
+                    let queued_d = (msg.wParam.0 >> 16) as i16;
+                    if queued_d != 0 {
+                        let _ = self.swipe.feed(queued_d, after);
+                    }
+                }
+            }
         }
     }
 

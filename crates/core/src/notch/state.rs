@@ -257,11 +257,15 @@ impl SwipeLatch {
     pub const THRESHOLD: i32 = 55;
     pub const IDLE_RESET_MS: i64 = 120;
     /// Brief hard lock covering the active stroke immediately after crossing `THRESHOLD`.
-    pub const HARD_LOCK_MS: i64 = 240;
+    pub const HARD_LOCK_MS: i64 = 280;
     /// Initial inertia watch window after a step.
-    pub const INERTIA_WINDOW_MS: i64 = 400;
+    pub const INERTIA_WINDOW_MS: i64 = 440;
     /// Sliding quiet-gap deadline while decelerating inertia ticks keep arriving.
-    pub const QUIET_GAP_MS: i64 = 210;
+    pub const QUIET_GAP_MS: i64 = 220;
+    /// Inertia must genuinely decay down to `<= 18` before a sudden high-delta tick is treated as
+    /// a fresh finger push (prevents coalesced/noisy roaring inertia ticks like 150->497 or 1100->3696
+    /// from falsely unlocking mid-gesture).
+    pub const DYING_INERTIA_MAX_DELTA: i32 = 18;
     pub const OPPOSITE_GAP_MS: i64 = 60;
     pub const VSCROLL_SUPPRESS_MS: i64 = 220;
 
@@ -278,6 +282,18 @@ impl SwipeLatch {
         self.peak_abs = 0;
         self.min_abs = 0;
         self.vscroll_until_ms = 0;
+    }
+
+    /// Re-anchors the active lock timestamps to `after_ms` once `step_tab()` / `render()` completes
+    /// so heavy tab renders never eat into the lock window or fabricate a false quiet gap.
+    pub fn rearm_after_step(&mut self, after_ms: i64) {
+        if self.locked_dir == 0 {
+            return;
+        }
+        self.last_ev_ms = self.last_ev_ms.max(after_ms);
+        self.last_locked_dir_ms = self.last_locked_dir_ms.max(after_ms);
+        self.hard_lock_until_ms = self.hard_lock_until_ms.max(after_ms + Self::HARD_LOCK_MS);
+        self.inertia_until_ms = self.inertia_until_ms.max(after_ms + Self::INERTIA_WINDOW_MS);
     }
 
     fn arm_lock(&mut self, dir: i32, abs_d: i32, now_ms: i64) {
@@ -316,11 +332,13 @@ impl SwipeLatch {
                 let dir_gap = now_ms.saturating_sub(self.last_locked_dir_ms);
                 let after_hard = now_ms >= self.hard_lock_until_ms;
                 // Detect a genuinely new deliberate swipe in the same direction:
-                // either a clean quiet pause (>= QUIET_GAP_MS) OR a sharp re-acceleration after
-                // inertia had already decayed (OS inertia never accelerates!).
+                // either a clean quiet pause (>= QUIET_GAP_MS) OR a sharp re-acceleration ONLY after
+                // inertia has truly died down (`min_abs <= 18`), preventing coalesced high-delta bursts
+                // (e.g. 150 -> 497 or 1100 -> 3696) from double-stepping mid-gesture.
                 let quiet_break = after_hard && dir_gap >= Self::QUIET_GAP_MS;
                 let reaccel_break = after_hard
-                    && abs_d >= 40
+                    && self.min_abs <= Self::DYING_INERTIA_MAX_DELTA
+                    && abs_d >= 45
                     && abs_d >= self.min_abs.saturating_mul(2).saturating_add(20);
                 if !quiet_break && !reaccel_break {
                     // Still the same active stroke or decelerating inertia tail -> absorb cleanly.
@@ -633,13 +651,26 @@ mod tests {
         for (t, d) in [(132, 80), (156, 60), (190, 40), (240, 24), (310, 14), (420, 8), (560, 4), (730, 2)] {
             assert_eq!(s.feed(d, t), 0, "inertia pada t={t} harus diserap");
         }
-        // Quantized ELAN/Synaptics inertia (+120 ticks with gaps < 210ms) is also 100% absorbed.
+        // Quantized ELAN/Synaptics inertia (+120 ticks with gaps < 220ms) is also 100% absorbed.
         let mut q = SwipeLatch::default();
         assert_eq!(q.feed(120, 100), 1);
         for t in [160, 240, 350, 500, 680] {
             assert_eq!(q.feed(120, t), 0, "inersia terkuantisasi pada t={t} harus diserap");
         }
-        // Rapid intentional 2nd swipe right on top of dying inertia breaks lock immediately via re-acceleration!
+        // High-delta coalesced/noisy roaring inertia bursts (matching real Windows 11 laptop logs:
+        // 299 -> 150 -> 90 -> 497 and 2492 -> 1100 -> 3696) must NEVER double-step!
+        let mut h = SwipeLatch::default();
+        assert_eq!(h.feed(299, 1000), 1);
+        h.rearm_after_step(1080); // simulate 80ms tab render
+        assert_eq!(h.feed(150, 1180), 0);
+        assert_eq!(h.feed(90, 1300), 0);
+        assert_eq!(h.feed(497, 1476), 0, "coalesced 497 saat inersia masih deras tidak boleh double-step");
+        let mut h2 = SwipeLatch::default();
+        assert_eq!(h2.feed(2492, 2000), 1);
+        h2.rearm_after_step(2060);
+        assert_eq!(h2.feed(1100, 2240), 0);
+        assert_eq!(h2.feed(3696, 2440), 0, "coalesced 3696 saat inersia masih deras tidak boleh double-step");
+        // Rapid intentional 2nd swipe right on top of dying inertia (min_abs <= 18) breaks lock immediately!
         assert_eq!(s.feed(45, 760), 0);
         assert_eq!(s.feed(45, 776), 1, "geseran baru yang disengaja harus langsung responsif tanpa berat");
         // Finger-lift micro-reversal jitter (-15 at gap=75ms) must NOT break lock and let trailing inertia double-step!
