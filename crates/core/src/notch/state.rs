@@ -240,21 +240,42 @@ pub fn nav_state(tab: Tab, lyrics_open: bool, nav_hovered: bool) -> NavState {
 pub struct SwipeLatch {
     accum: i32,
     last_ev_ms: i64,
+    last_locked_dir_ms: i64,
     locked_until_ms: i64,
     locked_dir: i32,
     vscroll_until_ms: i64,
 }
 
 impl SwipeLatch {
-    pub const THRESHOLD: i32 = 80;
+    /// Exactly 1 standard Win32 `WHEEL_DELTA` notch (`120`): single `Shift+Scroll` / tilt-wheel click
+    /// triggers immediately while touchpad swipes require a clear deliberate gesture.
+    pub const THRESHOLD: i32 = 120;
     pub const IDLE_RESET_MS: i64 = 140;
-    pub const COOLDOWN_MS: i64 = 460;
-    pub const INERTIA_EXTEND_GAP_MS: i64 = 180;
-    pub const INERTIA_EXTEND_MS: i64 = 200;
+    pub const COOLDOWN_MS: i64 = 520;
+    /// Slides the quiet-gap deadline forward on every same-direction inertia tick so both continuous
+    /// Precision Touchpad tails and slow quantized ELAN/Synaptics momentum ticks stay absorbed.
+    pub const INERTIA_EXTEND_MS: i64 = 320;
+    pub const OPPOSITE_GAP_MS: i64 = 80;
     pub const VSCROLL_SUPPRESS_MS: i64 = 220;
 
+    pub fn is_locked(&self, now_ms: i64) -> bool {
+        now_ms < self.locked_until_ms
+    }
+
+    pub fn reset(&mut self) {
+        self.accum = 0;
+        self.last_locked_dir_ms = 0;
+        self.locked_until_ms = 0;
+        self.locked_dir = 0;
+        self.vscroll_until_ms = 0;
+    }
+
     /// Records active vertical scroll input to prevent diagonal touchpad drift from switching tabs.
+    /// Ignored while already locked in a horizontal swipe so stray vertical ticks never starve inertia lock.
     pub fn note_vertical(&mut self, now_ms: i64) {
+        if now_ms < self.locked_until_ms {
+            return;
+        }
         self.accum = 0;
         self.vscroll_until_ms = self.vscroll_until_ms.max(now_ms + Self::VSCROLL_SUPPRESS_MS);
     }
@@ -263,44 +284,48 @@ impl SwipeLatch {
         if delta == 0 {
             return 0;
         }
-        if now_ms < self.vscroll_until_ms {
-            self.accum = 0;
-            return 0;
-        }
         let gap = now_ms.saturating_sub(self.last_ev_ms);
         self.last_ev_ms = now_ms;
-        if gap > Self::IDLE_RESET_MS {
-            self.accum = 0;
-        }
         let dir = if delta > 0 { 1 } else { -1 };
+
+        // 1. Active gesture/inertia lock ALWAYS runs before vertical-scroll suppression so a stray
+        //    diagonal WM_MOUSEWHEEL tick can never starve `locked_until_ms` mid-inertia and double-step.
         if now_ms < self.locked_until_ms {
             if dir == self.locked_dir {
-                // Continuous decelerating inertia stream in the same direction keeps the lock alive
-                // and cancels any accidental opposite-sign finger-lift jitter.
+                // Any same-direction tick arriving before the lock expires is absorbed as inertia
+                // and slides the quiet-gap deadline forward until the stream truly goes silent.
                 self.accum = 0;
-                if gap < Self::INERTIA_EXTEND_GAP_MS {
-                    self.locked_until_ms = self.locked_until_ms.max(now_ms + Self::INERTIA_EXTEND_MS);
-                }
+                self.last_locked_dir_ms = now_ms;
+                self.locked_until_ms = self.locked_until_ms.max(now_ms + Self::INERTIA_EXTEND_MS);
                 return 0;
             }
-            if gap < 60 {
+            // Opposite direction while locked: ignore rapid finger-lift bounce (< 80ms since last
+            // locked-dir tick) and require a full deliberate opposite swipe (>= THRESHOLD).
+            if now_ms.saturating_sub(self.last_locked_dir_ms) < Self::OPPOSITE_GAP_MS {
+                self.accum = 0;
                 return 0;
             }
-            // Only break the lock on a full deliberate opposite-direction swipe (reaching THRESHOLD),
-            // never on a tiny single-tick finger-lift bounce/jitter.
-            if self.accum != 0 && self.accum.signum() != dir {
+            if gap > Self::IDLE_RESET_MS || (self.accum != 0 && self.accum.signum() != dir) {
                 self.accum = 0;
             }
             self.accum += delta as i32;
             if self.accum.abs() >= Self::THRESHOLD {
                 self.accum = 0;
                 self.locked_dir = dir;
+                self.last_locked_dir_ms = now_ms;
                 self.locked_until_ms = now_ms + Self::COOLDOWN_MS;
                 return dir;
             }
             return 0;
         }
-        if self.accum != 0 && self.accum.signum() != dir {
+
+        // 2. Unlocked: suppress stray horizontal drift while user is actively scrolling vertically.
+        if now_ms < self.vscroll_until_ms {
+            self.accum = 0;
+            return 0;
+        }
+
+        if gap > Self::IDLE_RESET_MS || (self.accum != 0 && self.accum.signum() != dir) {
             self.accum = 0;
         }
         self.accum += delta as i32;
@@ -308,6 +333,7 @@ impl SwipeLatch {
             let step = if self.accum > 0 { 1 } else { -1 };
             self.accum = 0;
             self.locked_dir = step;
+            self.last_locked_dir_ms = now_ms;
             self.locked_until_ms = now_ms + Self::COOLDOWN_MS;
             step
         } else {
@@ -566,19 +592,39 @@ mod tests {
     #[test]
     fn swipe_latch_absorbs_touchpad_inertia_and_steps_once() {
         let mut s = SwipeLatch::default();
-        // Realistic touchpad burst + decelerating inertia tail (including >100ms late gaps) -> strictly 1 step!
+        // Realistic touchpad burst + decelerating inertia tail (including 200-300ms quantized gaps) -> strictly 1 step!
         assert_eq!(s.feed(40, 100), 0);
-        assert_eq!(s.feed(40, 116), 1);
-        for t in [132, 160, 200, 260, 350, 470, 610] {
-            assert_eq!(s.feed(60, t), 0, "inertia pada t={t} harus diserap");
+        assert_eq!(s.feed(40, 116), 0);
+        assert_eq!(s.feed(40, 132), 1);
+        for t in [148, 180, 230, 310, 440, 640, 910, 1200] {
+            assert_eq!(s.feed(120, t), 0, "inertia pada t={t} harus diserap");
         }
-        // Distinct new swipe after fingers lifted & cooldown settled -> steps once again.
-        assert_eq!(s.feed(120, 1100), 1);
-        // Finger-lift micro-reversal jitter (-8 at gap=75ms) must NOT break lock and let trailing +90 double-step!
-        assert_eq!(s.feed(-8, 1175), 0);
-        assert_eq!(s.feed(90, 1210), 0, "ekor inersia setelah jitter angkat jari tidak boleh melompat tab");
-        // Deliberate full opposite-direction swipe after a short pause cleanly steps backward.
-        assert_eq!(s.feed(-120, 1290), -1);
+        // Distinct new swipe after inertia stops & quiet-gap settles -> steps once again.
+        assert_eq!(s.feed(120, 1600), 1);
+        // Finger-lift micro-reversal jitter (-25 at gap=90ms) must NOT break lock and let trailing +120 double-step!
+        assert_eq!(s.feed(-25, 1690), 0);
+        assert_eq!(s.feed(120, 1730), 0, "ekor inersia setelah jitter angkat jari tidak boleh melompat tab");
+        // Deliberate multi-tick opposite-direction swipe after >=80ms pause cleanly steps backward.
+        assert_eq!(s.feed(-45, 1820), 0);
+        assert_eq!(s.feed(-45, 1836), 0);
+        assert_eq!(s.feed(-45, 1852), -1);
+    }
+
+    #[test]
+    fn swipe_latch_stray_vertical_tick_never_starves_inertia_lock() {
+        let mut s = SwipeLatch::default();
+        // Swipe right from Media Player -> Alerts.
+        assert_eq!(s.feed(60, 100), 0);
+        assert_eq!(s.feed(60, 116), 1);
+        assert_eq!(s.feed(40, 220), 0);
+        assert_eq!(s.feed(35, 360), 0);
+        // Stray diagonal vertical scroll tick during active inertia must NEVER starve locked_until_ms!
+        s.note_vertical(380);
+        for t in [410, 460, 520, 600, 700, 820] {
+            assert_eq!(s.feed(60, t), 0, "inersia pada t={t} tetap terserap walau ada diagonal wheel");
+        }
+        // After inertia truly settles (> 320ms silence), a deliberate new swipe works cleanly.
+        assert_eq!(s.feed(120, 1200), 1);
     }
 
     #[test]
@@ -590,7 +636,7 @@ mod tests {
         assert_eq!(s.feed(40, 1050), 0);
         assert_eq!(s.feed(80, 1180), 0);
         // After suppression window elapses, intentional horizontal swipe works normally.
-        assert_eq!(s.feed(85, 1250), 1);
+        assert_eq!(s.feed(120, 1250), 1);
     }
 
     #[test]

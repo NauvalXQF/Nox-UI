@@ -2247,6 +2247,7 @@ impl Notch {
             kill(self.hwnd, T_NAV_COLLAPSE);
         }
         if !matches!(new.view, View::Open(_)) {
+            self.swipe.reset();
             self.cal_sel = 0;
             self.todo_adding = false;
             self.todo_editing = false;
@@ -3728,15 +3729,21 @@ impl Notch {
         if !matches!(self.mode, Mode::Open(_)) || delta == 0 {
             return;
         }
-        let now = self.now_ms();
-        // Axis-lock: suppress stray diagonal touchpad horizontal drift during vertical scroll.
-        self.swipe.note_vertical(now);
-
         let Some(max_scroll) = self.live_vis.scroll.as_ref().map(|s| s.max_scroll) else {
             return;
         };
         if max_scroll <= 0.5 {
             return;
+        }
+        let now = self.now_ms();
+        // Ignore stray diagonal vertical wobble while a horizontal tab swipe / inertia tail is active
+        // so swiping into Alerts/Todo/Gemini stays cleanly at the top and never starves the swipe lock.
+        if self.swipe.is_locked(now) && delta.abs() < 40 {
+            return;
+        }
+        // Axis-lock: suppress stray diagonal touchpad horizontal drift during deliberate vertical scroll.
+        if delta.abs() >= 12 {
+            self.swipe.note_vertical(now);
         }
         let px_per_notch = match self.mode {
             Mode::Open(Tab::Gemini) => 46.0 * self.dpi,
@@ -3787,6 +3794,7 @@ impl Notch {
         }
         let step = self.swipe.feed(delta, self.now_ms());
         if step != 0 {
+            log::line("notch", &format!("swipe dir={step} delta={delta} mode={:?}", self.mode));
             self.step_tab(step);
         }
     }
