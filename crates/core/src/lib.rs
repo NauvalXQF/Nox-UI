@@ -1,8 +1,10 @@
 pub mod appcat;
 pub mod appmenus;
+pub mod clipstack;
 pub mod controls;
 pub mod display;
 pub mod dock;
+pub mod focus;
 pub mod i18n;
 pub mod genie;
 pub mod iconplate;

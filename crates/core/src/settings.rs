@@ -382,6 +382,10 @@ pub struct Settings {
     pub capsule_decor: crate::notch::glance::Decor,
     pub pill_devices: bool,
     pub meeting_companion: bool,
+    pub focus_cat: u8,
+    pub focus_mins: [u8; crate::focus::CATS],
+    pub break_mins: [u8; crate::focus::CATS],
+    pub focus_name: ShortText,
 }
 
 pub const ALL_NOTCH_TABS_MASK: u8 = 0b0111_1111;
@@ -477,6 +481,10 @@ impl Default for Settings {
             capsule_decor: crate::notch::glance::Decor::None,
             pill_devices: true,
             meeting_companion: true,
+            focus_cat: 0,
+            focus_mins: crate::focus::DEFAULT_FOCUS,
+            break_mins: crate::focus::DEFAULT_BREAK,
+            focus_name: ShortText::EMPTY,
         }
     }
 }
@@ -759,6 +767,10 @@ impl Settings {
                 "capsule_decor" => s.capsule_decor = crate::notch::glance::Decor::parse(v).unwrap_or(s.capsule_decor),
                 "pill_devices" => s.pill_devices = parse_bool(v).unwrap_or(s.pill_devices),
                 "meeting_companion" => s.meeting_companion = parse_bool(v).unwrap_or(s.meeting_companion),
+                "focus_cat" => s.focus_cat = v.parse::<u8>().ok().filter(|c| (*c as usize) < crate::focus::CATS).unwrap_or(s.focus_cat),
+                "focus_mins" => s.focus_mins = crate::focus::parse_list(v, s.focus_mins, false),
+                "break_mins" => s.break_mins = crate::focus::parse_list(v, s.break_mins, true),
+                "focus_name" => s.focus_name = ShortText::new(v),
                 "autostart" => {
                     if let Some(b) = parse_bool(v) {
                         s.autostart = b;
@@ -826,7 +838,7 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\npreset={}\nvisualizer={}\nfont={}\nreduce_motion={}\nnotch_glow={}\ncapsule={}\ncapsule_layout={}\ncapsule_decor={}\npill_devices={}\nmeeting_companion={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\npreset={}\nvisualizer={}\nfont={}\nreduce_motion={}\nnotch_glow={}\ncapsule={}\ncapsule_layout={}\ncapsule_decor={}\npill_devices={}\nmeeting_companion={}\nfocus_cat={}\nfocus_mins={}\nbreak_mins={}\nfocus_name={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -917,7 +929,11 @@ impl Settings {
             self.capsule_layout.key(),
             self.capsule_decor.key(),
             self.pill_devices,
-            self.meeting_companion
+            self.meeting_companion,
+            self.focus_cat,
+            crate::focus::list_text(self.focus_mins),
+            crate::focus::list_text(self.break_mins),
+            self.focus_name.as_str()
         )
     }
 }

@@ -200,6 +200,7 @@ fn main() {
     if let Err(e) = macshortcuts::init() {
         log::line("macshortcuts", &format!("gagal: {e}"));
     }
+    nacre_platform::clipboard::set_store(paths::config_dir());
     if let Err(e) = nacre_platform::clipboard::init() {
         log::line("clipboard", &format!("gagal: {e}"));
     }
