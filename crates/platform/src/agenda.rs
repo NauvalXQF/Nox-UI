@@ -21,6 +21,8 @@ pub type Date = (i32, u32, u32);
 pub struct Event {
     pub title: String,
     pub minute: Option<u32>,
+    pub minutes: u32,
+    pub link: Option<String>,
 }
 
 pub enum Cmd {
@@ -435,11 +437,33 @@ fn fetch_single_calendar(token: &str, cal_id: &str, d: Date, time_min: &str, tim
                 .to_string();
             let start = item.get("start");
             let end = item.get("end");
+            let gcal_link = item
+                .get("hangoutLink")
+                .and_then(Json::as_str)
+                .and_then(nacre_core::quick::find_link)
+                .or_else(|| {
+                    item.get("conferenceData")
+                        .and_then(|c| c.get("entryPoints"))
+                        .and_then(Json::as_arr)
+                        .and_then(|arr| {
+                            arr.iter()
+                                .filter_map(|ep| ep.get("uri").and_then(Json::as_str))
+                                .find_map(nacre_core::quick::find_link)
+                        })
+                })
+                .or_else(|| item.get("location").and_then(Json::as_str).and_then(nacre_core::quick::find_link))
+                .or_else(|| item.get("description").and_then(Json::as_str).and_then(nacre_core::quick::find_link));
 
             if let Some(dt) = start.and_then(|st| st.get("dateTime")).and_then(Json::as_str) {
                 if let Some((ev_d, m)) = parse_gcal_datetime(dt) {
                     if ev_d == d {
-                        out.push(Event { title, minute: Some(m) });
+                        let dur_min = end
+                            .and_then(|en| en.get("dateTime"))
+                            .and_then(Json::as_str)
+                            .and_then(parse_gcal_datetime)
+                            .map(|(ed, em)| if ed == ev_d && em > m { em - m } else { 30 })
+                            .unwrap_or(30);
+                        out.push(Event { title, minute: Some(m), minutes: dur_min, link: gcal_link });
                     }
                 }
             } else if let Some(sd_str) = start.and_then(|st| st.get("date")).and_then(Json::as_str) {
@@ -449,7 +473,7 @@ fn fetch_single_calendar(token: &str, cal_id: &str, d: Date, time_min: &str, tim
                         .and_then(Json::as_str)
                         .and_then(parse_ymd);
                     if all_day_includes(sd, ed, d) {
-                        out.push(Event { title, minute: None });
+                        out.push(Event { title, minute: None, minutes: 0, link: gcal_link });
                     }
                 }
             }
@@ -515,6 +539,9 @@ fn read(store: &AppointmentStore, d: Date) -> Option<Vec<Event>> {
             AppointmentProperties::StartTime(),
             AppointmentProperties::AllDay(),
             AppointmentProperties::Duration(),
+            AppointmentProperties::Location(),
+            AppointmentProperties::Details(),
+            AppointmentProperties::OnlineMeetingLink(),
         ]
         .into_iter()
         .flatten()
@@ -533,7 +560,12 @@ fn read(store: &AppointmentStore, d: Date) -> Option<Vec<Event>> {
             Some((date, m)) if date == d && !all_day => Some(m),
             _ => None,
         };
-        out.push(Event { title, minute });
+        let minutes = a.Duration().map(|d| (d.Duration / 600_000_000) as u32).unwrap_or(0);
+        let link = [a.OnlineMeetingLink().ok(), a.Location().ok(), a.Details().ok()]
+            .into_iter()
+            .flatten()
+            .find_map(|t| nacre_core::quick::find_link(&t.to_string()));
+        out.push(Event { title, minute, minutes, link });
     }
     out.sort_by_key(|e| e.minute.map_or(0, |m| m + 1));
     Some(out)
@@ -557,14 +589,18 @@ fn merge_events(gcal: Option<Vec<Event>>, win: Option<Vec<Event>>) -> Option<Vec
 }
 
 fn fake(d: Date, today: Date) -> Option<Vec<Event>> {
-    Some(if d == today {
-        vec![
-            Event { title: "Rapat Uji".into(), minute: Some(14 * 60 + 30) },
-            Event { title: "Olahraga Uji".into(), minute: Some(18 * 60) },
-        ]
-    } else {
-        vec![]
-    })
+    let soon = std::env::var("NACRE_FAKE_MEETING").ok().and_then(|v| v.parse::<i32>().ok()).map(|m| {
+        let t = crate::time::local_now();
+        ((t.hour as i32 * 60 + t.minute as i32 + m).clamp(0, 24 * 60 - 1)) as u32
+    });
+    let mut list = vec![
+        Event { title: "Rapat Uji".into(), minute: Some(14 * 60 + 30), minutes: 30, link: None },
+        Event { title: "Olahraga Uji".into(), minute: Some(18 * 60), minutes: 60, link: None },
+    ];
+    if let Some(m) = soon {
+        list.push(Event { title: "Standup tim".into(), minute: Some(m), minutes: 30, link: Some("https://meet.example.com/abc-defg-hij".into()) });
+    }
+    Some(if d == today { list } else { vec![] })
 }
 
 pub fn spawn(notify: impl Fn() + Send + 'static) -> Agenda {

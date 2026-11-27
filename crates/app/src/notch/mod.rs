@@ -68,6 +68,8 @@ const WM_GTASKS: u32 = WM_APP + 30;
 const WM_GEMINI: u32 = WM_APP + 31;
 const WM_GTASKS_ACTION: u32 = WM_APP + 32;
 const WM_PRAYER_TEST: u32 = WM_APP + 35;
+const WM_PILL: u32 = WM_APP + 36;
+const WM_DEVICECHANGE_MSG: u32 = 0x0219;
 
 const T_DWELL: usize = 1;
 const T_LEAVE: usize = 2;
@@ -94,6 +96,7 @@ const T_COPIED: usize = 24;
 const T_NAV_COLLAPSE: usize = 25;
 const T_SCROLL_IDLE: usize = 26;
 const T_PRAYER_ALERT: usize = 27;
+const T_PILL: usize = 28;
 const NAV_COLLAPSE_MS: u32 = 180;
 const NOTIF_TOAST_MS: u32 = 4500;
 const PRAYER_ALERT_MS: u32 = 8000;
@@ -125,6 +128,37 @@ const DETACHED_TIMER_W_DP: f32 = 86.0;
 const DETACHED_TIMER_GAP_DP: f32 = 9.0;
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
+
+enum PillMsg {
+    Push {
+        kind: nacre_core::notch::pills::Kind,
+        key: String,
+        title: String,
+        sub: String,
+        linger: Option<i64>,
+    },
+}
+
+static PILL_Q: std::sync::Mutex<Vec<PillMsg>> = std::sync::Mutex::new(Vec::new());
+
+pub fn push_pill(kind: nacre_core::notch::pills::Kind, key: &str, title: &str, sub: &str, linger: Option<i64>) {
+    if kind == nacre_core::notch::pills::Kind::Device && !crate::prefs::get().pill_devices {
+        return;
+    }
+    if let Ok(mut q) = PILL_Q.lock() {
+        q.push(PillMsg::Push {
+            kind,
+            key: key.to_string(),
+            title: title.to_string(),
+            sub: sub.to_string(),
+            linger,
+        });
+    }
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        post(h, WM_PILL);
+    }
+}
 static BUSY: AtomicBool = AtomicBool::new(false);
 static STAGE_Y_BITS: AtomicU32 = AtomicU32::new(0);
 
@@ -523,6 +557,13 @@ pub struct Notch {
     cal_events: Option<(views::Date, Option<Vec<nacre_platform::agenda::Event>>)>,
     cal_fetched_at: Option<Instant>,
     cal_in_flight: bool,
+    _bt: Option<nacre_platform::devices::Watchers>,
+    pills: nacre_core::notch::pills::Queue,
+    pill_peeking: bool,
+    cpu_prev: Option<(u64, u64)>,
+    cpu_pct: Option<u8>,
+    ram_pct: Option<u8>,
+    wifi_ssid: Option<String>,
     send: Option<SendSess>,
     send_err: bool,
     media_app: String,
@@ -769,6 +810,13 @@ impl Notch {
                 cal_events: None,
                 cal_fetched_at: None,
                 cal_in_flight: false,
+                _bt: None,
+                pills: nacre_core::notch::pills::Queue::default(),
+                pill_peeking: false,
+                cpu_prev: sys::cpu_times(),
+                cpu_pct: None,
+                ram_pct: sys::memory_load(),
+                wifi_ssid: nacre_platform::wifi::link().map(|l| l.0),
                 media_app: String::new(),
                 app_icons: std::collections::HashMap::new(),
                 vis: opts.mode,
@@ -797,6 +845,21 @@ impl Notch {
             }
             timer(hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
             with(hwnd, |d| {
+                d._bt = Some(nacre_platform::devices::watch_bluetooth(|name, on| {
+                    let sub = match (on, crate::prefs::get().lang) {
+                        (true, nacre_core::i18n::Lang::En) => "Connected",
+                        (false, nacre_core::i18n::Lang::En) => "Disconnected",
+                        (true, nacre_core::i18n::Lang::Id) => "Tersambung",
+                        (false, nacre_core::i18n::Lang::Id) => "Terputus",
+                    };
+                    push_pill(
+                        nacre_core::notch::pills::Kind::Device,
+                        &format!("bt:{name}"),
+                        &name,
+                        sub,
+                        Some(nacre_core::notch::pills::DEVICE_MS),
+                    );
+                }));
                 d._drop_target = drop::register(hwnd, WM_DND, d.dnd.clone());
                 if d._drop_target.is_none() {
                     log::line("notch", "seret-taruh tidak tersedia");
@@ -810,6 +873,9 @@ impl Notch {
                 d.update_visibility();
                 d.sync_download_watch();
                 d.sync_notif_watch();
+                if crate::prefs::get().meeting_companion || crate::prefs::get().capsule.enabled().contains(&glance::Item::Agenda) {
+                    d.ensure_events();
+                }
             });
             crate::prefs::listen(hwnd);
             if std::env::var_os("NACRE_TEST_SEND").is_some() {
@@ -1356,21 +1422,28 @@ impl Notch {
 
     fn live(&self) -> Live {
         let running = self.timer.phase == Phase::Running;
+        let s = crate::prefs::get();
+        let active_n = self.glance_active().len();
+        let glance_on = s.notch_idle == 0 && active_n > 0;
+        let now_ms = self.now_ms();
         Live {
-            notification: crate::prefs::get().notch_notifs && self.toast_id.is_some_and(|id| self.notifs.get(id).is_some()),
+            notification: s.notch_notifs && self.toast_id.is_some_and(|id| self.notifs.get(id).is_some()),
             prayer_alert: self.prayer_alert.is_some(),
             media: self.has_media,
             playing: self.playing,
             lyric_line: self.lyr.as_ref().is_some_and(|l| l.synced),
-            lyrics_on: crate::prefs::get().lyrics_compact && self.lyrics_open,
+            lyrics_on: s.lyrics_compact && self.lyrics_open,
             // When media is active, the Detached Timer Pill displays the countdown on the right
             // so Live Lyrics / Now Playing stays intact in the main capsule.
-            timer_left_s: (running && !self.has_media).then(|| self.timer.remaining_secs(self.now_ms())),
+            timer_left_s: (running && !self.has_media).then(|| self.timer.remaining_secs(now_ms)),
             charging_fresh: self.charging_fresh,
             shelf: self.shelf.len(),
-            glance: crate::prefs::get().notch_idle == 0,
-            download: (crate::prefs::get().notch_downloads && (self.dl.is_some() || self.dl_done.is_some())) || self.send_compact().is_some(),
-            wide_music: crate::prefs::get().notch_idle == 2,
+            glance: glance_on,
+            glance_pair: glance_on && self.glance_pair(active_n),
+            download: (s.notch_downloads && (self.dl.is_some() || self.dl_done.is_some())) || self.send_compact().is_some(),
+            wide_music: s.notch_idle == 2,
+            pill: self.pills.current(now_ms).is_some(),
+            meeting: self.upcoming_meeting().is_some(),
         }
     }
 
@@ -1509,8 +1582,12 @@ impl Notch {
                 }
             }
         }
-        if got && self.mode == Mode::Open(Tab::Todo) {
-            self.render();
+        if got {
+            if self.mode == Mode::Open(Tab::Todo) {
+                self.render();
+            } else {
+                self.refresh();
+            }
         }
     }
 
@@ -2005,8 +2082,114 @@ impl Notch {
         })
     }
 
-    fn glance_items(&self) -> Vec<glance::Item> {
-        glance::items(self.battery.is_some())
+    fn refresh_glance_data(&mut self) {
+        if let Some(now) = sys::cpu_times() {
+            if let Some(prev) = self.cpu_prev {
+                self.cpu_pct = Some(nacre_core::widgets::cpu_percent(prev, now));
+            }
+            self.cpu_prev = Some(now);
+        }
+        self.ram_pct = sys::memory_load();
+        self.wifi_ssid = nacre_platform::wifi::link().map(|l| l.0);
+    }
+
+    fn next_agenda_text(&self) -> Option<String> {
+        let now = nacre_platform::time::local_now();
+        let today = (now.year, now.month, now.day);
+        let now_min = now.hour * 60 + now.minute;
+        let (d, Some(list)) = self.cal_events.as_ref()? else { return None };
+        if *d != today {
+            return None;
+        }
+        let ev = list.iter().find(|e| e.minute.is_some_and(|m| m + e.minutes.max(1) > now_min))?;
+        let m = ev.minute?;
+        Some(format!("{:02}:{:02} {}", m / 60, m % 60, ev.title))
+    }
+
+    fn upcoming_meeting(&self) -> Option<(nacre_platform::agenda::Event, nacre_core::quick::When)> {
+        if !crate::prefs::get().meeting_companion {
+            return None;
+        }
+        let now = nacre_platform::time::local_now();
+        let today = (now.year, now.month, now.day);
+        let (d, Some(list)) = self.cal_events.as_ref()? else { return None };
+        if *d != today {
+            return None;
+        }
+        let slots: Vec<(usize, nacre_core::quick::Slot)> = list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let start = e.minute?;
+                Some((
+                    i,
+                    nacre_core::quick::Slot {
+                        title: e.title.clone(),
+                        start,
+                        minutes: e.minutes.max(15),
+                        link: e.link.clone(),
+                    },
+                ))
+            })
+            .collect();
+        let raw: Vec<nacre_core::quick::Slot> = slots.iter().map(|(_, s)| s.clone()).collect();
+        let (idx, when) = nacre_core::quick::current(&raw, now.hour * 60 + now.minute)?;
+        let orig = slots[idx].0;
+        Some((list[orig].clone(), when))
+    }
+
+    fn on_pill_drain(&mut self) {
+        let msgs: Vec<PillMsg> = PILL_Q.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        let now = self.now_ms();
+        let mut pushed = false;
+        for m in msgs {
+            match m {
+                PillMsg::Push { kind, key, title, sub, linger } => {
+                    self.pills.push(kind, &key, &title, &sub, now, linger);
+                    pushed = true;
+                }
+            }
+        }
+        let pruned = self.pills.prune(now);
+        if let Some(exp) = self.pills.next_expiry() {
+            let wait = (exp - now).max(100) as u32;
+            timer(self.hwnd, T_PILL, wait);
+        } else {
+            kill(self.hwnd, T_PILL);
+        }
+        if pushed && self.vis == Vis::OnDemand && !self.overlap.fullscreen {
+            self.pill_peeking = true;
+        } else if self.pills.current(now).is_none() {
+            self.pill_peeking = false;
+        }
+        if pushed || pruned {
+            self.refresh();
+            self.update_visibility();
+        }
+    }
+
+    fn glance_active(&self) -> Vec<glance::Item> {
+        let s = crate::prefs::get();
+        s.capsule.active(|it| match it {
+            glance::Item::Greeting | glance::Item::Clock | glance::Item::Date => true,
+            glance::Item::Battery => self.battery.is_some(),
+            glance::Item::System => self.cpu_pct.is_some() || self.ram_pct.is_some(),
+            glance::Item::Wifi => self.wifi_ssid.as_ref().is_some_and(|n| !n.is_empty()),
+            glance::Item::Agenda => self.next_agenda_text().is_some(),
+        })
+    }
+
+    fn glance_pair(&self, active_len: usize) -> bool {
+        crate::prefs::get().capsule_layout == glance::Layout::Split && active_len >= 2
+    }
+
+    fn glance_shown(&self) -> Vec<(glance::Item, String)> {
+        let act = self.glance_active();
+        let pair = self.glance_pair(act.len());
+        glance::shown(&act, self.glance_idx, pair)
+            .into_iter()
+            .map(|it| (it, self.glance_text(it)))
+            .collect()
     }
 
     fn glance_text(&self, item: glance::Item) -> String {
@@ -2026,11 +2209,18 @@ impl Notch {
                 format!("{}, {} {}", days[wd], now.day, month)
             }
             glance::Item::Battery => self.battery.map_or(String::new(), |(p, _)| format!("{p}%")),
+            glance::Item::System => glance::system_text(self.cpu_pct, self.ram_pct),
+            glance::Item::Wifi => self.wifi_ssid.clone().unwrap_or_default(),
+            glance::Item::Agenda => self.next_agenda_text().unwrap_or_default(),
         }
     }
 
     fn sync_glance(&self) {
-        if self.look == state::look(Mode::Rest, Some(state::Activity::Glance)) {
+        let act = self.glance_active();
+        let pair = self.look.view == View::Compact(state::Activity::GlancePair);
+        let rest = matches!(self.look.view, View::Compact(state::Activity::Glance | state::Activity::GlancePair)) && !self.look.peek;
+        let live_data = act.iter().any(|i| matches!(i, glance::Item::System | glance::Item::Clock));
+        if rest && (glance::turns(act.len(), pair) > 1 || live_data) {
             let ms = std::env::var("NACRE_GLANCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(glance::ROTATE_MS);
             timer(self.hwnd, T_GLANCE, ms);
         } else {
@@ -2039,7 +2229,14 @@ impl Notch {
     }
 
     fn rotate_glance(&mut self) {
-        let n = self.glance_items().len();
+        self.refresh_glance_data();
+        let act = self.glance_active();
+        let n = glance::turns(act.len(), self.glance_pair(act.len()));
+        if n <= 1 {
+            self.glance_idx = 0;
+            self.refresh();
+            return;
+        }
         self.glance_idx = glance::next(self.glance_idx, n);
         self.sync_adaptive_size();
         self.retire_content(120);
@@ -2144,14 +2341,23 @@ impl Notch {
                 z.w = z.w.min(cap);
             }
             View::Compact(state::Activity::Glance) => {
-                let items = self.glance_items();
-                let item = items[self.glance_idx.min(items.len() - 1)];
-                let text = self.glance_text(item);
-                let text_px = self.paint.measure_dwrite(&text, 12.5, 600).max(self.paint.measure(&text, 12.5, 600));
-                let chrome_px = if item == glance::Item::Greeting { 40.0 * self.dpi } else { 66.0 * self.dpi };
-                let cap = max_safe.min(290.0 * self.dpi);
-                z.w = state::adaptive_compact_w(text_px, chrome_px, min_w, cap) + peek_extra;
-                z.w = z.w.min(cap);
+                if let Some((item, text)) = self.glance_shown().into_iter().next() {
+                    let text_px = self.paint.measure_dwrite(&text, 12.5, 600).max(self.paint.measure(&text, 12.5, 600));
+                    let chrome_px = if item == glance::Item::Greeting { 46.0 * self.dpi } else { 70.0 * self.dpi };
+                    let cap = max_safe.min(290.0 * self.dpi);
+                    z.w = state::adaptive_compact_w(text_px, chrome_px, min_w, cap) + peek_extra;
+                    z.w = z.w.min(cap);
+                }
+            }
+            View::Compact(state::Activity::GlancePair) => {
+                let shown = self.glance_shown();
+                if shown.len() >= 2 {
+                    let w0 = self.paint.measure_dwrite(&shown[0].1, 12.0, 600).max(self.paint.measure(&shown[0].1, 12.0, 600));
+                    let w1 = self.paint.measure_dwrite(&shown[1].1, 12.0, 600).max(self.paint.measure(&shown[1].1, 12.0, 600));
+                    let cap = max_safe.min(360.0 * self.dpi);
+                    z.w = state::adaptive_compact_w(w0 + w1, 108.0 * self.dpi, 260.0 * self.dpi, cap) + peek_extra;
+                    z.w = z.w.min(cap);
+                }
             }
             View::Compact(state::Activity::Notification) => {
                 if let Some(n) = self.toast_id.and_then(|id| self.notifs.get(id)) {
@@ -2407,11 +2613,6 @@ impl Notch {
             let _ = k.RemoveAll();
         }
         self.regions.clear();
-        let f = Frame { x0: self.x0(), w: self.size.w, h: self.size.h };
-        let now_ms = self.now_ms();
-        let items = self.glance_items();
-        let item = items[self.glance_idx.min(items.len() - 1)];
-        let glance = (self.look.view == View::Compact(state::Activity::Glance)).then(|| (item, self.glance_text(item)));
         self.live_vis = views::Live::default();
         if self.mode == Mode::Open(Tab::Shelf) {
             self.load_shelf_icons();
@@ -2422,6 +2623,27 @@ impl Notch {
         if self.has_media && self.art.is_none() {
             self.ensure_app_icon();
         }
+        let f = Frame { x0: self.x0(), w: self.size.w, h: self.size.h };
+        let now_ms = self.now_ms();
+        let glance = if matches!(self.look.view, View::Compact(state::Activity::Glance | state::Activity::GlancePair)) {
+            self.glance_shown()
+        } else {
+            Vec::new()
+        };
+        let pill = (self.look.view == View::Compact(state::Activity::Pill))
+            .then(|| self.pills.current(now_ms))
+            .flatten()
+            .map(|p| views::PillView { kind: p.kind, title: &p.title, sub: &p.sub });
+        let meeting_holder = (self.look.view == View::Compact(state::Activity::Meeting))
+            .then(|| self.upcoming_meeting())
+            .flatten();
+        let meeting = meeting_holder.as_ref().map(|(ev, when)| views::MeetingView {
+            title: &ev.title,
+            when: *when,
+            link: ev.link.is_some(),
+            cam: self.privacy.1,
+            mic: self.privacy.0,
+        });
         let cal_date = self.cal_date();
         let events = match &self.cal_events {
             Some((d, Some(list))) if *d == cal_date => views::Events::List(list),
@@ -2505,6 +2727,8 @@ impl Notch {
             timer: &self.timer,
             now_ms,
             glance,
+            pill,
+            meeting,
             media,
             lyrics,
             lyrics_open: self.lyrics_open,
@@ -3401,7 +3625,7 @@ impl Notch {
     }
 
     fn on_compact_action(&self, x: f32, y: f32) -> bool {
-        self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::OpenTimerPill | Action::OpenPrayer))
+        self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::OpenTimerPill | Action::OpenPrayer | Action::MeetingJoin))
             || (self.look.view == View::Compact(state::Activity::Player)
                 && self.regions.iter().any(|r| r.hit(x, y) && matches!(r.action, Action::PlayPause | Action::Next | Action::Prev)))
             || (self.look.view == View::Compact(state::Activity::Notification)
@@ -3538,6 +3762,13 @@ impl Notch {
                 self.prayer_peeking = false;
                 self.dispatch(Event::Click);
                 self.dispatch(Event::SelectTab(Tab::Prayer));
+            }
+            Action::MeetingJoin => {
+                if let Some((ev, _)) = self.upcoming_meeting() {
+                    if let Some(link) = ev.link {
+                        nacre_platform::launch::open(&link);
+                    }
+                }
             }
             Action::SendDone => self.stop_send(),
             Action::CalDay(n) => {
@@ -4022,7 +4253,7 @@ impl Notch {
             starting: self.starting,
             fullscreen: self.overlap.fullscreen,
             revealing: self.notif_peeking
-                || (!self.overlap.fullscreen && self.prayer_peeking)
+                || (!self.overlap.fullscreen && (self.prayer_peeking || self.pill_peeking))
                 || auto_hide_lyrics_reveal,
         };
         self.off || should_hide(self.vis, &inputs)
@@ -4200,6 +4431,11 @@ impl Notch {
         self.publish_notch();
         self.sync_download_watch();
         self.sync_notif_watch();
+        self.refresh_glance_data();
+        self.sync_glance();
+        if (s.meeting_companion || s.capsule.enabled().contains(&glance::Item::Agenda)) && self.cal_events.is_none() {
+            self.ensure_events();
+        }
         if let Mode::Open(cur) = self.mode {
             if !s.notch_tab_visible(cur) {
                 self.mode = Mode::Open(s.default_notch_tab());
@@ -4491,14 +4727,22 @@ impl Notch {
                     self.update_scrub_in_place();
                 }
             }
+            T_PILL => {
+                self.on_pill_drain();
+            }
             T_MINUTE => {
                 self.check_prayer_alerts();
+                self.refresh_glance_data();
+                if crate::prefs::get().meeting_companion || crate::prefs::get().capsule.enabled().contains(&glance::Item::Agenda) {
+                    let stale = self.cal_fetched_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(300));
+                    if stale && self.cal_sel == 0 {
+                        self.ensure_events();
+                    }
+                }
                 if sys::battery() != self.battery {
                     self.on_power();
-                } else if self.look.view == View::Compact(state::Activity::Glance)
-                    || (matches!(self.mode, Mode::Open(_)) && !self.focus.is_active())
-                {
-                    self.render();
+                } else {
+                    self.refresh();
                 }
                 timer(self.hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
             }
@@ -4793,6 +5037,41 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let (_, snap) = d.prayer_snapshot();
                 d.show_prayer_alert(snap.next, snap.next_time_min, nacre_core::notch::prayer::AlertKind::Before5);
             });
+            LRESULT(0)
+        }
+        WM_PILL => {
+            with(hwnd, |d| d.on_pill_drain());
+            LRESULT(0)
+        }
+        WM_DEVICECHANGE_MSG => {
+            let ev = wp.0 as u32;
+            if ev == 0x8000 || ev == 0x8004 {
+                let lang = crate::prefs::get().lang;
+                for l in nacre_platform::devices::volume_letters(lp.0) {
+                    let label = nacre_platform::devices::drive_label(l);
+                    let title = if label.is_empty() {
+                        match lang {
+                            nacre_core::i18n::Lang::Id => "Flashdisk".to_string(),
+                            nacre_core::i18n::Lang::En => "USB drive".to_string(),
+                        }
+                    } else {
+                        label
+                    };
+                    let state = match (ev == 0x8000, lang) {
+                        (true, nacre_core::i18n::Lang::En) => "connected",
+                        (false, nacre_core::i18n::Lang::En) => "removed",
+                        (true, nacre_core::i18n::Lang::Id) => "tersambung",
+                        (false, nacre_core::i18n::Lang::Id) => "dilepas",
+                    };
+                    push_pill(
+                        nacre_core::notch::pills::Kind::Device,
+                        &format!("drive:{l}:\\"),
+                        &title,
+                        &format!("({l}:) {state}"),
+                        Some(nacre_core::notch::pills::DEVICE_MS),
+                    );
+                }
+            }
             LRESULT(0)
         }
         WM_START_DRAGOUT => {

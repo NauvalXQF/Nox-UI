@@ -7,6 +7,7 @@ pub mod json;
 pub mod lrclib;
 pub mod lyrics;
 pub mod notif;
+pub mod pills;
 pub mod prayer;
 pub mod shade;
 pub mod shelf;
