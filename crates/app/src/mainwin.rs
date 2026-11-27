@@ -75,6 +75,15 @@ fn open_settings() {
     }
 }
 
+pub fn request_quit() {
+    let h = MAIN.load(Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), WM_COMMAND, WPARAM(ID_QUIT), LPARAM(0));
+        }
+    }
+}
+
 pub fn relaunch() {
     let Ok(exe) = std::env::current_exe() else { return };
     let exe_str = exe.to_string_lossy().to_string();

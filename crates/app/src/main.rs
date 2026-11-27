@@ -23,6 +23,7 @@ mod paths;
 mod popup;
 mod strip;
 mod topmost;
+mod updater;
 mod macshortcuts;
 mod single_instance;
 
@@ -230,6 +231,7 @@ fn main() {
         widgets::open_gallery();
     }
     services::init();
+    updater::init();
     let _hud = if args.no_hud { None } else { hud::Hud::create(&host, args.glass).ok() };
     if _hud.is_some() {
         mediakeys::install();

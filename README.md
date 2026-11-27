@@ -51,12 +51,21 @@ all drawn with frosted glass materials and springy GPU‑composited animations.
 
 It is a single lightweight native program: no Electron, no WebView, no background telemetry services, no account required. At idle it uses roughly **15 MB** of private memory.
 
-### 🆕 What’s New in NOX v0.5.1
+### 🆕 What’s New in NOX v0.6.0
+
+- **Auto‑Updater (`NauvalXQF/Nox-UI`)**: checks GitHub Releases automatically or on demand from *Settings → General → About*, verifies the package **SHA‑256** checksum, extracts `NOX-vX.Y.Z-win64.zip`, and applies updates in 1 click via `Install-NOX.cmd` (preserving Windows Sparse Package Identity & WinRT notifications).
+- **Productivity Suite**: **Focus Sessions** inside the Notch Timer tab (Work / Study / Reading / Custom presets, ±5 min steppers, 7‑day stats chart, restart persistence, Detached Timer Pill preserved), **Clipboard Stack** in Quick Search (image thumbnails, HEX/RGB color swatches, persistent Pins), **Quick Actions** in Shelf & Drop Zones (50% image resize, JPG/PNG conversion, ZIP compression, Clipboard QR card), and **Screen Color Picker** (`cw`).
+- **Modular Capsule, Device Pills & Meeting Companion**: 7 reorderable Capsule idle modules (Greeting, Clock, Date, Battery, CPU/RAM, Wi‑Fi, Next Event) with Rotate / Side‑by‑Side layouts and accent decor, live **Bluetooth & USB Device Pills**, and **Meeting Companion** (10‑min countdown, live mic/cam dots, 1‑click Join for Google Calendar & Windows Calendar).
+- **Multi‑Monitor, Per‑App Rail & Visual Customization**: per‑monitor brightness (DDC/CI + software gamma fallback) & screen placement, per‑app Rail menus + Smart Rail with Notch‑zone bezel exclusion, Quick/Calm reveal sensitivity, 6 theme presets, UI font selection, 4 live music visualizer styles (compact & expanded), and Reduce Motion.
+
+<details>
+<summary><b>In NOX v0.5.1</b></summary>
 
 - **Zero‑Blink Auto‑Hide Notch & Top‑Down Z‑Order**: eliminated the 1‑frame blink when hovering into Auto‑hide Notch on high‑refresh displays (e.g. 120Hz) by arming leave‑grace before state dispatch, clamping bezel‑edge hit‑testing against spring micro‑overshoot, committing emerging pose before `ShowWindow`, and applying Z‑order strictly top‑down so the Rail never briefly jumps above the Notch.
 - **Precision Touchpad Tab Swipe Fix**: refined `SwipeLatch` inertia absorption and finger‑lift jitter immunity so swiping from Media Player to Alerts never accidentally skips to Shelf.
 - **High‑DPI Quick Panel Auto‑Fit & Chrome/Chromium PWA Deck Support**: Quick Panel automatically scales proportionally on high‑DPI / compact screens (such as `1920×1200 @ 150%`), and Chrome / Brave / Vivaldi / Opera PWAs (`_crx_*`) now appear as separate pinned/running apps in the Deck and Rail with native window icons.
 - **Notch Polish & Multi‑Source Lyrics**: continuous liquid Notch ↔ Capsule morphing, multi‑source synced lyrics (BetterLyrics TTML primary + LRCLIB + NetEase + Lyrics.ovh), configurable lyric lead time (`0s – 1s`), full‑bleed bottom‑up OLED compact lyrics glow, default 80% Notch corner roundness, and fixed empty‑player lyrics toggle crash.
+</details>
 
 <details>
 <summary><b>In NOX v0.5.0</b></summary>
@@ -113,7 +122,7 @@ Use only the Notch with your normal taskbar, only the Deck, only the Rail — an
 
 > Requires **Windows 11** (build 22000 or newer), 64‑bit.
 
-Download **`NOX-v0.5.1-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
+Download **`NOX-v0.6.0-win64.zip`** from the **[Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest)** page.
 
 | Mode | How to run | Best for |
 |---|---|---|
@@ -122,7 +131,7 @@ Download **`NOX-v0.5.1-win64.zip`** from the **[Releases](https://github.com/Nau
 
 ### Step‑by‑step (Recommended)
 
-1. Download **`NOX-v0.5.1-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
+1. Download **`NOX-v0.6.0-win64.zip`** from [Releases](https://github.com/NauvalXQF/Nox-UI/releases/latest).
 2. Extract the entire ZIP to any folder (do not run directly from inside the ZIP preview).
 3. Double‑click **`Install-NOX.cmd`**.
    - If Windows SmartScreen warns about an unsigned app, click **More info → Run anyway** (only for official releases from this repository).
@@ -306,7 +315,7 @@ cargo test --workspace
 powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
 ```
 
-The packaging script builds the release workspace and generates `dist\NOX-v0.5.1-win64\` and `dist\NOX-v0.5.1-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
+The packaging script builds the release workspace and generates `dist\NOX-v0.6.0-win64\` and `dist\NOX-v0.6.0-win64.zip` (complete with `Install-NOX.cmd`, `Uninstall-NOX.cmd`, and Sparse Package manifest).
 
 ### 4. Safe isolated testing
 
