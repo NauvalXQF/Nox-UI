@@ -326,11 +326,21 @@ pub fn request_reconfigure() {
     }
 }
 
+static PENDING_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static LAST_FG: AtomicIsize = AtomicIsize::new(0);
+
 fn on_windows_changed() {
     let h = DOCK_HWND.load(Ordering::Relaxed);
-    if h != 0 {
-        timer(HWND(h as *mut _), TIMER_WINDOWS, 120);
+    if h == 0 {
+        return;
     }
+    let fg = tracker::external_foreground();
+    let switched = LAST_FG.swap(fg, Ordering::Relaxed) != fg;
+    let mut g = PENDING_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let since = *g.get_or_insert_with(std::time::Instant::now);
+    drop(g);
+    let ms = nacre_core::visibility::settle::delay(since.elapsed().as_millis() as u64, switched);
+    timer(HWND(h as *mut _), TIMER_WINDOWS, ms as u32);
 }
 
 pub fn reveal_for(ms: u32) {
@@ -781,6 +791,8 @@ impl Dock {
     }
 
     pub fn refresh_windows(&mut self) {
+        kill(self.hwnd, TIMER_WINDOWS);
+        *PENDING_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let wins = enumerate::list(std::process::id());
         tracker::prune(focus::is_alive);
         let mut items = merge(&self.pins, &wins, &tracker::recent, &mut self.seen);
@@ -1907,7 +1919,7 @@ impl Dock {
 
     fn on_strip_enter(&mut self) {
         if self.opts.mode != Mode::Always {
-            timer(self.hwnd, TIMER_DWELL, 200);
+            timer(self.hwnd, TIMER_DWELL, crate::prefs::get().dock_reveal.deck_ms());
         }
     }
 

@@ -82,6 +82,31 @@ impl Popup {
         }
     }
 
+    pub fn slide_down(&self, comp: &Compositor) {
+        use windows::Foundation::TimeSpan;
+        use windows::UI::Composition::{CompositionEasingFunction, CompositionObject};
+        use windows_core::{Interface, HSTRING};
+        let go = || -> Result<()> {
+            let root = &self.surface.root;
+            let h = self.rect.3 as f32;
+            root.SetScale(windows_numerics::Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+            let ease: CompositionEasingFunction =
+                comp.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?.cast()?;
+            let dur = TimeSpan { Duration: 150 * 10_000 };
+            let o = comp.CreateScalarKeyFrameAnimation()?;
+            o.InsertKeyFrame(0.0, 0.0)?;
+            o.InsertKeyFrameWithEasingFunction(1.0, 1.0, &ease)?;
+            o.SetDuration(dur)?;
+            root.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from("Opacity"), &o)?;
+            let off = comp.CreateVector3KeyFrameAnimation()?;
+            off.InsertKeyFrame(0.0, windows_numerics::Vector3 { X: 0.0, Y: -(h * 0.28).min(18.0), Z: 0.0 })?;
+            off.InsertKeyFrameWithEasingFunction(1.0, windows_numerics::Vector3 { X: 0.0, Y: 0.0, Z: 0.0 }, &ease)?;
+            off.SetDuration(dur)?;
+            root.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from("Offset"), &off)
+        };
+        let _ = go();
+    }
+
     pub fn fade_in(&self, comp: &Compositor, from_top: bool) {
         use windows::Foundation::TimeSpan;
         use windows::UI::Composition::{CompositionEasingFunction, CompositionObject};

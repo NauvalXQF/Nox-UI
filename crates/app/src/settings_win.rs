@@ -19,7 +19,6 @@ use windows::UI::Composition::{
     CompositionStretch, Compositor, ContainerVisual, SpriteVisual,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -119,6 +118,8 @@ enum Action {
     Takeover,
     Dock(Behavior),
     Notch(Behavior),
+    Rail(Behavior),
+    Reveal(u8, nacre_core::settings::Reveal),
     Screen(u8, nacre_core::display::Screen),
     Theme(Theme),
     Lang(Lang),
@@ -304,7 +305,8 @@ pub fn open(comp: &Compositor) {
 fn create(comp: &Compositor) -> windows_core::Result<()> {
     let glass = side_glass(prefs::glass((10.0, 10.0), SIDE_RADIUS, Role::Themed));
     let mut popup = Popup::new(comp, w!("AbraSettings"), Some(proc), WINDOW_EX_STYLE(0), glass)?;
-    let dpi = unsafe { GetDpiForWindow(popup.hwnd) }.max(96) as f32 / 96.0;
+    let mon = nacre_platform::monitors::under_cursor();
+    let dpi = mon.scale();
     let gfx = Gfx::shared(comp)?;
     let tier = {
         let c = sys::conditions();
@@ -356,11 +358,11 @@ fn create(comp: &Compositor) -> windows_core::Result<()> {
         frame_key: (0, 0, false),
     });
     win.render();
-    let (sw, sh) = sys::screen_size();
+    let (sw, sh) = mon.area.size();
     let (w, h) = (win.size.0 as i32, win.size.1 as i32);
     let top = ((sh - h) / 2).clamp(12, (sh - h - 12).max(12));
-    log::line("settings", &format!("layar={sw}x{sh} jendela={w}x{h} atas={top}"));
-    win.popup.set_rect((sw - w) / 2, top, w, h)?;
+    log::line("settings", &format!("layar={sw}x{sh}@({},{}) jendela={w}x{h} atas={top}", mon.area.x, mon.area.y));
+    win.popup.set_rect(mon.area.x + (sw - w) / 2, mon.area.y + top, w, h)?;
     win.frame();
     win.popup.show();
     prefs::listen(win.popup.hwnd);
@@ -985,6 +987,22 @@ impl Win {
                 g.1.insert(at, row);
             }
         }
+        if part < 3 {
+            use nacre_core::settings::Reveal;
+            let cur = match part {
+                0 => s.dock_reveal,
+                1 => s.rail_reveal,
+                _ => s.notch_reveal,
+            };
+            let row = RowDef::Seg(
+                prefs::tr("Kepekaan"),
+                Reveal::ALL.iter().map(|r| (prefs::tr(r.title()), Action::Reveal(part, *r))).collect(),
+                Reveal::ALL.iter().position(|r| *r == cur).unwrap_or(0),
+            );
+            if let Some(g) = groups.first_mut() {
+                g.1.push(row);
+            }
+        }
         groups
     }
 
@@ -1244,6 +1262,19 @@ impl Win {
                     None,
                     vec![
                         RowDef::Toggle(prefs::tr("Aktifkan Rail"), s.menubar, Action::MenuBarOn),
+                        RowDef::Seg(
+                            prefs::tr("Perilaku"),
+                            vec![
+                                (prefs::tr("Tetap"), Action::Rail(Behavior::Fixed)),
+                                (prefs::tr("Menimpa"), Action::Rail(Behavior::Overlay)),
+                                (prefs::tr("Pintar"), Action::Rail(Behavior::Smart)),
+                            ],
+                            match s.rail {
+                                Behavior::Fixed => 0,
+                                Behavior::Overlay => 1,
+                                Behavior::Smart | Behavior::AutoHide => 2,
+                            },
+                        ),
                         RowDef::Seg(
                             prefs::tr("Latar Rail"),
                             vec![(prefs::tr("Transparan"), Action::BarStyle(0)), (prefs::tr("Terang"), Action::BarStyle(1)), (prefs::tr("Gelap"), Action::BarStyle(2)), (prefs::tr("Material"), Action::BarStyle(3))],
@@ -2339,6 +2370,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::Takeover) => prefs::update(|s| s.takeover = !s.takeover),
                 Some(Action::Dock(b)) => prefs::update(|s| s.dock = b),
                 Some(Action::Notch(b)) => prefs::update(|s| s.notch = b),
+                Some(Action::Rail(b)) => prefs::update(|s| s.rail = b),
+                Some(Action::Reveal(part, r)) => prefs::update(|s| match part {
+                    0 => s.dock_reveal = r,
+                    1 => s.rail_reveal = r,
+                    _ => s.notch_reveal = r,
+                }),
                 Some(Action::Screen(part, v)) => prefs::update(|s| match part {
                     0 => s.deck_screen = v,
                     1 => s.rail_screen = v,

@@ -496,6 +496,9 @@ const EN: &[(&str, &str)] = &[
     ("Layar 2", "Display 2"),
     ("Layar 3", "Display 3"),
     ("Layar 4", "Display 4"),
+    ("Kepekaan", "Sensitivity"),
+    ("Cepat", "Quick"),
+    ("Santai", "Relaxed"),
 ];
 
 pub fn is_known(src: &str) -> bool {
