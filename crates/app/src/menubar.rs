@@ -17,7 +17,6 @@ use windows::UI::Color;
 use windows::UI::Composition::{CompositionDrawingSurface, CompositionStretch, Compositor, ContainerVisual, SpriteVisual};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Vector2, Vector3};
@@ -62,6 +61,7 @@ struct Bar {
     gfx: Gfx,
     dpi: f32,
     screen: (i32, i32),
+    area: nacre_core::display::Area,
     h: i32,
     layer: ContainerVisual,
     capsule: SpriteVisual,
@@ -181,6 +181,10 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
     Ok(())
 }
 
+fn rail_monitor() -> nacre_core::display::Monitor {
+    nacre_platform::monitors::target(prefs::get().rail_screen)
+}
+
 fn apply_prefs() {
     let want = prefs::get().menubar;
     let have = BAR.with(|c| c.borrow().is_some());
@@ -220,12 +224,14 @@ fn apply_prefs() {
                 let _ = DestroyWindow(b.popup.hwnd);
             }
         }
+        services::set_rail_area(None);
         log::line("menubar", "dihancurkan");
         services::post_island(crate::prefs::WM_PREFS);
     } else if want {
         let rescale = with_bar(|b| {
-            let want_dpi = unsafe { GetDpiForWindow(b.popup.hwnd) }.max(96) as f32 / 96.0 * prefs::ui_scale();
-            (want_dpi - b.dpi).abs() > 0.01
+            let mon = rail_monitor();
+            let want_dpi = mon.scale() * prefs::ui_scale();
+            (want_dpi - b.dpi).abs() > 0.01 || mon.area != b.area
         })
         .unwrap_or(false);
         if rescale {
@@ -249,17 +255,19 @@ fn apply_prefs() {
 }
 
 fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
-    let screen = sys::screen_size();
+    let mon = rail_monitor();
+    let area = mon.area;
+    let screen = area.size();
     let glass = prefs::apply(nacre_ui::glass::GlassParams::dark((10.0, 10.0), 0.0), &prefs::bar_look());
     let mut popup = Popup::new(comp, w!("AbraMenuBar"), Some(bar_proc), WINDOW_EX_STYLE(0), glass)?;
-    let dpi = unsafe { GetDpiForWindow(popup.hwnd) }.max(96) as f32 / 96.0 * prefs::ui_scale();
-    let h = services::notch_layout().rail_h.unwrap_or((26.0 * dpi).round() as i32);
+    let dpi = mon.scale() * prefs::ui_scale();
+    let h = services::notch_layout_on(area).rail_h.unwrap_or((26.0 * dpi).round() as i32);
     let tier = {
         let c = sys::conditions();
         if !c.transparency || c.battery_saver || c.remote_session { Tier::Solid } else { Tier::Full }
     };
     let _ = popup.panel.set_tier(tier);
-    popup.set_rect(0, 0, screen.0, h)?;
+    popup.set_rect(area.x, area.y, screen.0, h)?;
     popup.panel.set_radius(0.0)?;
     popup.panel.set_rect(0.0, 0.0, 0.0, 0.0)?;
     let bg = comp.CreateSpriteVisual()?;
@@ -273,10 +281,11 @@ fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
     let layer = comp.CreateContainerVisual()?;
     popup.content.Children()?.InsertAtTop(&layer)?;
     let gfx = Gfx::shared(comp)?;
-    let menu = Menu::new(comp, popup.hwnd, dpi, screen, tier)?;
+    let menu = Menu::new(comp, popup.hwnd, dpi, tier)?;
     popup.show();
     services::listen_gfx(popup.hwnd);
-    shell::appbar::reserve_top(popup.hwnd, screen.0, h);
+    services::set_rail_area(Some(area));
+    shell::appbar::reserve_top(popup.hwnd, area, h);
     unsafe {
         SetTimer(Some(popup.hwnd), T_CLOCK, time::ms_to_next_minute().max(200), None);
         SetTimer(Some(popup.hwnd), T_STATUS, 60_000, None);
@@ -336,6 +345,7 @@ fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
         gfx,
         dpi,
         screen,
+        area,
         h,
         layer,
         capsule,
@@ -517,25 +527,29 @@ impl Bar {
     }
 
     fn on_reconfigure(&mut self) {
-        let screen = sys::screen_size();
-        let dpi = unsafe { GetDpiForWindow(self.popup.hwnd) }.max(96) as f32 / 96.0 * prefs::ui_scale();
-        let changed = screen != self.screen || (dpi - self.dpi).abs() > 0.01;
+        let mon = rail_monitor();
+        let area = mon.area;
+        let screen = area.size();
+        let dpi = mon.scale() * prefs::ui_scale();
+        let changed = area != self.area || (dpi - self.dpi).abs() > 0.01;
         if changed {
             log::line("menubar", &format!("rekonfigurasi {}x{}@{} -> {}x{}@{}", self.screen.0, self.screen.1, self.dpi, screen.0, screen.1, dpi));
             self.close_menu();
+            self.area = area;
             self.screen = screen;
             self.dpi = dpi;
-            self.h = services::notch_layout().rail_h.unwrap_or((26.0 * dpi).round() as i32);
-            let _ = self.popup.set_rect(0, 0, self.screen.0, self.h);
+            self.h = services::notch_layout_on(area).rail_h.unwrap_or((26.0 * dpi).round() as i32);
+            let _ = self.popup.set_rect(area.x, area.y, self.screen.0, self.h);
             let _ = self.popup.panel.set_radius(0.0);
-            if let Ok(m) = Menu::new(&self.comp, self.popup.hwnd, dpi, screen, self.tier) {
+            if let Ok(m) = Menu::new(&self.comp, self.popup.hwnd, dpi, self.tier) {
                 self.menu = m;
             }
             self.cache.clear();
             self.apply_bg();
         }
         self.refresh_tier();
-        shell::appbar::reserve_top(self.popup.hwnd, self.screen.0, self.h);
+        services::set_rail_area(Some(self.area));
+        shell::appbar::reserve_top(self.popup.hwnd, self.area, self.h);
         unsafe {
             SetTimer(Some(self.popup.hwnd), T_CLOCK, time::ms_to_next_minute().max(200), None);
         }
@@ -547,7 +561,7 @@ impl Bar {
     fn on_gfx_reset(&mut self) {
         self.close_menu();
         self.cache.clear();
-        if let Ok(m) = Menu::new(&self.comp, self.popup.hwnd, self.dpi, self.screen, self.tier) {
+        if let Ok(m) = Menu::new(&self.comp, self.popup.hwnd, self.dpi, self.tier) {
             self.menu = m;
         }
         self.render();
@@ -558,7 +572,12 @@ impl Bar {
         if fg == 0 || fg == self.popup.hwnd.0 as isize {
             return;
         }
-        let ov = nacre_platform::wins::overlap::evaluate(fg, std::process::id(), (0, 0, self.screen.0, self.h), self.screen);
+        let ov = nacre_platform::wins::overlap::evaluate(
+            fg,
+            std::process::id(),
+            (self.area.x, self.area.y, self.area.right(), self.area.y + self.h),
+            self.area,
+        );
         let full = ov.fullscreen && !prefs::get().above_fullscreen;
         if full != self.fullscreen {
             self.fullscreen = full;
@@ -649,7 +668,7 @@ impl Bar {
         let left_essential: f32 = left.iter().take(4).map(|it| it.width).sum::<f32>() + 12.0 * d;
         let right_total: f32 = right.iter().map(|it| it.width).sum::<f32>() + 12.0 * d;
         services::set_bar_occupied(left_essential.ceil() as i32, right_total.ceil() as i32);
-        let nl = services::notch_layout();
+        let nl = services::notch_layout_on(self.area);
         let gap = nl.gap.map(|(l, r)| Gap { left: l as f32, right: r as f32 });
         let (l, r) = lay::layout(self.screen.0 as f32, 6.0 * d, &left, &right, gap);
         self.left = l;
@@ -657,10 +676,10 @@ impl Bar {
         let want_h = nl.rail_h.unwrap_or((26.0 * d).round() as i32);
         if want_h != self.h {
             self.h = want_h;
-            let _ = self.popup.set_rect(0, 0, self.screen.0, self.h);
+            let _ = self.popup.set_rect(self.area.x, self.area.y, self.screen.0, self.h);
             let _ = self.popup.panel.set_radius(0.0);
             self.apply_bg();
-            shell::appbar::reserve_top(self.popup.hwnd, self.screen.0, self.h);
+            shell::appbar::reserve_top(self.popup.hwnd, self.area, self.h);
         }
     }
 
@@ -1092,8 +1111,8 @@ impl Bar {
         log::line("menubar", &format!("buka menu {id}: {} item", items.len()));
         let Some((x, _)) = self.rect_of(id) else { return };
         let (comp, gfx) = (self.comp.clone(), &self.gfx);
-        let top = self.h;
-        let r = self.menu.show_below(&comp, gfx, items, x as i32, top);
+        let top = self.area.y + self.h;
+        let r = self.menu.show_below(&comp, gfx, items, self.area.x + x as i32, top);
         if let Err(e) = &r {
             log::line("menubar", &format!("menu gagal: {e}"));
         }
@@ -1248,7 +1267,7 @@ impl Bar {
             CTRL => {
                 self.close_menu();
                 nacre_platform::wins::focus::dismiss_shell_flyout();
-                crate::controlcenter::toggle(self.h);
+                crate::controlcenter::toggle(self.area.y + self.h);
             }
             SEARCH => {
                 crate::controlcenter::close();
@@ -1258,7 +1277,7 @@ impl Bar {
                 crate::controlcenter::close();
                 nacre_platform::wins::focus::dismiss_shell_flyout();
                 if let Some((x, _)) = self.rect_of(WIFI) {
-                    crate::netmenu::show(&self.comp, crate::netmenu::Which::Wifi, crate::netmenu::Anchor::Below(x as i32, self.h), self.dpi);
+                    crate::netmenu::show(&self.comp, crate::netmenu::Which::Wifi, crate::netmenu::Anchor::Below(self.area.x + x as i32, self.area.y + self.h), self.dpi);
                 }
             }
             BATT => launch::open("ms-settings:batterysaver"),
@@ -1440,7 +1459,7 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             if wp.0 == 3 {
                 crate::netmenu::test_toggle_others();
             } else if wp.0 == 4 || wp.0 == 8 {
-                let h = with_bar(|b| b.h).unwrap_or(30);
+                let h = with_bar(|b| b.area.y + b.h).unwrap_or(30);
                 crate::controlcenter::toggle(h);
             } else if wp.0 == 5 {
                 crate::controlcenter::test_open_picker();
@@ -1452,7 +1471,7 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 let which = if wp.0 == 1 || wp.0 == 6 { crate::netmenu::Which::Bluetooth } else { crate::netmenu::Which::Wifi };
                 with_bar(|b| {
                     if let Some((x, _)) = b.rect_of(WIFI) {
-                        crate::netmenu::show(&b.comp, which, crate::netmenu::Anchor::Below(x as i32, b.h), b.dpi);
+                        crate::netmenu::show(&b.comp, which, crate::netmenu::Anchor::Below(b.area.x + x as i32, b.area.y + b.h), b.dpi);
                     }
                 });
             }

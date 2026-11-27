@@ -319,7 +319,7 @@ impl Net {
         if self.menu.is_none() {
             let c = sys::conditions();
             let tier = if !c.transparency || c.battery_saver || c.remote_session { Tier::Solid } else { Tier::Full };
-            self.menu = Menu::new(&self.comp, self.hwnd, self.dpi, sys::screen_size(), tier).ok().map(|mut m| {
+            self.menu = Menu::new(&self.comp, self.hwnd, self.dpi, tier).ok().map(|mut m| {
                 m.set_card(Some(CARD));
                 m
             });

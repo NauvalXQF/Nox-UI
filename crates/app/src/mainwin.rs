@@ -18,6 +18,8 @@ pub const ID_QUIT: usize = 2;
 const ID_SETTINGS: usize = 3;
 const TIMER_EXIT: usize = 1;
 const TIMER_TRAY: usize = 3;
+const TIMER_DISPLAY: usize = 4;
+const TIMER_FAKE_MON: usize = 5;
 const TIMER_GPU: usize = 6;
 const TRAY_TRIES: u32 = 30;
 
@@ -25,6 +27,7 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static MAIN: AtomicIsize = AtomicIsize::new(0);
 static TRAY_LEFT: AtomicU32 = AtomicU32::new(TRAY_TRIES);
 static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static FAKE_SPEC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 thread_local! {
     static COMP: std::cell::RefCell<Option<windows::UI::Composition::Compositor>> = const { std::cell::RefCell::new(None) };
@@ -34,11 +37,36 @@ pub fn set_compositor(c: &windows::UI::Composition::Compositor) {
     COMP.with(|s| *s.borrow_mut() = Some(c.clone()));
 }
 
-pub fn start_gpu_watch(hwnd: HWND) {
+fn fake_spec() -> Option<String> {
+    std::env::var_os("NACRE_FAKE_MONITORS_FILE")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+}
+
+pub fn watch_displays(hwnd: HWND) {
     let _ = STARTED.set(std::time::Instant::now());
     unsafe {
         SetTimer(Some(hwnd), TIMER_GPU, 15_000, None);
     }
+    if let Some(s) = fake_spec() {
+        if let Ok(mut g) = FAKE_SPEC.lock() {
+            *g = s;
+        }
+        unsafe {
+            SetTimer(Some(hwnd), TIMER_FAKE_MON, 1000, None);
+        }
+    }
+}
+
+fn displays_changed() {
+    let list = nacre_platform::monitors::list();
+    let desc: Vec<String> = list
+        .iter()
+        .map(|m| format!("{}x{}@({},{}) dpi={}{}", m.area.w, m.area.h, m.area.x, m.area.y, m.dpi, if m.primary { " utama" } else { "" }))
+        .collect();
+    nacre_platform::log::line("layar", &format!("{} layar: {}", list.len(), desc.join(", ")));
+    crate::services::refresh_brightness();
+    crate::prefs::broadcast();
 }
 
 fn open_settings() {
@@ -233,6 +261,25 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
                 WM_LBUTTONUP => open_settings(),
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_DISPLAYCHANGE => {
+            SetTimer(Some(hwnd), TIMER_DISPLAY, 800, None);
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == TIMER_DISPLAY => {
+            let _ = KillTimer(Some(hwnd), TIMER_DISPLAY);
+            displays_changed();
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == TIMER_FAKE_MON => {
+            if let (Some(now), Ok(mut g)) = (fake_spec(), FAKE_SPEC.lock()) {
+                if *g != now {
+                    *g = now;
+                    drop(g);
+                    displays_changed();
+                }
             }
             LRESULT(0)
         }

@@ -87,12 +87,30 @@ pub fn set_brightness(frac: f32) {
     }
 }
 
+pub fn refresh_brightness() {
+    if let Some(tx) = BRIGHT.get() {
+        let _ = tx.send(brightness::Cmd::Refresh);
+    }
+}
+
 use std::sync::atomic::AtomicI32;
 static NOTCH_L: AtomicI32 = AtomicI32::new(0);
 static NOTCH_R: AtomicI32 = AtomicI32::new(0);
 static NOTCH_H: AtomicI32 = AtomicI32::new(0);
+static NOTCH_AREA: std::sync::Mutex<Option<nacre_core::display::Area>> = std::sync::Mutex::new(None);
+static RAIL_AREA: std::sync::Mutex<Option<nacre_core::display::Area>> = std::sync::Mutex::new(None);
 static BAR_LEFT_W: AtomicI32 = AtomicI32::new(0);
 static BAR_RIGHT_W: AtomicI32 = AtomicI32::new(0);
+
+pub fn set_rail_area(a: Option<nacre_core::display::Area>) {
+    if let Ok(mut g) = RAIL_AREA.lock() {
+        *g = a;
+    }
+}
+
+pub fn rail_area() -> Option<nacre_core::display::Area> {
+    RAIL_AREA.lock().ok().and_then(|g| *g)
+}
 
 pub fn set_bar_occupied(left_px: i32, right_px: i32) {
     BAR_LEFT_W.store(left_px.max(0), Ordering::Relaxed);
@@ -109,13 +127,14 @@ pub struct NotchLayout {
     pub rail_h: Option<i32>,
 }
 
-pub fn set_notch_layout(gap: Option<(i32, i32)>, rail_h: Option<i32>) {
+pub fn set_notch_layout(gap: Option<(i32, i32)>, rail_h: Option<i32>, area: nacre_core::display::Area) {
     let (l, r) = gap.unwrap_or((0, 0));
     let h = rail_h.unwrap_or(0).max(0);
+    let prev_area = NOTCH_AREA.lock().ok().and_then(|mut g| g.replace(area));
     let prev_l = NOTCH_L.swap(l, Ordering::Relaxed);
     let prev_r = NOTCH_R.swap(r, Ordering::Relaxed);
     let prev_h = NOTCH_H.swap(h, Ordering::Relaxed);
-    if (prev_l, prev_r, prev_h) == (l, r, h) {
+    if (prev_l, prev_r, prev_h) == (l, r, h) && prev_area == Some(area) {
         return;
     }
     let bar = BAR.load(Ordering::Relaxed);
@@ -126,12 +145,16 @@ pub fn set_notch_layout(gap: Option<(i32, i32)>, rail_h: Option<i32>) {
     }
 }
 
-pub fn notch_layout() -> NotchLayout {
+pub fn notch_layout_on(area: nacre_core::display::Area) -> NotchLayout {
+    let same = NOTCH_AREA.lock().ok().and_then(|g| *g) == Some(area);
+    if !same {
+        return NotchLayout { gap: None, rail_h: None };
+    }
     let l = NOTCH_L.load(Ordering::Relaxed);
     let r = NOTCH_R.load(Ordering::Relaxed);
     let h = NOTCH_H.load(Ordering::Relaxed);
     NotchLayout {
-        gap: (r > l).then_some((l, r)),
+        gap: (r > l).then_some((l - area.x, r - area.x)),
         rail_h: (h > 0).then_some(h),
     }
 }

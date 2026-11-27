@@ -96,11 +96,12 @@ pub fn raise_all() {
         return;
     }
     if !crate::prefs::get().above_fullscreen {
+        let mon = nacre_platform::monitors::primary().area;
         let ov = nacre_platform::wins::overlap::evaluate(
             fg,
             std::process::id(),
             (0, 0, 0, 0),
-            nacre_platform::sys::screen_size(),
+            mon,
         );
         if ov.fullscreen {
             return;

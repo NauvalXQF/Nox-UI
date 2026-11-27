@@ -237,14 +237,13 @@ pub struct Menu {
     content: windows::UI::Composition::ContainerVisual,
     highlight: SpriteVisual,
     dpi: f32,
-    screen: (i32, i32),
     card: Option<Card>,
     closing: bool,
     pop_at: Vector3,
 }
 
 impl Menu {
-    pub fn new(comp: &Compositor, dock_hwnd: HWND, dpi: f32, screen: (i32, i32), tier: Tier) -> Result<Menu> {
+    pub fn new(comp: &Compositor, dock_hwnd: HWND, dpi: f32, tier: Tier) -> Result<Menu> {
         let mut popup = Popup::new(comp, w!("NacreMenu"), Some(proc), WINDOW_EX_STYLE(0), crate::prefs::glass((10.0, 10.0), 12.0 * dpi, crate::prefs::Role::Dark))?;
         let _ = popup.panel.set_tier(tier);
         let highlight = comp.CreateSpriteVisual()?;
@@ -256,7 +255,7 @@ impl Menu {
         let content = comp.CreateContainerVisual()?;
         popup.content.Children()?.InsertAtTop(&highlight)?;
         popup.content.Children()?.InsertAtTop(&content)?;
-        Ok(Menu { target: dock_hwnd, popup, content, highlight, dpi, screen, card: None, closing: false, pop_at: Vector3 { X: 0.0, Y: 0.0, Z: 0.0 } })
+        Ok(Menu { target: dock_hwnd, popup, content, highlight, dpi, card: None, closing: false, pop_at: Vector3 { X: 0.0, Y: 0.0, Z: 0.0 } })
     }
 
     pub fn set_card(&mut self, card: Option<Card>) {
@@ -461,8 +460,9 @@ impl Menu {
         let (wi, hi) = (w.ceil() as i32, h.ceil() as i32);
         let anchor = x;
         let x = if right_aligned { x - wi } else { x };
-        let px = x.clamp(4, (self.screen.0 - wi - 4).max(4));
-        let py = if above { (y - hi).clamp(4, (self.screen.1 - hi - 4).max(4)) } else { y.clamp(0, (self.screen.1 - hi - 4).max(0)) };
+        let mon = nacre_platform::monitors::at(anchor, if above { y - 1 } else { y }).area;
+        let px = mon.clamp_x(x, wi, 4);
+        let py = if above { mon.clamp_y(y - hi, hi, 4) } else { y.clamp(mon.y, (mon.bottom() - hi - 4).max(mon.y)) };
         self.popup.set_rect(px, py, wi, hi)?;
         self.popup.panel.set_radius(radius)?;
         self.highlight.SetOpacity(0.0)?;

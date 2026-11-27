@@ -61,11 +61,10 @@ pub struct Preview {
     popup: Popup,
     cells: Vec<Cell>,
     dpi: f32,
-    screen_w: i32,
 }
 
 impl Preview {
-    pub fn new(comp: &Compositor, dock_hwnd: HWND, dpi: f32, screen_w: i32) -> Result<Preview> {
+    pub fn new(comp: &Compositor, dock_hwnd: HWND, dpi: f32) -> Result<Preview> {
         TARGET.store(dock_hwnd.0 as isize, Ordering::Relaxed);
         let popup = Popup::new(
             comp,
@@ -74,7 +73,7 @@ impl Preview {
             WINDOW_EX_STYLE(0),
             crate::prefs::glass((10.0, 10.0), 18.0 * dpi, crate::prefs::Role::Dark),
         )?;
-        Ok(Preview { popup, cells: vec![], dpi, screen_w })
+        Ok(Preview { popup, cells: vec![], dpi })
     }
 
     pub fn panel_mut(&mut self) -> &mut nacre_ui::glass::GlassPanel {
@@ -104,7 +103,7 @@ impl Preview {
         let (pad, gap, title_h) = ((12.0 * d) as i32, (6.0 * d) as i32, (20.0 * d) as i32);
         let w = pad + n as i32 * (tw + pad);
         let h = pad + th + gap + title_h + pad;
-        let x = (cx - w / 2).clamp(4, (self.screen_w - w - 4).max(4));
+        let x = nacre_platform::monitors::at(cx, bottom - 1).area.clamp_x(cx - w / 2, w, 4);
         self.popup.set_rect(x, bottom - h, w, h)?;
         self.popup.panel.set_radius(18.0 * d)?;
         self.popup.show();

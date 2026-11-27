@@ -1,5 +1,6 @@
 pub mod appcat;
 pub mod controls;
+pub mod display;
 pub mod dock;
 pub mod i18n;
 pub mod genie;

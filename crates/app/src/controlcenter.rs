@@ -17,7 +17,6 @@ use windows::UI::Color;
 use windows::UI::Composition::{CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionStretch, Compositor, ContainerVisual, SpriteVisual};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -564,8 +563,12 @@ impl Cc {
             }
         };
         let mut popup = popup;
-        let (sw, sh) = nacre_platform::sys::screen_size();
-        let raw_dpi = unsafe { GetDpiForWindow(popup.hwnd) }.max(96) as f32 / 96.0 * prefs::ui_scale();
+        let mon_info = crate::services::rail_area()
+            .and_then(|a| nacre_platform::monitors::list().into_iter().find(|m| m.area == a))
+            .unwrap_or_else(nacre_platform::monitors::under_cursor);
+        let mon = mon_info.area;
+        let (sw, _sh) = mon.size();
+        let raw_dpi = mon_info.scale() * prefs::ui_scale();
         let sizes = self.sizes.clone();
         let (placed, base_rows) = controls::layout_sized(&self.layout, &|k| *sizes.get(&k).unwrap_or(&k.default_size()));
         let rows = if self.edit { base_rows + 2 } else { base_rows };
@@ -576,7 +579,7 @@ impl Cc {
         let ph_dp = top_dp + gh_dp + 14.0 + 34.0 + 4.0;
         // Scale down proportionally on compact/high-DPI laptops (e.g. 1920x1080 @ 150% or 1366x768)
         // so Quick Panel stays balanced and never collides with the bottom Deck.
-        let avail_h = (sh - self.top).max(280) as f32 * if self.edit { 0.84 } else { 0.65 };
+        let avail_h = (mon.bottom() - self.top).max(280) as f32 * if self.edit { 0.84 } else { 0.65 };
         let avail_w = sw.max(400) as f32 * 0.30;
         let fit = (avail_h / (ph_dp * raw_dpi).max(1.0))
             .min(avail_w / (gw_dp * raw_dpi).max(1.0))
@@ -587,7 +590,7 @@ impl Cc {
         let btn_h = 34.0 * dpi;
         let top = top_dp * dpi;
         let (pw, ph) = (gw, ph_dp * dpi);
-        let x = (sw as f32 - pw - 10.0 * dpi) as i32;
+        let x = (mon.right() as f32 - pw - 10.0 * dpi) as i32;
         let y = self.top + (6.0 * dpi) as i32;
         let m = (8.0 * dpi).round();
         PAD.store(m.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -1098,7 +1101,7 @@ impl Cc {
         let (rect, dpi, hwnd) = (p.popup.rect, p.dpi, p.popup.hwnd);
         let Some(gfx) = self.gfx.as_ref() else { return };
         if self.menu.is_none() {
-            match Menu::new(&self.comp, hwnd, dpi, nacre_platform::sys::screen_size(), Tier::Full) {
+            match Menu::new(&self.comp, hwnd, dpi, Tier::Full) {
                 Ok(m) => self.menu = Some(m),
                 Err(_) => return,
             }

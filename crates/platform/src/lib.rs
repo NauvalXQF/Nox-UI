@@ -23,6 +23,7 @@ pub mod loopback;
 pub mod lyrics;
 pub mod media;
 pub mod menus;
+pub mod monitors;
 pub mod media_fake;
 pub mod log;
 pub mod notifications;

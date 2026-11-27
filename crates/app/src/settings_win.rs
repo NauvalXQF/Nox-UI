@@ -119,6 +119,7 @@ enum Action {
     Takeover,
     Dock(Behavior),
     Notch(Behavior),
+    Screen(u8, nacre_core::display::Screen),
     Theme(Theme),
     Lang(Lang),
     Tab(u8),
@@ -261,6 +262,24 @@ struct Win {
 
 thread_local! {
     static WIN: RefCell<Option<Box<Win>>> = const { RefCell::new(None) };
+}
+
+fn screen_row(part: u8, cur: nacre_core::display::Screen) -> Option<RowDef> {
+    use nacre_core::display::Screen;
+    let count = nacre_platform::monitors::count().min(nacre_core::display::MAX_SCREENS as usize);
+    if count <= 1 && cur == Screen::Primary {
+        return None;
+    }
+    let names = ["Layar 1", "Layar 2", "Layar 3", "Layar 4"];
+    let mut opts = vec![(prefs::tr("Utama"), Action::Screen(part, Screen::Primary))];
+    for (i, n) in names.iter().enumerate().take(count.max(1)) {
+        opts.push((prefs::tr(n), Action::Screen(part, Screen::Nth(i as u8 + 1))));
+    }
+    let sel = match cur {
+        Screen::Primary => 0,
+        Screen::Nth(n) => (n as usize).min(opts.len() - 1),
+    };
+    Some(RowDef::Seg(prefs::tr("Tampilkan di"), opts, sel))
 }
 
 fn close_button(d: f32) -> (f32, f32, f32) {
@@ -951,6 +970,25 @@ impl Win {
     }
 
     fn page(&self, page: u8) -> Vec<(Option<&'static str>, Vec<RowDef>)> {
+        let mut groups = self.page_rows(page);
+        let s = prefs::get();
+        let (part, cur, at) = match page {
+            1 => (0u8, s.deck_screen, 2),
+            2 => (2, s.notch_screen, 3),
+            3 => (1, s.rail_screen, 1),
+            7 => (3, s.widget_screen, 0),
+            _ => return groups,
+        };
+        if let Some(row) = screen_row(part, cur) {
+            if let Some(g) = groups.first_mut() {
+                let at = at.min(g.1.len());
+                g.1.insert(at, row);
+            }
+        }
+        groups
+    }
+
+    fn page_rows(&self, page: u8) -> Vec<(Option<&'static str>, Vec<RowDef>)> {
         let s = prefs::get();
         let behaviors = |dock: bool| -> Vec<(&'static str, Action)> {
             let mut list = vec![
@@ -2301,6 +2339,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::Takeover) => prefs::update(|s| s.takeover = !s.takeover),
                 Some(Action::Dock(b)) => prefs::update(|s| s.dock = b),
                 Some(Action::Notch(b)) => prefs::update(|s| s.notch = b),
+                Some(Action::Screen(part, v)) => prefs::update(|s| match part {
+                    0 => s.deck_screen = v,
+                    1 => s.rail_screen = v,
+                    2 => s.notch_screen = v,
+                    _ => s.widget_screen = v,
+                }),
                 Some(Action::Theme(t)) => prefs::update(|s| s.theme = t),
                 Some(Action::Lang(l)) => prefs::update(|s| s.lang = l),
                 Some(Action::WinShadow) => prefs::update(|s| s.win_shadow = !s.win_shadow),
