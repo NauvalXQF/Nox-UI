@@ -32,6 +32,7 @@ pub struct Gfx {
 }
 
 static RESET_CB: Mutex<Option<fn()>> = Mutex::new(None);
+static REPLACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_on_reset(cb: fn()) {
     *RESET_CB.lock().unwrap_or_else(|e| e.into_inner()) = Some(cb);
@@ -57,6 +58,15 @@ impl Gfx {
         Ok(g)
     }
 
+    pub fn lost(&self) -> bool {
+        unsafe { self.inner.borrow().device.GetDeviceRemovedReason().is_err() }
+    }
+
+    pub fn shared_lost() -> bool {
+        REPLACED.load(std::sync::atomic::Ordering::Relaxed)
+            || SHARED.with(|c| c.borrow().as_ref().is_some_and(|g| g.lost()))
+    }
+
     pub fn new(comp: &Compositor) -> Result<Gfx> {
         Self::with_hardware(comp, std::env::var_os("NACRE_GFX").is_some_and(|v| v == "hw"))
     }
@@ -70,6 +80,7 @@ impl Gfx {
             CompositionGraphicsDevice,
             RenderingDeviceReplacedEventArgs,
         >::new(move |_, _| {
+            REPLACED.store(true, std::sync::atomic::Ordering::Relaxed);
             notify_reset();
             Ok(())
         }));
@@ -91,6 +102,7 @@ impl Gfx {
                 CompositionGraphicsDevice,
                 RenderingDeviceReplacedEventArgs,
             >::new(move |_, _| {
+                REPLACED.store(true, std::sync::atomic::Ordering::Relaxed);
                 notify_reset();
                 Ok(())
             }));
@@ -98,6 +110,7 @@ impl Gfx {
         }
         g.device = device;
         g.ctx = ctx;
+        REPLACED.store(false, std::sync::atomic::Ordering::Relaxed);
         drop(g);
         notify_reset();
         Ok(())

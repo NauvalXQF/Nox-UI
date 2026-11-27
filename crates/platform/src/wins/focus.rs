@@ -8,6 +8,44 @@ fn h(x: isize) -> HWND {
     HWND(x as *mut _)
 }
 
+pub fn is_flyout_host(exe: &str) -> bool {
+    exe.rsplit(['\\', '/']).next().is_some_and(|n| n.eq_ignore_ascii_case("ShellExperienceHost.exe"))
+}
+
+pub fn shell_flyout_in_front() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut pid));
+        pid != 0 && super::enumerate::exe_path_of_pid(pid).is_some_and(|p| is_flyout_host(&p))
+    }
+}
+
+pub fn dismiss_shell_flyout() -> bool {
+    if shell_flyout_in_front() {
+        crate::keys::chord(&[0x1B]);
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod flyout_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_windows_flyout_host_counts() {
+        assert!(is_flyout_host(r"C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"));
+        assert!(is_flyout_host("shellexperiencehost.exe"));
+        assert!(!is_flyout_host(r"C:\Windows\explorer.exe"));
+        assert!(!is_flyout_host(r"C:\Tools\NotShellExperienceHost.exe"));
+        assert!(!is_flyout_host(""));
+    }
+}
+
 pub fn is_alive(hwnd: isize) -> bool {
     unsafe { IsWindow(Some(h(hwnd))).as_bool() }
 }

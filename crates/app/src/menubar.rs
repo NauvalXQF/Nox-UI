@@ -1247,16 +1247,25 @@ impl Bar {
         match id {
             CTRL => {
                 self.close_menu();
+                nacre_platform::wins::focus::dismiss_shell_flyout();
                 crate::controlcenter::toggle(self.h);
             }
-            SEARCH => crate::spotlight::toggle(),
+            SEARCH => {
+                crate::controlcenter::close();
+                crate::spotlight::toggle();
+            }
             WIFI => {
+                crate::controlcenter::close();
+                nacre_platform::wins::focus::dismiss_shell_flyout();
                 if let Some((x, _)) = self.rect_of(WIFI) {
                     crate::netmenu::show(&self.comp, crate::netmenu::Which::Wifi, crate::netmenu::Anchor::Below(x as i32, self.h), self.dpi);
                 }
             }
             BATT => launch::open("ms-settings:batterysaver"),
-            CLOCK => keys::chord(&[keys::WIN, 0x4E]),
+            CLOCK => {
+                crate::controlcenter::close();
+                keys::chord(&[keys::WIN, 0x4E]);
+            }
             _ => {}
         }
     }
@@ -1272,7 +1281,7 @@ impl Bar {
             101 => launch::open("ms-settings:"),
             102 => launch::open("ms-windows-store:"),
             103 => crate::settings_win::open(&self.comp),
-            104 => launch::run("taskmgr.exe", ""),
+            104 => launch::show("taskmgr.exe", ""),
             105 => crate::launchpad::toggle(),
             106 => crate::mission::toggle(),
             110 => confirm_power("Tidur sekarang?", "rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0"),

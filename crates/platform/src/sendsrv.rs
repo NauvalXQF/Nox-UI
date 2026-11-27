@@ -228,7 +228,7 @@ pub fn start(paths: &[String], en: bool, notify: impl Fn() + Send + Sync + 'stat
             });
         }
     });
-    crate::log::line("kirim", &format!("sesi dimulai: {n} berkas, port {}", addr.port()));
+    crate::log::line("kirim", &format!("sesi dimulai: {n} berkas, {ip}:{}", addr.port()));
     Ok(Server { url: link, progress: rx, stop, addr })
 }
 

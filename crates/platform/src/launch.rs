@@ -84,6 +84,40 @@ pub fn toggle_start(was_open_at_press: bool) {
     }
 }
 
+pub fn properties(path: &str) -> bool {
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW};
+    let file = HSTRING::from(path);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_INVOKEIDLIST,
+        lpVerb: w!("properties"),
+        lpFile: windows::core::PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info).is_ok() }
+}
+
+pub fn run_visible(file: &str, params: &str) -> bool {
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let r = ShellExecuteW(None, w!("open"), &HSTRING::from(file), &HSTRING::from(params), None, SW_SHOWNORMAL);
+        r.0 as isize > 32
+    }
+}
+
+pub fn show(file: &str, params: &str) {
+    let file = system_tool(file);
+    let params = params.to_string();
+    off_thread(move || unsafe {
+        let r = ShellExecuteW(None, w!("open"), &HSTRING::from(file.as_str()), &HSTRING::from(params.as_str()), None, SW_SHOWNORMAL);
+        if r.0 as isize <= 32 {
+            crate::log::line("launch", &format!("{file} gagal dibuka (kode {})", r.0 as isize));
+        }
+    });
+}
+
 pub fn run(file: &str, params: &str) {
     let file = system_tool(file);
     let params = params.to_string();
