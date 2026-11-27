@@ -105,6 +105,30 @@ impl Timer {
         }
     }
 
+    /// Steps the timer duration up or down when idle/finished:
+    /// 5-minute steps at `>= 5 min` (1-minute fine steps below 5 min, and always 1-minute steps on Short Break).
+    pub fn adjust_step(&mut self, up: bool) {
+        if !matches!(self.phase, Phase::Idle | Phase::Finished) {
+            return;
+        }
+        let mins = (self.duration / 60).max(1);
+        let next = match self.stage {
+            PomodoroStage::ShortBreak(_) => {
+                if up { (mins + 1).min(30) } else { (mins - 1).max(1) }
+            }
+            PomodoroStage::Focus(_) | PomodoroStage::LongBreak => {
+                if up {
+                    if mins < 5 { mins + 1 } else { (mins + 5).min(MAX_SECONDS / 60) }
+                } else if mins > 5 {
+                    (mins - 5).max(5)
+                } else {
+                    (mins - 1).max(1)
+                }
+            }
+        };
+        self.set_duration(next * 60);
+    }
+
     pub fn start(&mut self, now_ms: i64) {
         match self.phase {
             Phase::Finished => {
@@ -187,6 +211,22 @@ impl Timer {
             + POMO_LONG_BREAK_SECS)
             / 60
     }
+
+    pub fn round_total_mins(&self) -> i64 {
+        let focus = match self.stage {
+            PomodoroStage::Focus(_) => self.duration,
+            _ => POMO_FOCUS_SECS,
+        };
+        let short_brk = match self.stage {
+            PomodoroStage::ShortBreak(_) => self.duration,
+            _ => POMO_SHORT_BREAK_SECS,
+        };
+        let long_brk = match self.stage {
+            PomodoroStage::LongBreak => self.duration,
+            _ => POMO_LONG_BREAK_SECS,
+        };
+        (POMO_SESSIONS as i64 * focus + (POMO_SESSIONS as i64 - 1) * short_brk + long_brk) / 60
+    }
 }
 
 pub fn format_mmss(secs: i64) -> String {
@@ -245,6 +285,17 @@ mod tests {
         t.start(0);
         t.adjust(60);
         assert_eq!(t.duration, 360, "tidak boleh berubah saat berjalan");
+
+        let mut p = Timer::new(25 * 60);
+        p.adjust_step(true);
+        assert_eq!(p.duration, 30 * 60);
+        p.adjust_step(false);
+        assert_eq!(p.duration, 25 * 60);
+        let mut s = Timer::new(5 * 60);
+        s.adjust_step(false);
+        assert_eq!(s.duration, 4 * 60);
+        s.adjust_step(true);
+        assert_eq!(s.duration, 5 * 60);
     }
 
     #[test]

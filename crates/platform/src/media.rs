@@ -327,8 +327,32 @@ fn build(session: Option<&GlobalSystemMediaTransportControlsSession>, art_state:
     let (position_ms, duration_ms) = match s.GetTimelineProperties() {
         Ok(t) => {
             let ms = |r: windows::core::Result<windows::Foundation::TimeSpan>| r.map(|v| v.Duration / 10_000).unwrap_or(0);
-            let (start, end, pos) = (ms(t.StartTime()), ms(t.EndTime()), ms(t.Position()));
-            (pos, (end - start).max(0))
+            let (start, end, mut pos) = (ms(t.StartTime()), ms(t.EndTime()), ms(t.Position()));
+            let dur = (end - start).max(0);
+            // SMTC `Position()` is a checkpoint recorded at `LastUpdatedTime()`; while playing,
+            // add the elapsed time since that checkpoint so refreshes never snap the timeline backward.
+            if playing {
+                const UNIX_EPOCH_FT_100NS: i64 = 116_444_736_000_000_000;
+                if let Ok(lu) = t.LastUpdatedTime() {
+                    if lu.UniversalTime > UNIX_EPOCH_FT_100NS {
+                        if let Ok(since_unix) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            let now_ft = (since_unix.as_millis() as i64)
+                                .saturating_mul(10_000)
+                                .saturating_add(UNIX_EPOCH_FT_100NS);
+                            let elapsed_ms = (now_ft - lu.UniversalTime) / 10_000;
+                            if elapsed_ms > 0 && elapsed_ms < 4 * 3_600_000 {
+                                pos = pos.saturating_add(elapsed_ms);
+                            }
+                        }
+                    }
+                }
+            }
+            if dur > 0 {
+                pos = pos.clamp(0, dur);
+            } else {
+                pos = pos.max(0);
+            }
+            (pos, dur)
         }
         Err(_) => (0, 0),
     };

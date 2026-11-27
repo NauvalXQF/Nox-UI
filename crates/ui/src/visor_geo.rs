@@ -75,14 +75,14 @@ fn bezier(c1: Vector2, c2: Vector2, end: Vector2) -> D2D1_BEZIER_SEGMENT {
 /// with continuous `top_radius` from `0.0` to `radius` so Notch <-> Pill morphs seamlessly).
 pub fn visor_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
     let top_r = if ear > 0.3 { 0.0 } else { radius };
-    build_visor_multi(x0, y0, w, h, radius, top_r, ear, None, false)
+    build_visor_multi(x0, y0, w, h, radius, top_r, ear, 0.0, None, false)
 }
 
 /// Builds the `1px` inner-rim stroke `CompositionPath`. In Visor mode (`ear > 0.3`), the figure is
 /// left **open** along the top (`y = 0`) so no horizontal seam line is ever drawn at the screen bezel.
 pub fn visor_rim_path(x0: f32, y0: f32, w: f32, h: f32, radius: f32, ear: f32) -> Result<CompositionPath> {
     let top_r = if ear > 0.3 { 0.0 } else { radius };
-    build_visor_multi(x0, y0, w, h, radius, top_r, ear, None, true)
+    build_visor_multi(x0, y0, w, h, radius, top_r, ear, 0.0, None, true)
 }
 
 /// Builds a filled `CompositionPath` containing the primary Visor capsule plus an optional
@@ -99,7 +99,27 @@ pub fn visor_path_with_detached(
     ear: f32,
     detached: Option<(f32, f32, f32, f32, f32, f32)>,
 ) -> Result<CompositionPath> {
-    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, detached, false)
+    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, 0.0, detached, false)
+}
+
+/// Builds a filled elevation-shadow mask `CompositionPath`. In bezel-attached Visor mode
+/// (`ear > 0.25`), the mask follows the inner body walls (`x0..x0+w`) extended upward by
+/// `top_cap` above `y0` **without** flaring out to the concave ear tips (`x0 - ew`), so the soft
+/// downward-offset `DropShadow` reaches the top bezel cleanly behind the shoulders while feathering
+/// smoothly to zero at the outer ear tips (zero floating-overhang shadow gap).
+#[allow(clippy::too_many_arguments)]
+pub fn visor_elev_shadow_path_with_detached(
+    x0: f32,
+    y0: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    top_radius: f32,
+    ear: f32,
+    top_cap: f32,
+    detached: Option<(f32, f32, f32, f32, f32, f32)>,
+) -> Result<CompositionPath> {
+    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, top_cap, detached, false)
 }
 
 /// Builds the `1px` inner-rim stroke `CompositionPath` for both the primary Visor capsule and an
@@ -115,7 +135,7 @@ pub fn visor_rim_path_with_detached(
     ear: f32,
     detached: Option<(f32, f32, f32, f32, f32, f32)>,
 ) -> Result<CompositionPath> {
-    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, detached, true)
+    build_visor_multi(x0, y0, w, h, radius, top_radius, ear, 0.0, detached, true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -128,6 +148,7 @@ unsafe fn append_visor_figure(
     radius: f32,
     top_radius: f32,
     ear: f32,
+    top_cap: f32,
     open_top_rim: bool,
 ) {
     let w = w.max(2.0);
@@ -140,6 +161,25 @@ unsafe fn append_visor_figure(
         let r = radius.clamp(0.0, (w * 0.5).min((h - eh).max(0.0)));
 
         let begin = if open_top_rim { D2D1_FIGURE_BEGIN_HOLLOW } else { D2D1_FIGURE_BEGIN_FILLED };
+        if !open_top_rim && top_cap > 0.5 {
+            // Inner-body elevation shadow mask: rises straight along `x0..x0+w` past the bezel so
+            // soft downward-offset depth shadow reaches `y = 0` behind the shoulders without
+            // casting a detached dark overhang beneath the thin outer ear tips (`x0 - ew`).
+            let cap = top_cap * ((ear - 0.25) / 3.75).clamp(0.0, 1.0);
+            sink.BeginFigure(pt(x0, top_y - cap), begin);
+            sink.AddLine(pt(x0, y0 + h - r));
+            if r > 0.5 {
+                sink.AddArc(&arc(x0 + r, y0 + h, r, false));
+            }
+            sink.AddLine(pt(x0 + w - r, y0 + h));
+            if r > 0.5 {
+                sink.AddArc(&arc(x0 + w, y0 + h - r, r, false));
+            }
+            sink.AddLine(pt(x0 + w, top_y - cap));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            return;
+        }
+
         sink.BeginFigure(pt(x0 - ew, top_y), begin);
         // Constant-curvature liquid shoulder (`κ ≈ 0.56` handles): tangent-horizontal at screen bezel,
         // tangent-vertical at notch wall, zero pinched elbow.
@@ -208,6 +248,7 @@ fn build_visor_multi(
     radius: f32,
     top_radius: f32,
     ear: f32,
+    top_cap: f32,
     detached: Option<(f32, f32, f32, f32, f32, f32)>,
     open_top_rim: bool,
 ) -> Result<CompositionPath> {
@@ -216,10 +257,10 @@ fn build_visor_multi(
     let sink = unsafe { path.Open()? };
 
     unsafe {
-        append_visor_figure(&sink, x0, y0, w, h, radius, top_radius, ear, open_top_rim);
+        append_visor_figure(&sink, x0, y0, w, h, radius, top_radius, ear, top_cap, open_top_rim);
         if let Some((tx, tw, th, tr, t_top_r, t_ear)) = detached {
             if tw > 2.0 && th > 2.0 {
-                append_visor_figure(&sink, tx, y0, tw, th, tr, t_top_r, t_ear, open_top_rim);
+                append_visor_figure(&sink, tx, y0, tw, th, tr, t_top_r, t_ear, top_cap, open_top_rim);
             }
         }
         sink.Close()?;

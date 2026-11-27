@@ -44,6 +44,7 @@ static RAIL_L: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(
 static RAIL_R: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MAX);
 static NOTCH_EXCL_L: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static NOTCH_EXCL_R: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static CAPTION_EXCL_L: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MAX);
 const T_CLOCK: usize = 1;
 const T_STATUS: usize = 2;
 const T_APP: usize = 3;
@@ -139,8 +140,9 @@ unsafe extern "system" fn ll_mouse(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         let y = pt.y - RAIL_TOP.load(Ordering::Relaxed);
         let was = RAIL_EDGE.load(Ordering::Relaxed);
         let in_notch = pt.x >= NOTCH_EXCL_L.load(Ordering::Relaxed) && pt.x < NOTCH_EXCL_R.load(Ordering::Relaxed);
+        let in_caption = pt.x >= CAPTION_EXCL_L.load(Ordering::Relaxed);
         let now = if inside && y <= 1 {
-            if was { true } else { !in_notch }
+            if was { true } else { !in_notch && !in_caption }
         } else if !inside || y > RAIL_ZONE.load(Ordering::Relaxed) {
             false
         } else {
@@ -688,6 +690,7 @@ impl Bar {
         RAIL_TOP.store(self.area.y, Ordering::Relaxed);
         RAIL_L.store(self.area.x, Ordering::Relaxed);
         RAIL_R.store(self.area.right(), Ordering::Relaxed);
+        CAPTION_EXCL_L.store((self.area.right() - (160.0 * self.dpi).round() as i32).max(self.area.x), Ordering::Relaxed);
         self.sync_notch_exclusion();
         services::set_rail_area(Some(self.area));
         if mode == Behavior::Fixed {
