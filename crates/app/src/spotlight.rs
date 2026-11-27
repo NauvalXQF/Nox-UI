@@ -71,6 +71,7 @@ enum RKind {
     Action(usize),
     File,
     Clip,
+    ClipImage(u64, u32, u32),
 }
 
 #[derive(Clone)]
@@ -92,6 +93,7 @@ enum HitKind {
     More,
     MoreItem,
     CopyRow(usize),
+    PinRow(usize),
     FType(usize),
 }
 
@@ -100,6 +102,7 @@ enum Run {
     Open(String),
     Action(&'static str),
     Copy(String),
+    CopyImage(u64),
 }
 
 struct Spot {
@@ -261,6 +264,8 @@ fn action_glyph(id: &str) -> (&'static str, [u8; 3]) {
         "calc" => ("\u{E8EF}", [255, 149, 0]),
         "taskmgr" => ("\u{E9D9}", [99, 99, 108]),
         "settings" => ("\u{E713}", [142, 142, 147]),
+        "qr" => ("\u{ED14}", [100, 210, 255]),
+        "pick" => ("\u{EF3C}", [175, 82, 222]),
         _ => ("\u{E74D}", [255, 69, 58]),
     }
 }
@@ -767,12 +772,32 @@ impl Spot {
             }
             Mode::Clipboard => {
                 let ql = q.to_lowercase();
-                for e in clipboard::history() {
-                    if ql.is_empty() || e.text.to_lowercase().contains(&ql) {
-                        let first = e.text.lines().next().unwrap_or("").trim().to_string();
-                        let sub = format!("{} \u{00B7} {} {}", prefs::tr("teks"), prefs::tr("Disalin"), clip_time(e.at));
-                        self.rows.push(Row { kind: RKind::Clip, title: first, sub, path: e.text.clone() });
-                    }
+                let matches = |e: &clipboard::Entry| {
+                    ql.is_empty()
+                        || (e.image.is_none() && e.text.to_lowercase().contains(&ql))
+                        || (e.image.is_some() && prefs::tr("gambar").to_lowercase().contains(&ql))
+                };
+                let pinned: Vec<clipboard::Entry> = clipboard::pins()
+                    .into_iter()
+                    .map(|p| match p {
+                        clipboard::Pin::Text(t) => clipboard::Entry { at: 0, text: t, image: None },
+                        clipboard::Pin::Image { id, w, h } => clipboard::Entry { at: 0, text: String::new(), image: Some((id, w, h)) },
+                    })
+                    .filter(|e| matches(e))
+                    .collect();
+                if !pinned.is_empty() {
+                    self.headers.push((0, prefs::tr("Disematkan").to_string()));
+                }
+                for e in &pinned {
+                    self.rows.push(clip_row(e, prefs::tr("Disematkan").to_string()));
+                }
+                let start = self.rows.len();
+                for e in clipboard::history().into_iter().filter(|e| matches(e) && !clipboard::is_pinned(e)) {
+                    let when = format!("{} {}", prefs::tr("Disalin"), clip_time(e.at));
+                    self.rows.push(clip_row(&e, when));
+                }
+                if !pinned.is_empty() && self.rows.len() > start {
+                    self.headers.push((start, prefs::tr("Terbaru").to_string()));
                 }
             }
         }
@@ -1367,13 +1392,39 @@ impl Spot {
                     self.rect(area, (icx - ic / 2.0, icy - ic / 2.0, ic, ic), 8.0 * d, Color { A: 255, R: col[0], G: col[1], B: col[2] });
                     self.glyph(area, g, icx, icy, 17.0 * d, [255, 255, 255], 1.0);
                 }
-                RKind::Clip => {
-                    self.rect(area, (icx - ic * 0.36, icy - ic / 2.0, ic * 0.72, ic), 4.0 * d, Color { A: 240, R: 250, G: 250, B: 252 });
-                    self.glyph(area, "\u{E8A5}", icx, icy, 14.0 * d, [120, 120, 128], 1.0);
+                RKind::Clip => match nacre_core::clipstack::parse_color(&row.path) {
+                    Some(c) => {
+                        self.rect(area, (icx - ic / 2.0, icy - ic / 2.0, ic, ic), 8.0 * d, Color { A: 70, R: fg[0], G: fg[1], B: fg[2] });
+                        self.rect(area, (icx - ic / 2.0 + 1.5 * d, icy - ic / 2.0 + 1.5 * d, ic - 3.0 * d, ic - 3.0 * d), 7.0 * d, Color { A: 255, R: c[0], G: c[1], B: c[2] });
+                    }
+                    None => {
+                        self.rect(area, (icx - ic * 0.36, icy - ic / 2.0, ic * 0.72, ic), 4.0 * d, Color { A: 240, R: 250, G: 250, B: 252 });
+                        self.glyph(area, "\u{E8A5}", icx, icy, 14.0 * d, [120, 120, 128], 1.0);
+                    }
+                },
+                RKind::ClipImage(id, _, _) => {
+                    let key = format!("clip:{id}");
+                    if !self.thumb_surf.contains_key(&key) {
+                        if let Some(b) = clipboard::thumb(*id) {
+                            if let Ok(s) = self.gfx.surface_from_bgra(b.w, b.h, &b.bgra) {
+                                self.thumb_surf.insert(key.clone(), (s, b.w, b.h));
+                            }
+                        }
+                    }
+                    match self.thumb_surf.get(&key).cloned() {
+                        Some((s, tw, th)) => {
+                            let k = (ic * 1.25 / tw as f32).min(ic / th as f32);
+                            let (iw, ih) = (tw as f32 * k, th as f32 * k);
+                            self.rect(area, (icx - iw / 2.0 - 1.0 * d, icy - ih / 2.0 - 1.0 * d, iw + 2.0 * d, ih + 2.0 * d), 5.0 * d, Color { A: 60, R: fg[0], G: fg[1], B: fg[2] });
+                            self.sprite(area, &s, icx - iw / 2.0, icy - ih / 2.0, iw, ih, 1.0);
+                        }
+                        None => self.glyph(area, "\u{EB9F}", icx, icy, 16.0 * d, fg, 0.7),
+                    }
                 }
             }
             let tx = 22.0 * d + ic + 14.0 * d;
-            let max_w = w - tx - if matches!(row.kind, RKind::Clip) { 64.0 * d } else { 150.0 * d };
+            let clip_row = matches!(row.kind, RKind::Clip | RKind::ClipImage(..));
+            let max_w = w - tx - if clip_row { 96.0 * d } else { 150.0 * d };
             self.text(area, &row.title, tx, icy - 9.0 * d, (15.0 * d).round() as i32, 400, fg, 1.0, max_w);
             if !row.sub.is_empty() {
                 self.text(area, &row.sub, tx, icy + 11.0 * d, (12.0 * d).round() as i32, 400, fg, 0.55, max_w);
@@ -1388,11 +1439,20 @@ impl Spot {
                 self.rect(area, r, 6.0 * d, Color { A: if editing { 80 } else { 36 }, R: fg[0], G: fg[1], B: fg[2] });
                 self.text(area, &label, r.0 + 9.0 * d, icy, cpx, 500, fg, 0.75, cw);
             }
-            if matches!(row.kind, RKind::Clip) {
+            if clip_row {
                 let r: Rect = (w - 48.0 * d, icy - 13.0 * d, 26.0 * d, 26.0 * d);
                 self.rect(area, r, 13.0 * d, Color { A: 30, R: fg[0], G: fg[1], B: fg[2] });
                 self.glyph(area, "\u{E8C8}", r.0 + 13.0 * d, icy, 12.0 * d, fg, 0.8);
                 self.hits.push((r, HitKind::CopyRow(i)));
+                let pinned = row.sub == prefs::tr("Disematkan");
+                let pr: Rect = (w - 80.0 * d, icy - 13.0 * d, 26.0 * d, 26.0 * d);
+                if pinned {
+                    self.rect(area, pr, 13.0 * d, crate::prefs::accent_c(255));
+                } else {
+                    self.rect(area, pr, 13.0 * d, Color { A: 30, R: fg[0], G: fg[1], B: fg[2] });
+                }
+                self.glyph(area, if pinned { "\u{E77A}" } else { "\u{E718}" }, pr.0 + 13.0 * d, icy, 12.0 * d, if pinned { [255, 255, 255] } else { fg }, if pinned { 1.0 } else { 0.8 });
+                self.hits.push((pr, HitKind::PinRow(i)));
             }
             self.hits.push(((0.0, ry, w, row_h), HitKind::Row(i)));
             ry += row_h;
@@ -1406,6 +1466,7 @@ impl Spot {
             RKind::Calc => Run::Nothing,
             RKind::Action(i) => Run::Action(ACTIONS[i].id),
             RKind::Clip => Run::Copy(r.path),
+            RKind::ClipImage(id, _, _) => Run::CopyImage(id),
         }
     }
 
@@ -1476,6 +1537,35 @@ impl Spot {
     }
 }
 
+fn clip_row(e: &clipboard::Entry, sub_tail: String) -> Row {
+    match e.image {
+        Some((id, w, h)) => Row {
+            kind: RKind::ClipImage(id, w, h),
+            title: format!("{} {w}\u{00D7}{h}", prefs::tr("Gambar")),
+            sub: if sub_tail == prefs::tr("Disematkan") {
+                sub_tail
+            } else {
+                format!("{} \u{00B7} {sub_tail}", prefs::tr("gambar"))
+            },
+            path: id.to_string(),
+        },
+        None => {
+            let first = e.text.lines().next().unwrap_or("").trim().to_string();
+            let kind = if nacre_core::clipstack::parse_color(&e.text).is_some() {
+                prefs::tr("warna")
+            } else {
+                prefs::tr("teks")
+            };
+            let sub = if sub_tail == prefs::tr("Disematkan") {
+                sub_tail
+            } else {
+                format!("{kind} \u{00B7} {sub_tail}")
+            };
+            Row { kind: RKind::Clip, title: first, sub, path: e.text.clone() }
+        }
+    }
+}
+
 fn clip_time(at: i64) -> String {
     let now_local = time::local_now();
     let now_secs = (now_local.hour * 3600 + now_local.minute * 60 + now_local.second) as i64;
@@ -1505,6 +1595,27 @@ fn run_action(id: &str) {
         "taskmgr" => launch::show("taskmgr.exe", ""),
         "settings" => launch::open("ms-settings:"),
         "clearclip" => clipboard::clear(),
+        "qr" => {
+            let text = clipboard::paste_text()
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| clipboard::history().into_iter().find(|e| e.image.is_none()).map(|e| e.text))
+                .unwrap_or_default();
+            if !crate::notch::show_qr(&text) {
+                crate::notch::push_pill(nacre_core::notch::pills::Kind::Info, "qr", prefs::tr("Salin teks atau link dulu"), "", Some(5000));
+            }
+        }
+        "pick" => {
+            let (title, sub) = (prefs::tr("Warna disalin").to_string(), prefs::tr("Klik di mana saja untuk mengambil warna").to_string());
+            crate::notch::push_pill(nacre_core::notch::pills::Kind::Info, "pick", &sub, "", Some(4000));
+            nacre_platform::colorpick::pick(move |c| {
+                if let Some(rgb) = c {
+                    let hex = nacre_platform::colorpick::hex(rgb);
+                    clipboard::copy_text(&hex);
+                    crate::notch::push_pill(nacre_core::notch::pills::Kind::Info, &format!("color:{hex}"), &hex, &title, Some(6000));
+                }
+                crate::notch::dismiss_pill("pick");
+            });
+        }
         _ => {}
     }
 }
@@ -1516,6 +1627,9 @@ fn perform(r: Run) {
         Run::Action(id) => run_action(id),
         Run::Copy(t) => {
             clipboard::copy_text(&t);
+        }
+        Run::CopyImage(id) => {
+            clipboard::copy_image(id);
         }
     }
 }
@@ -1829,7 +1943,31 @@ unsafe extern "system" fn spot_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                         s.render();
                         Run::Nothing
                     }
-                    HitKind::CopyRow(i) => s.rows.get(i).map(|r| Run::Copy(r.path.clone())).unwrap_or(Run::Nothing),
+                    HitKind::CopyRow(i) => s
+                        .rows
+                        .get(i)
+                        .map(|r| match r.kind {
+                            RKind::ClipImage(id, _, _) => Run::CopyImage(id),
+                            _ => Run::Copy(r.path.clone()),
+                        })
+                        .unwrap_or(Run::Nothing),
+                    HitKind::PinRow(i) => {
+                        if let Some(r) = s.rows.get(i).cloned() {
+                            let entry = match r.kind {
+                                RKind::Clip => Some(clipboard::Entry { at: 0, text: r.path, image: None }),
+                                RKind::ClipImage(id, w, h) => Some(clipboard::Entry { at: 0, text: String::new(), image: Some((id, w, h)) }),
+                                _ => None,
+                            };
+                            if let Some(e) = entry {
+                                clipboard::toggle_pin(&e);
+                                let sel = s.sel;
+                                s.rebuild_rows();
+                                s.sel = sel.min(s.rows.len().saturating_sub(1));
+                                s.render();
+                            }
+                        }
+                        Run::Nothing
+                    }
                 }
             })
             .unwrap_or(Run::Nothing);

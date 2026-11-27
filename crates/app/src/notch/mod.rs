@@ -69,6 +69,8 @@ const WM_GEMINI: u32 = WM_APP + 31;
 const WM_GTASKS_ACTION: u32 = WM_APP + 32;
 const WM_PRAYER_TEST: u32 = WM_APP + 35;
 const WM_PILL: u32 = WM_APP + 36;
+const WM_QUICKDONE: u32 = WM_APP + 37;
+const WM_SHOWQR: u32 = WM_APP + 38;
 const WM_DEVICECHANGE_MSG: u32 = 0x0219;
 
 const T_DWELL: usize = 1;
@@ -118,6 +120,12 @@ struct SendSess {
     done_at: Option<Instant>,
 }
 
+struct QuickSess {
+    paths: Vec<String>,
+    busy: Option<u8>,
+    status: String,
+}
+
 const WIN_W: f32 = 720.0;
 const WIN_H: f32 = 250.0;
 const SHADOW_PAD_X: f32 = 36.0;
@@ -137,9 +145,12 @@ enum PillMsg {
         sub: String,
         linger: Option<i64>,
     },
+    Dismiss(String),
 }
 
 static PILL_Q: std::sync::Mutex<Vec<PillMsg>> = std::sync::Mutex::new(Vec::new());
+static QUICK_DONE: std::sync::Mutex<Option<Result<Vec<std::path::PathBuf>, String>>> = std::sync::Mutex::new(None);
+static QR_TEXT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn push_pill(kind: nacre_core::notch::pills::Kind, key: &str, title: &str, sub: &str, linger: Option<i64>) {
     if kind == nacre_core::notch::pills::Kind::Device && !crate::prefs::get().pill_devices {
@@ -158,6 +169,32 @@ pub fn push_pill(kind: nacre_core::notch::pills::Kind, key: &str, title: &str, s
     if h != 0 {
         post(h, WM_PILL);
     }
+}
+
+pub fn dismiss_pill(key: &str) {
+    if let Ok(mut q) = PILL_Q.lock() {
+        q.push(PillMsg::Dismiss(key.to_string()));
+    }
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        post(h, WM_PILL);
+    }
+}
+
+pub fn show_qr(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let h = NOTCH_HWND.load(Ordering::Relaxed);
+    if h == 0 {
+        return false;
+    }
+    if let Ok(mut g) = QR_TEXT.lock() {
+        *g = Some(t.to_string());
+    }
+    post(h, WM_SHOWQR);
+    true
 }
 static BUSY: AtomicBool = AtomicBool::new(false);
 static STAGE_Y_BITS: AtomicU32 = AtomicU32::new(0);
@@ -566,6 +603,11 @@ pub struct Notch {
     wifi_ssid: Option<String>,
     send: Option<SendSess>,
     send_err: bool,
+    quick: Option<QuickSess>,
+    qr_card: Option<(String, Option<CompositionDrawingSurface>, f32)>,
+    focus_sess: nacre_core::focus::Session,
+    focus_log: Vec<nacre_core::focus::Entry>,
+    focus_show_stats: bool,
     media_app: String,
     app_icons: std::collections::HashMap<String, Option<CompositionDrawingSurface>>,
     vis: Vis,
@@ -807,6 +849,11 @@ impl Notch {
                 agenda: None,
                 send: None,
                 send_err: false,
+                quick: None,
+                qr_card: None,
+                focus_sess: nacre_core::focus::Session::default(),
+                focus_log: Vec::new(),
+                focus_show_stats: false,
                 cal_events: None,
                 cal_fetched_at: None,
                 cal_in_flight: false,
@@ -845,6 +892,7 @@ impl Notch {
             }
             timer(hwnd, T_MINUTE, nacre_platform::time::ms_to_next_minute());
             with(hwnd, |d| {
+                d.load_focus();
                 d._bt = Some(nacre_platform::devices::watch_bluetooth(|name, on| {
                     let sub = match (on, crate::prefs::get().lang) {
                         (true, nacre_core::i18n::Lang::En) => "Connected",
@@ -2142,11 +2190,15 @@ impl Notch {
         let msgs: Vec<PillMsg> = PILL_Q.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
         let now = self.now_ms();
         let mut pushed = false;
+        let mut dismissed = false;
         for m in msgs {
             match m {
                 PillMsg::Push { kind, key, title, sub, linger } => {
                     self.pills.push(kind, &key, &title, &sub, now, linger);
                     pushed = true;
+                }
+                PillMsg::Dismiss(key) => {
+                    dismissed |= self.pills.dismiss_key(&key);
                 }
             }
         }
@@ -2162,10 +2214,257 @@ impl Notch {
         } else if self.pills.current(now).is_none() {
             self.pill_peeking = false;
         }
-        if pushed || pruned {
+        if pushed || dismissed || pruned {
             self.refresh();
             self.update_visibility();
         }
+    }
+
+    fn start_quick(&mut self, paths: Vec<String>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.quick = Some(QuickSess { paths, busy: None, status: String::new() });
+        self.qr_card = None;
+        self.send = None;
+        self.send_err = false;
+        match self.mode {
+            Mode::Drop => {
+                self.dispatch(Event::Dropped);
+                self.dispatch(Event::SelectTab(Tab::Shelf));
+            }
+            Mode::Open(Tab::Shelf) => self.refresh(),
+            Mode::Open(_) => self.dispatch(Event::SelectTab(Tab::Shelf)),
+            _ => {
+                self.dispatch(Event::Click);
+                self.dispatch(Event::SelectTab(Tab::Shelf));
+            }
+        }
+    }
+
+    fn run_quick(&mut self, i: u8) {
+        use nacre_core::quick::Op;
+        let Some(op) = Op::ALL.get(i as usize).copied() else { return };
+        let Some(q) = self.quick.as_mut() else { return };
+        if q.busy.is_some() {
+            return;
+        }
+        q.busy = Some(i);
+        q.status = crate::prefs::tr("Sedang diproses\u{2026}").to_string();
+        let paths = q.paths.clone();
+        let (small, archive) = (crate::prefs::tr("kecil").to_string(), crate::prefs::tr("Arsip").to_string());
+        let hw = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let r = nacre_platform::quickops::run(op, &paths, &small, &archive);
+            *QUICK_DONE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            post(hw, WM_QUICKDONE);
+        });
+        self.refresh();
+    }
+
+    fn on_quick_done(&mut self) {
+        let Some(r) = QUICK_DONE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        let (title, sub) = match &r {
+            Ok(files) => {
+                let first = files.first().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let sub = if files.len() > 1 { format!("{first} +{}", files.len() - 1) } else { first };
+                (crate::prefs::tr("Selesai").to_string(), sub)
+            }
+            Err(e) => (crate::prefs::tr("Gagal").to_string(), e.clone()),
+        };
+        log::line("aksi", &format!("{title}: {sub}"));
+        if let Some(q) = self.quick.as_mut() {
+            q.busy = None;
+            q.status = format!("{title} \u{00B7} {sub}");
+        }
+        push_pill(nacre_core::notch::pills::Kind::Info, "quick", &title, &sub, Some(6000));
+        self.refresh();
+    }
+
+    fn on_show_qr(&mut self) {
+        let Some(text) = QR_TEXT.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        let px = (94.0 * self.dpi).floor();
+        let surf = nacre_core::qr::encode(&text).and_then(|m| {
+            let bmp = nacre_core::qr::render(&m, px as u32, 1);
+            self.paint.gfx.surface_from_bgra(px as u32, px as u32, &bmp).ok()
+        });
+        if surf.is_none() {
+            push_pill(
+                nacre_core::notch::pills::Kind::Info,
+                "qr",
+                crate::prefs::tr("Teks terlalu panjang untuk QR"),
+                "",
+                Some(5000),
+            );
+            return;
+        }
+        let shown: String = text.chars().take(120).collect();
+        self.qr_card = Some((shown, surf, px));
+        self.quick = None;
+        self.send = None;
+        self.send_err = false;
+        match self.mode {
+            Mode::Open(Tab::Shelf) => self.refresh(),
+            Mode::Open(_) => self.dispatch(Event::SelectTab(Tab::Shelf)),
+            _ => {
+                self.dispatch(Event::Click);
+                self.dispatch(Event::SelectTab(Tab::Shelf));
+            }
+        }
+        self.update_visibility();
+    }
+
+    fn stage_secs(&self) -> i64 {
+        if let Some(t) = std::env::var("NACRE_TIMER_SECS").ok().and_then(|s| s.parse::<i64>().ok()) {
+            return t.max(1);
+        }
+        let p = crate::prefs::get();
+        let cat = self.focus_sess.cat.min(nacre_core::focus::CATS - 1);
+        let min = match self.focus_sess.stage {
+            nacre_core::focus::Stage::Focus => p.focus_mins[cat],
+            nacre_core::focus::Stage::Break => p.break_mins[cat],
+        };
+        (min.max(1) as i64) * 60
+    }
+
+    fn sync_pomodoro_stage(&mut self) {
+        use nacre_core::island::timer::PomodoroStage;
+        self.timer.stage = match self.focus_sess.stage {
+            nacre_core::focus::Stage::Focus => PomodoroStage::Focus(self.focus_sess.round.clamp(1, 4)),
+            nacre_core::focus::Stage::Break => {
+                if self.focus_sess.round >= 4 {
+                    PomodoroStage::LongBreak
+                } else {
+                    PomodoroStage::ShortBreak(self.focus_sess.round.clamp(1, 3))
+                }
+            }
+        };
+    }
+
+    fn focus_names() -> [String; nacre_core::focus::CATS] {
+        let p = crate::prefs::get();
+        let custom = p.focus_name.as_str().trim();
+        let t = nacre_core::focus::TITLES;
+        [
+            crate::prefs::tr(t[0]).to_string(),
+            crate::prefs::tr(t[1]).to_string(),
+            crate::prefs::tr(t[2]).to_string(),
+            if custom.is_empty() { crate::prefs::tr(t[3]).to_string() } else { custom.to_string() },
+        ]
+    }
+
+    fn today_key() -> nacre_core::focus::Day {
+        let n = nacre_platform::time::local_now();
+        (n.year as i32, n.month as u32, n.day as u32)
+    }
+
+    fn focus_view(&self) -> views::FocusView {
+        let today = Self::today_key();
+        let mut days = [today; 7];
+        for (i, d) in days.iter_mut().enumerate() {
+            let (y, m, dd) = calendar::add_days(today.0, today.1, today.2, i as i32 - 6);
+            *d = (y, m, dd);
+        }
+        views::FocusView {
+            cat: self.focus_sess.cat,
+            names: Self::focus_names(),
+            stage: self.focus_sess.stage,
+            today: nacre_core::focus::today(&self.focus_log, today),
+            week: nacre_core::focus::week(&self.focus_log, &days),
+            show_stats: self.focus_show_stats,
+        }
+    }
+
+    fn epoch_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    fn focus_state_file() -> std::path::PathBuf {
+        crate::paths::config_dir().join("focus_state.txt")
+    }
+
+    fn focus_log_file() -> std::path::PathBuf {
+        crate::paths::config_dir().join("focus_log.txt")
+    }
+
+    fn save_focus(&self) {
+        let now = self.now_ms();
+        let left = self.timer.remaining_ms(now);
+        let saved = nacre_core::focus::Saved {
+            session: self.focus_sess,
+            running: self.timer.phase == Phase::Running,
+            remaining_ms: if matches!(self.timer.phase, Phase::Idle | Phase::Finished) { 0 } else { left },
+            deadline_epoch_ms: Self::epoch_ms() + left,
+        };
+        let _ = std::fs::create_dir_all(crate::paths::config_dir());
+        let _ = std::fs::write(Self::focus_state_file(), nacre_core::focus::saved_text(saved));
+    }
+
+    fn load_focus(&mut self) {
+        self.focus_log = nacre_core::focus::parse_log(&std::fs::read_to_string(Self::focus_log_file()).unwrap_or_default());
+        nacre_core::focus::trim(&mut self.focus_log, 4000);
+        let cat = (crate::prefs::get().focus_cat as usize).min(nacre_core::focus::CATS - 1);
+        self.focus_sess = nacre_core::focus::Session { cat, ..nacre_core::focus::Session::default() };
+        let saved = std::fs::read_to_string(Self::focus_state_file()).ok().and_then(|t| nacre_core::focus::parse_saved(&t));
+        match saved {
+            Some(sv) => {
+                self.focus_sess = sv.session;
+                let left = nacre_core::focus::left_after_restart(sv, Self::epoch_ms());
+                let running = sv.running && left > 0;
+                self.timer = Timer::restore(self.stage_secs(), left, running, self.now_ms());
+                self.sync_pomodoro_stage();
+                if sv.running && left == 0 {
+                    self.finish_focus_stage(self.now_ms());
+                }
+                log::line("notch", &format!("sesi fokus dipulihkan: kategori {} tahap {:?} sisa {} detik", sv.session.cat, sv.session.stage, left / 1000));
+            }
+            None => {
+                self.timer = Timer::new(self.stage_secs());
+                self.sync_pomodoro_stage();
+            }
+        }
+        self.sync_tick();
+    }
+
+    fn finish_focus_stage(&mut self, now: i64) {
+        use nacre_core::focus::{Entry, Next, Stage};
+        let p = crate::prefs::get();
+        let cat = self.focus_sess.cat.min(nacre_core::focus::CATS - 1);
+        let names = Self::focus_names();
+        let (title, sub) = if self.focus_sess.stage == Stage::Focus {
+            let minutes = (self.timer.duration / 60).max(1) as u32;
+            let e = Entry { day: Self::today_key(), cat, minutes };
+            self.focus_log.push(e);
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(crate::paths::config_dir());
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(Self::focus_log_file()) {
+                let _ = f.write_all(nacre_core::focus::log_line(e).as_bytes());
+            }
+            let sub = if p.break_mins[cat] > 0 {
+                format!("{} {} {}", crate::prefs::tr("Istirahat"), p.break_mins[cat], crate::prefs::tr("menit"))
+            } else {
+                crate::prefs::tr("Siap untuk sesi berikutnya").to_string()
+            };
+            (format!("{} {}", names[cat], crate::prefs::tr("selesai")), sub)
+        } else {
+            (crate::prefs::tr("Istirahat selesai").to_string(), format!("{} {}", crate::prefs::tr("Lanjut"), names[cat]))
+        };
+        match self.focus_sess.finish(p.focus_mins[cat], p.break_mins[cat]) {
+            Next::StartBreak(_) => {
+                self.timer = Timer::new(self.stage_secs());
+                self.sync_pomodoro_stage();
+                self.timer.start(now);
+            }
+            Next::Ready(_) => {
+                self.timer = Timer::new(self.stage_secs());
+                self.sync_pomodoro_stage();
+            }
+        }
+        push_pill(nacre_core::notch::pills::Kind::Info, "focus", &title, &sub, Some(8000));
+        self.save_focus();
     }
 
     fn glance_active(&self) -> Vec<glance::Item> {
@@ -2749,6 +3048,14 @@ impl Notch {
             cal,
             send,
             send_zone: crate::prefs::get().notch_send,
+            quick: self.quick.as_ref().map(|q| views::QuickView {
+                count: q.paths.len(),
+                images: q.paths.iter().filter(|p| nacre_core::quick::is_image(p)).count(),
+                busy: q.busy,
+                status: q.status.clone(),
+            }),
+            qr: self.qr_card.as_ref().map(|(t, s, px)| views::QrView { surface: s.as_ref(), px: *px, text: t.clone() }),
+            focus: self.focus_view(),
             pinned: self.pinned,
             notif_toast,
             notif_list,
@@ -3364,6 +3671,8 @@ impl Notch {
                     self.dispatch(Event::Dropped);
                 } else if zone == 1 {
                     self.start_send(paths);
+                } else if zone == 4 {
+                    self.start_quick(paths);
                 } else {
                     self.pending = paths;
                     self.dispatch(Event::DragLeave);
@@ -3738,16 +4047,87 @@ impl Notch {
                     self.timer.start(now);
                 }
                 self.sync_tick();
+                self.save_focus();
                 self.refresh();
             }
             Action::TimerReset => {
-                self.timer.reset_pomodoro();
+                if self.timer.phase == Phase::Idle && self.focus_sess.stage == nacre_core::focus::Stage::Break {
+                    self.focus_sess.stage = nacre_core::focus::Stage::Focus;
+                } else if self.timer.phase == Phase::Idle && self.focus_sess.round > 1 {
+                    self.focus_sess.round = 1;
+                }
+                self.timer = Timer::new(self.stage_secs());
+                self.sync_pomodoro_stage();
                 self.sync_tick();
+                self.save_focus();
                 self.refresh();
             }
+            Action::TimerMinus | Action::TimerPlus => {
+                let up = a == Action::TimerPlus;
+                let cat = self.focus_sess.cat.min(nacre_core::focus::CATS - 1);
+                let brk = self.focus_sess.stage == nacre_core::focus::Stage::Break;
+                crate::prefs::update(|s| {
+                    if brk {
+                        s.break_mins[cat] = nacre_core::focus::step(s.break_mins[cat], up, true);
+                    } else {
+                        s.focus_mins[cat] = nacre_core::focus::step(s.focus_mins[cat], up, false);
+                    }
+                });
+                self.timer = Timer::new(self.stage_secs());
+                self.sync_pomodoro_stage();
+                self.save_focus();
+                self.refresh();
+            }
+            Action::FocusCat(i) => {
+                if self.timer.phase != Phase::Running {
+                    let cat = (i as usize).min(nacre_core::focus::CATS - 1);
+                    self.focus_sess = nacre_core::focus::Session { cat, ..nacre_core::focus::Session::default() };
+                    crate::prefs::update(|s| s.focus_cat = cat as u8);
+                    self.timer = Timer::new(self.stage_secs());
+                    self.sync_pomodoro_stage();
+                    self.save_focus();
+                    self.refresh();
+                }
+            }
+            Action::FocusStatsToggle => {
+                self.focus_show_stats = !self.focus_show_stats;
+                self.render();
+            }
             Action::TimerStage(stage) => {
-                self.timer.select_stage(stage);
+                use nacre_core::island::timer::PomodoroStage;
+                match stage {
+                    PomodoroStage::Focus(n) => {
+                        self.focus_sess.stage = nacre_core::focus::Stage::Focus;
+                        self.focus_sess.round = n.clamp(1, 4);
+                        self.timer = Timer::new(self.stage_secs());
+                    }
+                    PomodoroStage::ShortBreak(n) => {
+                        self.focus_sess.stage = nacre_core::focus::Stage::Break;
+                        self.focus_sess.round = n.clamp(1, 3);
+                        self.timer = Timer::new(self.stage_secs());
+                    }
+                    PomodoroStage::LongBreak => {
+                        self.focus_sess.stage = nacre_core::focus::Stage::Break;
+                        self.focus_sess.round = 4;
+                        self.timer.select_stage(stage);
+                    }
+                }
+                self.timer.stage = stage;
                 self.sync_tick();
+                self.save_focus();
+                self.refresh();
+            }
+            Action::ShelfQuickOpen => {
+                let paths: Vec<String> = self.shelf.items().iter().map(|i| i.path.clone()).collect();
+                self.start_quick(paths);
+            }
+            Action::QuickOp(i) => self.run_quick(i),
+            Action::QuickClose => {
+                self.quick = None;
+                self.refresh();
+            }
+            Action::QrClose => {
+                self.qr_card = None;
                 self.refresh();
             }
             Action::OpenTimerPill => {
@@ -4109,8 +4489,8 @@ impl Notch {
             self.refresh();
         }
         if finished {
-            log::line("notch", &format!("pomodoro selesai stage={:?}", self.timer.stage));
-            self.timer.advance_stage();
+            log::line("notch", &format!("sesi fokus selesai stage={:?} cat={}", self.focus_sess.stage, self.focus_sess.cat));
+            self.finish_focus_stage(now);
             self.sync_tick();
             if crate::prefs::get().notch_notifs {
                 self.internal_notif_id = self.internal_notif_id.wrapping_add(1);
@@ -5041,6 +5421,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_PILL => {
             with(hwnd, |d| d.on_pill_drain());
+            LRESULT(0)
+        }
+        WM_QUICKDONE => {
+            with(hwnd, |d| d.on_quick_done());
+            LRESULT(0)
+        }
+        WM_SHOWQR => {
+            with(hwnd, |d| d.on_show_qr());
             LRESULT(0)
         }
         WM_DEVICECHANGE_MSG => {

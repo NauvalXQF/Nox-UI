@@ -60,6 +60,8 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef { id: "calc", title: "Buka Kalkulator", app: "Kalkulator", default_key: "ca" },
     ActionDef { id: "taskmgr", title: "Buka Task Manager", app: "Sistem", default_key: "" },
     ActionDef { id: "settings", title: "Buka Pengaturan Windows", app: "Pengaturan", default_key: "st" },
+    ActionDef { id: "qr", title: "Buat QR dari Papan Klip", app: "NOX", default_key: "qr" },
+    ActionDef { id: "pick", title: "Ambil Warna dari Layar", app: "NOX", default_key: "cw" },
     ActionDef { id: "clearclip", title: "Hapus Riwayat Papan Klip", app: "NOX", default_key: "" },
 ];
 

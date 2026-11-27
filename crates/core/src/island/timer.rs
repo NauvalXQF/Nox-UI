@@ -68,6 +68,21 @@ impl Timer {
         }
     }
 
+    pub fn restore(duration_secs: i64, left_ms: i64, running: bool, now_ms: i64) -> Timer {
+        let d = duration_secs.clamp(1, MAX_SECONDS);
+        let left = left_ms.clamp(0, d * 1000);
+        if left == 0 {
+            return Timer::new(d);
+        }
+        Timer {
+            duration: d,
+            remaining_ms: left,
+            deadline_ms: if running { now_ms + left } else { 0 },
+            phase: if running { Phase::Running } else { Phase::Paused },
+            stage: PomodoroStage::Focus(1),
+        }
+    }
+
     pub fn set_duration(&mut self, secs: i64) {
         let stage = self.stage;
         *self = Timer::new(secs);
