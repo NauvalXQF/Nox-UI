@@ -1,4 +1,4 @@
-use nacre_core::island::bands::{Analyzer, BANDS};
+use nacre_core::island::bands::{Analyzer, BANDS, SPEC};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,6 +11,15 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFre
 
 static OUT: [AtomicU32; BANDS] = [const { AtomicU32::new(0) }; BANDS];
 static PENDING: AtomicBool = AtomicBool::new(false);
+static SPECTRUM: [AtomicU32; SPEC] = [const { AtomicU32::new(0) }; SPEC];
+
+pub fn spectrum() -> [f32; SPEC] {
+    let mut o = [0.0; SPEC];
+    for (i, v) in SPECTRUM.iter().enumerate() {
+        o[i] = f32::from_bits(v.load(Ordering::Relaxed));
+    }
+    o
+}
 
 pub fn latest() -> [f32; BANDS] {
     PENDING.store(false, Ordering::Relaxed);
@@ -138,6 +147,9 @@ fn session(stop: &AtomicBool, notify: &(dyn Fn() + Send), analyzer: &mut Analyze
                         notify();
                     }
                 });
+                for (i, v) in analyzer.spectrum().iter().enumerate() {
+                    SPECTRUM[i].store(v.to_bits(), Ordering::Relaxed);
+                }
             }
         }
         let _ = client.Stop();

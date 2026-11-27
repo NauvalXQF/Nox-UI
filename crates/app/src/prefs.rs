@@ -17,8 +17,15 @@ fn file() -> std::path::PathBuf {
     paths::config_dir().join("settings.cfg")
 }
 
+static LAUNCH_FONT: std::sync::OnceLock<nacre_core::theme::FontChoice> = std::sync::OnceLock::new();
+
+pub fn launch_font() -> nacre_core::theme::FontChoice {
+    LAUNCH_FONT.get().copied().unwrap_or_default()
+}
+
 pub fn init() {
     let s = std::fs::read_to_string(file()).map(|t| Settings::parse(&t)).unwrap_or_default();
+    let _ = LAUNCH_FONT.set(s.font);
     log::line("prefs", &format!("dimuat: {s:?}"));
     *CUR.lock().unwrap() = Some(s);
 }

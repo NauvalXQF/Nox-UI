@@ -372,6 +372,11 @@ pub struct Settings {
     pub dock_reveal: Reveal,
     pub rail_reveal: Reveal,
     pub notch_reveal: Reveal,
+    pub preset: crate::theme::Preset,
+    pub visualizer: crate::theme::VisStyle,
+    pub font: crate::theme::FontChoice,
+    pub reduce_motion: bool,
+    pub notch_glow: bool,
 }
 
 pub const ALL_NOTCH_TABS_MASK: u8 = 0b0111_1111;
@@ -457,6 +462,11 @@ impl Default for Settings {
             dock_reveal: Reveal::Quick,
             rail_reveal: Reveal::Quick,
             notch_reveal: Reveal::Quick,
+            preset: crate::theme::Preset::Default,
+            visualizer: crate::theme::VisStyle::Bars,
+            font: crate::theme::FontChoice::Inter,
+            reduce_motion: false,
+            notch_glow: true,
         }
     }
 }
@@ -729,6 +739,11 @@ impl Settings {
                 "dock_reveal" => s.dock_reveal = Reveal::parse(v).unwrap_or(s.dock_reveal),
                 "rail_reveal" => s.rail_reveal = Reveal::parse(v).unwrap_or(s.rail_reveal),
                 "notch_reveal" => s.notch_reveal = Reveal::parse(v).unwrap_or(s.notch_reveal),
+                "preset" => s.preset = crate::theme::Preset::parse(v).unwrap_or(s.preset),
+                "visualizer" => s.visualizer = crate::theme::VisStyle::parse(v).unwrap_or(s.visualizer),
+                "font" => s.font = crate::theme::FontChoice::parse(v).unwrap_or(s.font),
+                "reduce_motion" => s.reduce_motion = parse_bool(v).unwrap_or(s.reduce_motion),
+                "notch_glow" => s.notch_glow = parse_bool(v).unwrap_or(s.notch_glow),
                 "autostart" => {
                     if let Some(b) = parse_bool(v) {
                         s.autostart = b;
@@ -796,7 +811,7 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\npreset={}\nvisualizer={}\nfont={}\nreduce_motion={}\nnotch_glow={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -877,7 +892,12 @@ impl Settings {
             self.rail.key(),
             self.dock_reveal.key(),
             self.rail_reveal.key(),
-            self.notch_reveal.key()
+            self.notch_reveal.key(),
+            self.preset.key(),
+            self.visualizer.key(),
+            self.font.key(),
+            self.reduce_motion,
+            self.notch_glow
         )
     }
 }
@@ -958,7 +978,9 @@ pub fn look(s: &Settings, system_dark: bool, material: Material) -> Look {
         }
     }
     let liquify = material == Material::Glass && s.refraction;
-    Look { dark, blur_sigma, saturation, tint: [a.round() as u8, tr, tg, tb], rim, solid, highlight, fg, liquify }
+    let mut out = Look { dark, blur_sigma, saturation, tint: [a.round() as u8, tr, tg, tb], rim, solid, highlight, fg, liquify };
+    crate::theme::tune(&mut out, s.preset);
+    out
 }
 
 pub fn bar_look(s: &Settings, system_dark: bool) -> Look {
@@ -1237,5 +1259,14 @@ dock_margin=900");
         assert!(c.visor_edge_ms() > q.visor_edge_ms() && c.visor_open_ms() > q.visor_open_ms());
         assert_eq!((q.deck_ms(), q.rail_ms(), q.visor_edge_ms()), (200, 150, 200));
         assert!(q.visor_open_ms() < 300);
+    }
+
+    #[test]
+    fn theme_font_visualizer_round_trip() {
+        use crate::theme::{FontChoice, Preset, VisStyle};
+        let d = Settings::default();
+        assert_eq!((d.preset, d.visualizer, d.font, d.reduce_motion, d.notch_glow), (Preset::Default, VisStyle::Bars, FontChoice::Inter, false, true));
+        let f = Settings::parse(&Settings::parse("preset=neon\nvisualizer=dots\nfont=mono\nreduce_motion=1\nnotch_glow=0\n").serialize());
+        assert_eq!((f.preset, f.visualizer, f.font, f.reduce_motion, f.notch_glow), (Preset::Neon, VisStyle::Dots, FontChoice::Mono, true, false));
     }
 }

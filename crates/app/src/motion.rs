@@ -9,7 +9,12 @@ pub const CC_CLOSE_MS: u32 = 170;
 pub const CC_STAGGER_MS: u32 = 22;
 pub const MISSION_MS: u32 = 260;
 
+fn reduced() -> bool {
+    crate::prefs::get().reduce_motion
+}
+
 fn dur(ms: u32) -> TimeSpan {
+    let ms = if reduced() { ms.min(1) } else { ms };
     TimeSpan { Duration: ms as i64 * 10_000 }
 }
 

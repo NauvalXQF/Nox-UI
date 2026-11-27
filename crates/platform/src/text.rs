@@ -10,9 +10,54 @@ use windows::Win32::Graphics::Gdi::{
 
 pub const ICON_FACE: &str = "Segoe Fluent Icons";
 
+static PREFERRED: std::sync::OnceLock<&'static [&'static str]> = std::sync::OnceLock::new();
+
+pub fn prefer(faces: &'static [&'static str]) {
+    let _ = PREFERRED.set(faces);
+}
+
 pub fn text_face() -> &'static str {
     static FACE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    FACE.get_or_init(|| pick_face(load_bundled_fonts(), font_exists("Segoe UI Variable Text")))
+    FACE.get_or_init(|| {
+        let bundled = load_bundled_fonts();
+        let first = pick_face(bundled, font_exists("Segoe UI Variable Text"));
+        let wanted = PREFERRED
+            .get()
+            .and_then(|list| list.iter().copied().find(|f| (*f == "Inter" && bundled) || (*f != "Inter" && font_exists(f))));
+        if let Some(w) = wanted.filter(|w| *w != first) {
+            if renders_latin(w) {
+                crate::log::line("font", &format!("memakai font pilihan {w}"));
+                return w;
+            }
+        }
+        for f in [first, "Segoe UI Variable Text", "Segoe UI", "Arial"] {
+            if renders_latin(f) {
+                if f != first {
+                    crate::log::line("font", &format!("{first} tidak bisa menggambar huruf Latin; memakai {f}"));
+                }
+                return f;
+            }
+        }
+        "Segoe UI"
+    })
+}
+
+const SAMPLE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+pub fn renders_latin(face: &str) -> bool {
+    use windows::Win32::Graphics::Gdi::{GetGlyphIndicesW, GGI_MARK_NONEXISTING_GLYPHS};
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        let f = font(&Style { px: 16, weight: 400 }, face);
+        let old = SelectObject(dc, HGDIOBJ(f.0));
+        let wide: Vec<u16> = SAMPLE.encode_utf16().collect();
+        let mut out = vec![0u16; wide.len()];
+        let n = GetGlyphIndicesW(dc, &HSTRING::from(SAMPLE), wide.len() as i32, out.as_mut_ptr(), GGI_MARK_NONEXISTING_GLYPHS);
+        SelectObject(dc, old);
+        let _ = DeleteObject(HGDIOBJ(f.0));
+        let _ = DeleteDC(dc);
+        n as usize == wide.len() && out.iter().all(|g| *g != 0xFFFF)
+    }
 }
 
 pub fn pick_face(bundled_inter: bool, segoe_variable: bool) -> &'static str {
