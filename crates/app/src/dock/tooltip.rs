@@ -19,7 +19,6 @@ pub struct Tooltip {
     popup: Popup,
     text: SpriteVisual,
     dpi: f32,
-    screen_w: i32,
     cache: HashMap<String, (CompositionDrawingSurface, i32, i32)>,
     shown: Option<String>,
     tail: SpriteVisual,
@@ -47,14 +46,14 @@ fn tail_bitmap(t: i32, c: Color) -> Vec<u8> {
 }
 
 impl Tooltip {
-    pub fn new(comp: &Compositor, dpi: f32, screen_w: i32) -> Result<Tooltip> {
+    pub fn new(comp: &Compositor, dpi: f32) -> Result<Tooltip> {
         let glass = crate::prefs::glass((10.0, 10.0), 10.0, crate::prefs::Role::Dark);
         let popup = Popup::new(comp, w!("NacreTooltip"), Some(proc), WS_EX_TRANSPARENT, glass)?;
         let text = comp.CreateSpriteVisual()?;
         popup.content.Children()?.InsertAtTop(&text)?;
         let tail = comp.CreateSpriteVisual()?;
         popup.content.Children()?.InsertAtTop(&tail)?;
-        Ok(Tooltip { popup, text, dpi, screen_w, cache: HashMap::new(), shown: None, tail, tail_color: Color { A: 200, R: 30, G: 32, B: 38 }, tail_surface: None })
+        Ok(Tooltip { popup, text, dpi, cache: HashMap::new(), shown: None, tail, tail_color: Color { A: 200, R: 30, G: 32, B: 38 }, tail_surface: None })
     }
 
     pub fn show(&mut self, comp: &Compositor, gfx: &Gfx, label: &str, cx: i32, bottom: i32) -> Result<()> {
@@ -80,7 +79,7 @@ impl Tooltip {
             self.text.SetOffset(Vector3 { X: px as f32, Y: py as f32, Z: 0.0 })?;
             self.shown = Some(label.to_string());
         }
-        let x = (cx - w / 2).clamp(4, (self.screen_w - w - 4).max(4));
+        let x = nacre_platform::monitors::at(cx, bottom - 1).area.clamp_x(cx - w / 2, w, 4);
         let t = ((5.0 * self.dpi).round() as i32).max(3);
         self.popup.set_rect(x, bottom - h - t, w, h + t)?;
         self.popup.panel.set_rect(0.0, 0.0, w as f32, h as f32)?;

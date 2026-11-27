@@ -37,7 +37,6 @@ use windows::UI::Composition::{
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON,
 };
@@ -173,6 +172,7 @@ pub struct Dock {
     dpi: f32,
     m: Metrics,
     screen: (i32, i32),
+    area: nacre_core::display::Area,
     win: (i32, i32),
     win_pos: (i32, i32),
     card_y: f32,
@@ -396,8 +396,9 @@ impl Dock {
                 0, 0, 400, 120,
                 None, None, Some(hi), None,
             )?;
-            let dpi = GetDpiForWindow(hwnd).max(96) as f32 / 96.0 * crate::prefs::ui_scale();
-            let screen = sys::screen_size();
+            let mon = nacre_platform::monitors::target(crate::prefs::get().deck_screen);
+            let dpi = mon.scale() * crate::prefs::ui_scale();
+            let screen = mon.area.size();
             let m = metrics_from_prefs(dpi);
 
             let surface = host.attach(hwnd, (400.0, 120.0))?;
@@ -467,6 +468,7 @@ impl Dock {
                 dpi,
                 m,
                 screen,
+                area: mon.area,
                 win: (400, 120),
                 win_pos: (0, 0),
                 card_y: 0.0,
@@ -581,7 +583,7 @@ impl Dock {
         let need = self.max_content_width() + 2.0 * self.pad_side + 40.0 * self.dpi;
         let w = (need.ceil() as i32).clamp(200, self.screen.0);
         self.win.0 = w;
-        self.win_pos = ((self.screen.0 - w) / 2, self.screen.1 - self.win.1);
+        self.win_pos = (self.area.x + (self.screen.0 - w) / 2, self.area.y + self.screen.1 - self.win.1);
         unsafe {
             let _ = SetWindowPos(self.hwnd, None, self.win_pos.0, self.win_pos.1, w, self.win.1, SWP_NOACTIVATE | SWP_NOZORDER);
         }
@@ -594,9 +596,10 @@ impl Dock {
     }
 
     fn on_reconfigure(&mut self, force: bool) {
-        let screen = sys::screen_size();
-        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0 * crate::prefs::ui_scale();
-        let changed = screen != self.screen || (dpi - self.dpi).abs() >= 0.01;
+        let mon = nacre_platform::monitors::target(crate::prefs::get().deck_screen);
+        let screen = mon.area.size();
+        let dpi = mon.scale() * crate::prefs::ui_scale();
+        let changed = mon.area != self.area || (dpi - self.dpi).abs() >= 0.01;
         if !force && !changed {
             return;
         }
@@ -609,6 +612,7 @@ impl Dock {
             self.menu = None;
             self.menu_open = false;
             self.screen = screen;
+            self.area = mon.area;
             self.dpi = dpi;
             self.m = metrics_from_prefs(dpi);
             self.pad_side = 10.0 * dpi;
@@ -683,7 +687,7 @@ impl Dock {
         }
         let d = self.dpi;
         let strip = (self.margin + self.card_h + 4.0 * d).ceil() as i32;
-        let r = nacre_platform::shell::appbar::reserve_bottom(self.hwnd, self.screen.0, self.screen.1, strip);
+        let r = nacre_platform::shell::appbar::reserve_bottom(self.hwnd, self.area, strip);
         log::line("appbar", &format!("strip={strip} hasil={r:?}"));
     }
 
@@ -718,7 +722,7 @@ impl Dock {
 
     fn place_strip(&self) {
         if let Some(s) = &self.strip {
-            s.place(self.win_pos.0, self.screen.1 - 2, self.win.0, 2);
+            s.place(self.win_pos.0, self.area.bottom() - 2, self.win.0, 2);
         }
     }
 
@@ -789,7 +793,7 @@ impl Dock {
             self.signature = sig;
             self.rebuild();
         }
-        self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.screen);
+        self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.area);
         if self.overlap.fullscreen && crate::prefs::get().above_fullscreen {
             self.overlap = overlap::Overlap { overlapped: false, fullscreen: false };
         }
@@ -1083,6 +1087,7 @@ impl Dock {
             self.update_visibility();
             log::line("dock", &format!("perilaku → {mode:?} cadangan={appbar}"));
         }
+        self.on_reconfigure(false);
         self.apply_metrics();
         let (themed, dark) = (crate::prefs::look(crate::prefs::Role::Dock), crate::prefs::look(crate::prefs::Role::Dark));
         let base = GlassParams::dark((10.0, 10.0), 22.0 * self.dpi);
@@ -1164,7 +1169,7 @@ impl Dock {
         };
         let Some((cx, top)) = self.icon_anchor(slot) else { return };
         if self.tooltip.is_none() {
-            self.tooltip = Tooltip::new(&self.comp, self.dpi, self.screen.0).ok().map(|mut t| {
+            self.tooltip = Tooltip::new(&self.comp, self.dpi).ok().map(|mut t| {
                 t.set_tier(self.tier);
                 t
             });
@@ -1192,7 +1197,7 @@ impl Dock {
         let icon = self.surfaces.get(&it.path).cloned();
         let Some((cx, top)) = self.icon_anchor(slot) else { return };
         if self.preview.is_none() {
-            self.preview = Preview::new(&self.comp, self.hwnd, self.dpi, self.screen.0).ok().map(|mut p| {
+            self.preview = Preview::new(&self.comp, self.hwnd, self.dpi).ok().map(|mut p| {
                 let _ = p.panel_mut().set_tier(self.tier);
                 p
             });
@@ -1521,7 +1526,7 @@ impl Dock {
         }
         self.pending_menu = Some(info);
         if self.menu.is_none() {
-            self.menu = Menu::new(&self.comp, self.hwnd, self.dpi, self.screen, self.tier).ok();
+            self.menu = Menu::new(&self.comp, self.hwnd, self.dpi, self.tier).ok();
         }
         let mut pt = POINT::default();
         unsafe {
@@ -1559,7 +1564,7 @@ impl Dock {
         items.push(menu::Item::action(CMD_STACK_FOLDER, crate::prefs::tr("Buka folder Unduhan"), true));
         self.pending_menu = Some(MenuInfo { item: None, trash: false, special: Some(DOWNLOADS_KEY) });
         if self.menu.is_none() {
-            self.menu = Menu::new(&self.comp, self.hwnd, self.dpi, self.screen, self.tier).ok();
+            self.menu = Menu::new(&self.comp, self.hwnd, self.dpi, self.tier).ok();
         }
         let mut pt = POINT::default();
         unsafe {
@@ -1839,7 +1844,7 @@ impl Dock {
                     }
                 }
                 let prev = self.overlap;
-                self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.screen);
+                self.overlap = overlap::evaluate(focus::foreground(), std::process::id(), self.card_screen_rect(), self.area);
                 if self.overlap.fullscreen && crate::prefs::get().above_fullscreen {
                     self.overlap = overlap::Overlap { overlapped: false, fullscreen: false };
                 }

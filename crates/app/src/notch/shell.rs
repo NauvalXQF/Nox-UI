@@ -95,6 +95,7 @@ impl Shell {
         root: &ContainerVisual,
         canvas: (i32, i32),
         wx: i32,
+        wy: i32,
         tier: Tier,
     ) -> windows_core::Result<Shell> {
         let comp = &host.compositor;
@@ -123,7 +124,7 @@ impl Shell {
                 w!("abra-notch-shadow"),
                 WS_POPUP,
                 wx,
-                0,
+                wy,
                 canvas.0,
                 canvas.1,
                 None,
@@ -134,7 +135,7 @@ impl Shell {
             // Crucial for WS_EX_LAYERED + WS_EX_NOREDIRECTIONBITMAP: enable full alpha compositing
             // while keeping WS_EX_TRANSPARENT 100% click-through across all desktop processes.
             let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
-            let _ = SetWindowPos(h, Some(owner_hwnd), wx, 0, canvas.0, canvas.1, SWP_NOACTIVATE);
+            let _ = SetWindowPos(h, Some(owner_hwnd), wx, wy, canvas.0, canvas.1, SWP_NOACTIVATE);
             h
         };
         let sh_surface = host.attach(sh_hwnd, (sz.X, sz.Y))?;
@@ -253,10 +254,10 @@ impl Shell {
         Ok(shell)
     }
 
-    pub fn place(&self, owner_hwnd: HWND, wx: i32, canvas: (i32, i32)) {
+    pub fn place(&self, owner_hwnd: HWND, wx: i32, wy: i32, canvas: (i32, i32)) {
         let sz = Vector2 { X: canvas.0 as f32, Y: canvas.1 as f32 };
         unsafe {
-            let _ = SetWindowPos(self.sh_hwnd, Some(owner_hwnd), wx, 0, canvas.0, canvas.1, SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.sh_hwnd, Some(owner_hwnd), wx, wy, canvas.0, canvas.1, SWP_NOACTIVATE);
         }
         let _ = self._sh_surface.root.SetSize(sz);
         let _ = self.sh_stage.SetSize(sz);

@@ -1,3 +1,4 @@
+use crate::display::Screen;
 use crate::i18n::Lang;
 use crate::visibility::policy::Mode;
 
@@ -302,6 +303,10 @@ pub struct Settings {
     pub gemini_custom_model: ShortText,
     pub widget_style: u8,
     pub battery_pct: u8,
+    pub deck_screen: Screen,
+    pub rail_screen: Screen,
+    pub notch_screen: Screen,
+    pub widget_screen: Screen,
 }
 
 pub const ALL_NOTCH_TABS_MASK: u8 = 0b0111_1111;
@@ -379,6 +384,10 @@ impl Default for Settings {
             gemini_custom_model: ShortText::EMPTY,
             widget_style: 0,
             battery_pct: 2,
+            deck_screen: Screen::Primary,
+            rail_screen: Screen::Primary,
+            notch_screen: Screen::Primary,
+            widget_screen: Screen::Primary,
         }
     }
 }
@@ -643,6 +652,10 @@ impl Settings {
                 "gemini_custom_model" => s.gemini_custom_model = ShortText::new(v),
                 "widget_style" => s.widget_style = v.parse::<u8>().map(|n| n.min(1)).unwrap_or(s.widget_style),
                 "battery_pct" => s.battery_pct = v.parse::<u8>().map(|n| n.min(2)).unwrap_or(s.battery_pct),
+                "deck_screen" => s.deck_screen = Screen::parse(v).unwrap_or(s.deck_screen),
+                "rail_screen" => s.rail_screen = Screen::parse(v).unwrap_or(s.rail_screen),
+                "notch_screen" => s.notch_screen = Screen::parse(v).unwrap_or(s.notch_screen),
+                "widget_screen" => s.widget_screen = Screen::parse(v).unwrap_or(s.widget_screen),
                 "autostart" => {
                     if let Some(b) = parse_bool(v) {
                         s.autostart = b;
@@ -710,7 +723,7 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -783,7 +796,11 @@ impl Settings {
             self.gemini_model,
             self.gemini_custom_model.as_str(),
             self.widget_style,
-            self.battery_pct
+            self.battery_pct,
+            self.deck_screen.key(),
+            self.rail_screen.key(),
+            self.notch_screen.key(),
+            self.widget_screen.key()
         )
     }
 }
@@ -1117,5 +1134,14 @@ dock_margin=900");
         s.reset_notch_tabs();
         assert_eq!(s.notch_tab_order, Tab::ALL);
         assert_eq!(s.notch_tab_mask, ALL_NOTCH_TABS_MASK);
+    }
+
+    #[test]
+    fn screen_choices_default_to_primary_and_round_trip() {
+        let d = Settings::default();
+        assert_eq!((d.deck_screen, d.rail_screen, d.notch_screen, d.widget_screen), (Screen::Primary, Screen::Primary, Screen::Primary, Screen::Primary));
+        let f = Settings::parse(&Settings::parse("deck_screen=2\nrail_screen=1\nnotch_screen=primary\nwidget_screen=3\n").serialize());
+        assert_eq!((f.deck_screen, f.rail_screen, f.notch_screen, f.widget_screen), (Screen::Nth(2), Screen::Nth(1), Screen::Primary, Screen::Nth(3)));
+        assert_eq!(Settings::parse("deck_screen=9\n").deck_screen, Screen::Primary);
     }
 }

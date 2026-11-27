@@ -114,7 +114,8 @@ fn frame_rect(h: HWND) -> Option<RECT> {
     Some(r)
 }
 
-pub fn evaluate(fg: isize, own_pid: u32, dock: (i32, i32, i32, i32), screen: (i32, i32)) -> Overlap {
+pub fn evaluate(fg: isize, own_pid: u32, dock: (i32, i32, i32, i32), area: nacre_core::display::Area) -> Overlap {
+    let screen = area.size();
     let none = Overlap::default();
     let h = HWND(fg as *mut _);
     unsafe {
@@ -133,7 +134,12 @@ pub fn evaluate(fg: isize, own_pid: u32, dock: (i32, i32, i32, i32), screen: (i3
         if GetWindowLongW(h, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
             return none;
         }
-        let Some(r) = frame_rect(h) else { return none };
+        let Some(mut r) = frame_rect(h) else { return none };
+        r.left -= area.x;
+        r.right -= area.x;
+        r.top -= area.y;
+        r.bottom -= area.y;
+        let dock = (dock.0 - area.x, dock.1 - area.y, dock.2 - area.x, dock.3 - area.y);
         let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         if cx < 0 || cy < 0 || cx >= screen.0 || cy >= screen.1 {
             return none;
@@ -141,7 +147,9 @@ pub fn evaluate(fg: isize, own_pid: u32, dock: (i32, i32, i32, i32), screen: (i3
         let frame = (r.left, r.top, r.right, r.bottom);
         let zoomed = IsZoomed(h).as_bool();
         let caption = GetWindowLongW(h, GWL_STYLE) as u32 & WS_CAPTION.0 == WS_CAPTION.0;
-        let work = work_area(h).unwrap_or((0, 0, screen.0, screen.1));
+        let work = work_area(h)
+            .map(|w| (w.0 - area.x, w.1 - area.y, w.2 - area.x, w.3 - area.y))
+            .unwrap_or((0, 0, screen.0, screen.1));
         let fullscreen = is_fullscreen(frame, screen, work, zoomed, caption) || exclusive_fullscreen();
         if fullscreen || zoomed {
             return Overlap { overlapped: true, fullscreen };
@@ -155,7 +163,7 @@ struct NotchScan {
     own_pid: u32,
     fg_hwnd: isize,
     notch: (i32, i32, i32, i32),
-    screen: (i32, i32),
+    area: nacre_core::display::Area,
     overlapped: bool,
 }
 
@@ -183,14 +191,19 @@ unsafe extern "system" fn scan_notch_window(h: HWND, lp: LPARAM) -> BOOL {
     if (ex & WS_EX_TOOLWINDOW.0) != 0 || (ex & WS_EX_TRANSPARENT.0) != 0 {
         return BOOL(1);
     }
-    let Some(r) = frame_rect(h) else {
+    let Some(mut r) = frame_rect(h) else {
         return BOOL(1);
     };
     if r.right - r.left <= 1 || r.bottom - r.top <= 1 {
         return BOOL(1);
     }
+    r.left -= st.area.x;
+    r.right -= st.area.x;
+    r.top -= st.area.y;
+    r.bottom -= st.area.y;
+    let screen = st.area.size();
     let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-    if cx < 0 || cy < 0 || cx >= st.screen.0 || cy >= st.screen.1 {
+    if cx < 0 || cy < 0 || cx >= screen.0 || cy >= screen.1 {
         return BOOL(1);
     }
     let zoomed = IsZoomed(h).as_bool();
@@ -204,9 +217,9 @@ unsafe extern "system" fn scan_notch_window(h: HWND, lp: LPARAM) -> BOOL {
 
 /// Evaluates overlap & fullscreen state specifically for the Notch.
 /// Scans visible normal windows in top-to-bottom Z-order so Smart mode consistently hides
-/// whenever any visible window on the primary monitor is maximized or intersects the Notch,
+/// whenever any visible window on the target monitor is maximized or intersects the Notch,
 /// even if the user interacts with a small floating dialog or NOX's own UI.
-pub fn evaluate_notch(ext_fg: isize, own_pid: u32, notch: (i32, i32, i32, i32), screen: (i32, i32)) -> Overlap {
+pub fn evaluate_notch(ext_fg: isize, own_pid: u32, notch: (i32, i32, i32, i32), area: nacre_core::display::Area) -> Overlap {
     let real_fg = unsafe { GetForegroundWindow() };
     let fg_for_fs = unsafe {
         let mut pid = 0u32;
@@ -219,15 +232,16 @@ pub fn evaluate_notch(ext_fg: isize, own_pid: u32, notch: (i32, i32, i32, i32), 
             ext_fg
         }
     };
-    let fg_ov = evaluate(fg_for_fs, own_pid, notch, screen);
+    let fg_ov = evaluate(fg_for_fs, own_pid, notch, area);
     if fg_ov.fullscreen {
         return Overlap { overlapped: true, fullscreen: true };
     }
+    let local_notch = (notch.0 - area.x, notch.1 - area.y, notch.2 - area.x, notch.3 - area.y);
     let mut scan = NotchScan {
         own_pid,
         fg_hwnd: real_fg.0 as isize,
-        notch,
-        screen,
+        notch: local_notch,
+        area,
         overlapped: false,
     };
     unsafe {

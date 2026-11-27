@@ -491,6 +491,11 @@ const EN: &[(&str, &str)] = &[
     ("Efek transparansi Windows mati, Deck tampil solid", "Windows transparency effects are off; Deck shows solid"),
     ("Penghemat baterai aktif, Deck tampil solid", "Battery saver is on; Deck shows solid"),
     ("Nyalakan", "Turn on"),
+    ("Tampilkan di", "Show on"),
+    ("Layar 1", "Display 1"),
+    ("Layar 2", "Display 2"),
+    ("Layar 3", "Display 3"),
+    ("Layar 4", "Display 4"),
 ];
 
 pub fn is_known(src: &str) -> bool {

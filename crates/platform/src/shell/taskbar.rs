@@ -140,11 +140,63 @@ pub fn restore_marker(m: &Marker) -> bool {
     abm_set_state(p, if m.abstate >= 0 { m.abstate } else { ABS_ALWAYSONTOP });
     place_and_show(p, m.primary);
     let mut ok = unsafe { IsWindowVisible(p).as_bool() } && rect_of(p).is_some_and(|r| r.is_placed());
+    let mons = crate::monitors::list();
+    let mut taken: Vec<nacre_core::display::Area> = Vec::new();
     for s in secondaries() {
-        place_and_show(s, m.secondary_rect(s.0 as isize));
+        let size = rect_of(s).map(|r| (r.right - r.left, r.bottom - r.top)).unwrap_or((0, 0));
+        let home = secondary_home(m.secondary_rect(s.0 as isize), size, &mons, &taken);
+        if let Some((x, y)) = home {
+            if let Some(mon) = nacre_core::display::at_point(&mons, x + size.0 / 2, y + size.1 / 2) {
+                taken.push(mon.area);
+            }
+        }
+        place_and_show(s, home.map(|(x, y)| Rect { left: x, top: y, right: x + size.0, bottom: y + size.1 }));
         ok &= unsafe { IsWindowVisible(s).as_bool() } && rect_of(s).is_some_and(|r| r.is_placed());
     }
     ok
+}
+
+fn secondary_home(saved: Option<Rect>, size: (i32, i32), mons: &[nacre_core::display::Monitor], taken: &[nacre_core::display::Area]) -> Option<(i32, i32)> {
+    let others = || mons.iter().filter(|m| !m.primary && !taken.contains(&m.area));
+    if let Some(r) = saved.filter(|r| r.is_placed()) {
+        let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        if others().any(|m| m.area.contains(cx, cy)) {
+            return Some((r.left, r.top));
+        }
+    }
+    others().next().map(|m| (m.area.x, m.area.bottom() - size.1.max(0)))
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+    use nacre_core::display::{Area, Monitor};
+
+    fn mon(x: i32, w: i32, primary: bool) -> Monitor {
+        Monitor { area: Area::new(x, 0, w, 1080), work: Area::new(x, 0, w, 1080), dpi: 96, primary }
+    }
+
+    #[test]
+    fn saved_position_on_a_live_screen_is_kept() {
+        let mons = [mon(0, 1920, true), mon(1920, 1920, false)];
+        let saved = Rect { left: 1920, top: 1032, right: 3840, bottom: 1080 };
+        assert_eq!(secondary_home(Some(saved), (1920, 48), &mons, &[]), Some((1920, 1032)));
+    }
+
+    #[test]
+    fn bar_without_saved_position_goes_to_bottom_of_a_free_screen() {
+        let mons = [mon(0, 1920, true), mon(1920, 1280, false), mon(-1280, 1280, false)];
+        assert_eq!(secondary_home(None, (1280, 48), &mons, &[]), Some((1920, 1032)));
+        assert_eq!(secondary_home(None, (1280, 48), &mons, &[Area::new(1920, 0, 1280, 1080)]), Some((-1280, 1032)));
+    }
+
+    #[test]
+    fn stale_position_from_an_unplugged_screen_is_moved() {
+        let mons = [mon(0, 1920, true), mon(1920, 1920, false)];
+        let saved = Rect { left: -1920, top: 1032, right: 0, bottom: 1080 };
+        assert_eq!(secondary_home(Some(saved), (1920, 48), &mons, &[]), Some((1920, 1032)));
+        assert_eq!(secondary_home(Some(saved), (1920, 48), &[mon(0, 1920, true)], &[]), None);
+    }
 }
 
 pub fn recover_leftover(path: &Path) -> bool {

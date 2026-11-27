@@ -91,6 +91,7 @@ struct Mgr {
     comp: Compositor,
     gfx: Option<Gfx>,
     dpi: f32,
+    mon: nacre_core::display::Area,
     list: Vec<Widget>,
     cache: HashMap<String, (CompositionDrawingSurface, i32, i32)>,
     edit: bool,
@@ -180,11 +181,14 @@ fn utc_minutes() -> i32 {
     (n.hour * 60 + n.minute) as i32 - sys::utc_offset_min()
 }
 
-fn area(dpi: f32) -> widgets::Rect {
-    let (sw, sh) = sys::screen_size();
+fn area(mon: nacre_core::display::Area, dpi: f32) -> widgets::Rect {
     let top = (44.0 * dpi) as i32;
     let side = (20.0 * dpi) as i32;
-    (side, top, sw - 2 * side, sh - top - (120.0 * dpi) as i32)
+    (mon.x + side, mon.y + top, mon.w - 2 * side, mon.h - top - (120.0 * dpi) as i32)
+}
+
+fn widget_monitor() -> nacre_core::display::Monitor {
+    nacre_platform::monitors::target(prefs::get().widget_screen)
 }
 
 fn style() -> u8 {
@@ -211,7 +215,8 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
         let class = w!("AbraWidgetsCtl");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ctl_proc), hInstance: hi, lpszClassName: class, ..Default::default() });
         let ctl = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("abra-widgets"), WS_POPUP, 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hi), None)?;
-        let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f32 / 96.0;
+        let monitor = widget_monitor();
+        let dpi = monitor.scale();
         let on_desktop = desktop_shown(focus::foreground());
         ON_DESKTOP.store(on_desktop, Ordering::Relaxed);
         MGR.with(|c| {
@@ -220,6 +225,7 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
                 comp: comp.clone(),
                 gfx: Gfx::shared(comp).ok(),
                 dpi,
+                mon: monitor.area,
                 list: Vec::new(),
                 cache: HashMap::new(),
                 edit: false,
@@ -257,7 +263,7 @@ impl Mgr {
     }
 
     fn grid(&self) -> ((i32, i32), i32, (i32, i32)) {
-        let ar = area(self.dpi);
+        let ar = area(self.mon, self.dpi);
         let step = self.pitch();
         let gap = (widgets::GAP * self.dpi).round() as i32;
         ((ar.0, ar.1), step, (((ar.2 + gap) / step).max(1), ((ar.3 + gap) / step).max(1)))
@@ -302,8 +308,9 @@ impl Mgr {
         let placed = widgets::from_text(&std::fs::read_to_string(list_file()).unwrap_or_default());
         let mut moved = false;
         for p in placed {
-            let at = self.slot_kind(None, p.kind, (p.x, p.y));
-            moved |= at != (p.x, p.y);
+            let want = (p.x + self.mon.x, p.y + self.mon.y);
+            let at = self.slot_kind(None, p.kind, want);
+            moved |= at != want;
             self.spawn(p.kind, at, false);
         }
         if moved {
@@ -313,9 +320,33 @@ impl Mgr {
     }
 
     fn save(&self) {
-        let list: Vec<Placed> = self.list.iter().map(|w| Placed { kind: w.kind, x: w.pos.0, y: w.pos.1 }).collect();
+        let list: Vec<Placed> = self.list.iter().map(|w| Placed { kind: w.kind, x: w.pos.0 - self.mon.x, y: w.pos.1 - self.mon.y }).collect();
         let _ = std::fs::create_dir_all(paths::config_dir());
         let _ = std::fs::write(list_file(), widgets::to_text(&list));
+    }
+
+    fn follow_monitor(&mut self) -> bool {
+        let m = widget_monitor();
+        if m.area == self.mon && (m.scale() - self.dpi).abs() < 0.01 {
+            return false;
+        }
+        let old = self.mon;
+        let rel: Vec<(Kind, (i32, i32))> = self.list.iter().map(|w| (w.kind, (w.pos.0 - old.x, w.pos.1 - old.y))).collect();
+        for w in self.list.drain(..) {
+            unsafe {
+                let _ = DestroyWindow(w.popup.hwnd);
+            }
+        }
+        self.cache.clear();
+        self.mon = m.area;
+        self.dpi = m.scale();
+        for (k, r) in rel {
+            let at = self.slot_kind(None, k, (r.0 + m.area.x, r.1 + m.area.y));
+            self.spawn(k, at, false);
+        }
+        self.save();
+        log::line("widgets", &format!("pindah ke layar {}x{} di ({},{})", m.area.w, m.area.h, m.area.x, m.area.y));
+        true
     }
 
     fn rebuild_all(&mut self) {
@@ -960,7 +991,7 @@ impl Mgr {
         let (x, y) = cursor();
         let d = self.dpi;
         if self.menu.is_none() {
-            self.menu = Menu::new(&self.comp, self.ctl, d, sys::screen_size(), Tier::Full).ok();
+            self.menu = Menu::new(&self.comp, self.ctl, d, Tier::Full).ok();
         }
         let items = vec![MItem::action(CMD_EDIT, prefs::tr("Edit Widget\u{2026}"), true), MItem::action(CMD_REMOVE, prefs::tr("Hapus Widget"), true)];
         self.menu_for = Some(i);
@@ -991,8 +1022,13 @@ impl Mgr {
         let mut glass = prefs::glass((gw, gh), 26.0 * d, prefs::Role::Themed);
         glass.blur_sigma = glass.blur_sigma.max(22.0);
         let Ok(mut popup) = Popup::new_with(&self.comp, w!("AbraWidgetGallery"), Some(gallery_proc), WINDOW_EX_STYLE(0), glass, true) else { return };
-        let (sw, sh) = sys::screen_size();
-        let _ = popup.set_rect(((sw as f32 - gw) / 2.0) as i32, (sh as f32 - gh - 110.0 * d).max(40.0 * d) as i32, gw as i32, gh as i32);
+        let mon = self.mon;
+        let _ = popup.set_rect(
+            mon.x + ((mon.w as f32 - gw) / 2.0) as i32,
+            mon.y + (mon.h as f32 - gh - 110.0 * d).max(40.0 * d) as i32,
+            gw as i32,
+            gh as i32,
+        );
         let _ = popup.panel.set_radius(26.0 * d);
         self.gallery = Some(Gallery { popup, cat: None, query: String::new(), cards: vec![], cats: vec![], done: (0.0, 0.0, 0.0, 0.0), conts: vec![], hover: None, tracking: false, press: None, closing: false });
         self.refresh_gallery();
@@ -1257,7 +1293,9 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         prefs::WM_PREFS => {
             with(|m| {
-                m.rebuild_all();
+                if !m.follow_monitor() {
+                    m.rebuild_all();
+                }
                 if m.gallery.is_some() {
                     m.refresh_gallery();
                 }
