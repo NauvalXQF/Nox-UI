@@ -25,5 +25,6 @@ pub mod spotlight;
 pub mod symbols;
 pub mod theme;
 pub mod trash;
+pub mod update;
 pub mod visibility;
 pub mod widgets;

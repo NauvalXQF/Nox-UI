@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $CargoToml = Get-Content (Join-Path $RepoRoot "Cargo.toml") -Raw
-$Version = if ($CargoToml -match 'version\s*=\s*"([^"]+)"') { $Matches[1] } else { "0.5.1" }
+$Version = if ($CargoToml -match 'version\s*=\s*"([^"]+)"') { $Matches[1] } else { "0.6.0" }
 
 if (-not $SkipBuild) {
     Write-Host "Membangun NOX v$Version (release)..." -ForegroundColor Cyan

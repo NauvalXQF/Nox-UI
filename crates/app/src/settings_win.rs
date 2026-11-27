@@ -131,6 +131,9 @@ enum Action {
     CapMove(u8, bool),
     PillDevices,
     Meeting,
+    UpdateCheck,
+    UpdateAct,
+    UpdateNotes,
     Relaunch,
     Theme(Theme),
     Lang(Lang),
@@ -1088,10 +1091,25 @@ impl Win {
                 ),
                 (
                     Some(prefs::tr("Tentang")),
-                    vec![
-                        RowDef::Info(prefs::tr("Versi"), format!("NOX v{}", env!("CARGO_PKG_VERSION"))),
-                        RowDef::Info(prefs::tr("Dibuat oleh opankcs.com"), "opankcs.com".to_string()),
-                    ],
+                    {
+                        use crate::updater::Phase;
+                        let button = match crate::updater::phase() {
+                            Phase::Idle => prefs::tr("Periksa pembaruan").to_string(),
+                            Phase::Checking => prefs::tr("Memeriksa\u{2026}").to_string(),
+                            Phase::Latest => prefs::tr("Sudah terbaru").to_string(),
+                            Phase::Available(r) if crate::updater::installed() => format!("{} {}", prefs::tr("Perbarui ke"), r.version),
+                            Phase::Available(r) => format!("{} {}", prefs::tr("Unduh"), r.version),
+                            Phase::Downloading(v) => format!("{} {v}\u{2026}", prefs::tr("Mengunduh")),
+                            Phase::Failed(e) => e,
+                        };
+                        vec![
+                            RowDef::Info(prefs::tr("Versi"), format!("NOX v{}", crate::updater::CURRENT)),
+                            RowDef::Pick(prefs::tr("Pembaruan"), button, Action::UpdateAct),
+                            RowDef::Toggle(prefs::tr("Periksa pembaruan otomatis"), s.update_check, Action::UpdateCheck),
+                            RowDef::Pick(prefs::tr("Catatan rilis"), prefs::tr("Buka").to_string(), Action::UpdateNotes),
+                            RowDef::Info(prefs::tr("Dibuat oleh opankcs.com"), "opankcs.com".to_string()),
+                        ]
+                    },
                 ),
             ],
             1 => vec![
@@ -2406,6 +2424,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                 }
                 Some(Action::LyricsOnline) => prefs::update(|s| s.lyrics_online = !s.lyrics_online),
+                Some(Action::UpdateCheck) => prefs::update(|s| s.update_check = !s.update_check),
+                Some(Action::UpdateNotes) => crate::updater::open_release_notes(),
+                Some(Action::UpdateAct) => match crate::updater::phase() {
+                    crate::updater::Phase::Available(_) => crate::updater::install(),
+                    crate::updater::Phase::Downloading(_) => {}
+                    _ => crate::updater::check_now(),
+                },
                 Some(Action::LyricsLead(ms)) => prefs::update(|s| s.lyrics_lead_ms = ms.min(2000)),
                 Some(Action::MenuLogoPick) => {
                     let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);

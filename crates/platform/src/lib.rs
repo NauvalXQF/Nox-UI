@@ -28,6 +28,7 @@ pub mod menus;
 pub mod monitors;
 pub mod media_fake;
 pub mod log;
+pub mod net;
 pub mod notifications;
 pub mod osd;
 pub mod pick;
