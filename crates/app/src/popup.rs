@@ -88,8 +88,12 @@ impl Popup {
         use windows_core::{Interface, HSTRING};
         let go = || -> Result<()> {
             let root = &self.surface.root;
-            let h = self.rect.3 as f32;
             root.SetScale(windows_numerics::Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+            if crate::prefs::get().reduce_motion {
+                root.SetOffset(windows_numerics::Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+                return root.SetOpacity(1.0);
+            }
+            let h = self.rect.3 as f32;
             let ease: CompositionEasingFunction =
                 comp.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?.cast()?;
             let dur = TimeSpan { Duration: 150 * 10_000 };
@@ -113,6 +117,10 @@ impl Popup {
         use windows_core::{Interface, HSTRING};
         let go = || -> Result<()> {
             let root = &self.surface.root;
+            if crate::prefs::get().reduce_motion {
+                root.SetScale(windows_numerics::Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+                return root.SetOpacity(1.0);
+            }
             let (w, h) = (self.rect.2 as f32, self.rect.3 as f32);
             root.SetCenterPoint(windows_numerics::Vector3 { X: w / 2.0, Y: if from_top { 0.0 } else { h }, Z: 0.0 })?;
             let ease: CompositionEasingFunction =

@@ -144,6 +144,7 @@ fn main() {
     }
 
     prefs::init();
+    nacre_platform::text::prefer(prefs::get().font.faces());
     let pref = prefs::get();
     let host = match nacre_ui::host::Host::new() {
         Ok(h) => h,

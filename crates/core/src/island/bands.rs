@@ -3,6 +3,20 @@ pub const BANDS: usize = 5;
 const RANGES: [(usize, usize); BANDS] = [(1, 2), (2, 6), (6, 18), (18, 60), (60, 200)];
 const WEIGHT: [f32; BANDS] = [1.2, 1.2, 1.5, 2.8, 5.0];
 pub const FLOOR: f32 = 0.18;
+pub const SPEC: usize = 16;
+
+pub fn spec_ranges() -> [(usize, usize); SPEC] {
+    let (lo, hi) = (1.0f32, 200.0f32);
+    let mut out = [(0usize, 0usize); SPEC];
+    let mut prev = 1usize;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let edge = (lo * (hi / lo).powf((i + 1) as f32 / SPEC as f32)).round() as usize;
+        let end = edge.max(prev + 1);
+        *slot = (prev, end);
+        prev = end;
+    }
+    out
+}
 
 fn fft(re: &mut [f32], im: &mut [f32]) {
     let n = re.len();
@@ -48,6 +62,9 @@ pub struct Analyzer {
     prev: [f32; BANDS],
     re: Vec<f32>,
     im: Vec<f32>,
+    spec: [f32; SPEC],
+    spec_peaks: [f32; SPEC],
+    spec_ranges: [(usize, usize); SPEC],
 }
 
 impl Default for Analyzer {
@@ -65,6 +82,35 @@ impl Analyzer {
             prev: [0.1; BANDS],
             re: vec![0.0; FFT],
             im: vec![0.0; FFT],
+            spec: [FLOOR; SPEC],
+            spec_peaks: [0.01; SPEC],
+            spec_ranges: spec_ranges(),
+        }
+    }
+
+    pub fn spectrum(&self) -> [f32; SPEC] {
+        self.spec
+    }
+
+    fn analyze_spectrum(&mut self) {
+        let last = SPEC as f32 - 1.0;
+        for i in 0..SPEC {
+            let (lo, hi) = self.spec_ranges[i];
+            let mut sum = 0.0;
+            let mut n = 0u32;
+            for b in lo..hi.min(FFT / 2) {
+                sum += (self.re[b] * self.re[b] + self.im[b] * self.im[b]).sqrt();
+                n += 1;
+            }
+            let scaled = sum / n.max(1) as f32 * (1.0 + 4.0 * i as f32 / last);
+            if scaled > self.spec_peaks[i] {
+                self.spec_peaks[i] = scaled;
+            } else {
+                self.spec_peaks[i] *= 0.99;
+            }
+            let target = (scaled / self.spec_peaks[i].max(0.12)).min(1.0).powf(0.75);
+            let smooth = if target > self.spec[i] { 0.15 } else { 0.25 };
+            self.spec[i] = (self.spec[i] * smooth + target * (1.0 - smooth)).clamp(FLOOR, 1.0);
         }
     }
 
@@ -104,6 +150,7 @@ impl Analyzer {
             self.prev[i] = v;
             out[i] = v;
         }
+        self.analyze_spectrum();
         out
     }
 }

@@ -445,8 +445,8 @@ pub struct Notch {
     art: Option<CompositionDrawingSurface>,
     tint: Option<[u8; 3]>,
     loopback: Option<Loopback>,
-    bar_cur: [f32; 5],
-    bar_tgt: [f32; 5],
+    bar_cur: [f32; 23],
+    bar_tgt: [f32; 23],
     marquee_t: f32,
     live_vis: views::Live,
     seek_drag: Option<(f32, f32, f32)>,
@@ -691,8 +691,8 @@ impl Notch {
                 art: None,
                 tint: None,
                 loopback: None,
-                bar_cur: [0.15; 5],
-                bar_tgt: [0.15; 5],
+                bar_cur: [0.15; 23],
+                bar_tgt: [0.15; 23],
                 marquee_t: 0.0,
                 live_vis: views::Live::default(),
                 seek_drag: None,
@@ -1278,13 +1278,29 @@ impl Notch {
         // Smooth audio visualizer bar interpolation at monitor refresh rate.
         let mut vis_active = false;
         if self.shown && !self.off && !self.live_vis.bars.is_empty() {
+            use nacre_core::theme::{quantize, VisStyle};
+            let prefs = crate::prefs::get();
             let t_sec = self.t0.elapsed().as_secs_f32();
-            let raw_energy: f32 = self.bar_tgt.iter().sum();
-            for (i, bar) in self.live_vis.bars.iter().enumerate() {
+            let n = self.live_vis.bars.len().min(self.bar_cur.len());
+            let raw_energy: f32 = self.bar_tgt[..n].iter().sum();
+            let is_dots = self.live_vis.vis == VisStyle::Dots;
+            for (i, bar) in self.live_vis.bars.iter().take(n).enumerate() {
+                if prefs.reduce_motion {
+                    let v = if self.playing { 0.35 } else { 0.12 };
+                    self.bar_cur[i] = v;
+                    if is_dots {
+                        let s = 0.55 + 0.75 * v;
+                        let _ = bar.SetScale(Vector3 { X: s, Y: s, Z: 1.0 });
+                        let _ = bar.SetOpacity(0.35 + 0.65 * v);
+                    } else {
+                        let _ = bar.SetScale(Vector3 { X: 1.0, Y: 0.22 + 0.78 * v, Z: 1.0 });
+                    }
+                    continue;
+                }
                 let tgt = if !self.playing {
                     0.08
                 } else if raw_energy > 0.02 {
-                    self.bar_tgt.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)
+                    self.bar_tgt[i].clamp(0.0, 1.0)
                 } else {
                     // Subtle alive wave if WASAPI loopback is silent while media reports Playing.
                     0.18 + 0.16 * (t_sec * 4.2 + i as f32 * 0.95).sin().abs()
@@ -1293,7 +1309,14 @@ impl Notch {
                 let rate = if tgt > cur { 24.0 } else { 9.5 };
                 let next = cur + (tgt - cur) * (1.0 - (-rate * dt).exp());
                 self.bar_cur[i] = next;
-                let _ = bar.SetScale(Vector3 { X: 1.0, Y: 0.22 + 0.78 * next.clamp(0.0, 1.0), Z: 1.0 });
+                let v = quantize(next.clamp(0.0, 1.0), prefs.preset);
+                if is_dots {
+                    let s = 0.55 + 0.75 * v;
+                    let _ = bar.SetScale(Vector3 { X: s, Y: s, Z: 1.0 });
+                    let _ = bar.SetOpacity(0.35 + 0.65 * v);
+                } else {
+                    let _ = bar.SetScale(Vector3 { X: 1.0, Y: 0.22 + 0.78 * v, Z: 1.0 });
+                }
                 if self.playing || (next - tgt).abs() > 0.01 {
                     vis_active = true;
                 }
@@ -2830,9 +2853,26 @@ impl Notch {
     }
 
     fn on_bands(&mut self) {
+        use nacre_core::theme::VisStyle;
         let b = loopback::latest();
-        for i in 0..5 {
-            self.bar_tgt[i] = b.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let spec = loopback::spectrum();
+        let n = self.live_vis.bars.len().min(self.bar_tgt.len());
+        let style = self.live_vis.vis;
+        for i in 0..n {
+            let raw = match style {
+                VisStyle::Bars => b.get(i).copied().unwrap_or(0.0),
+                VisStyle::Spectrum => spec.get(i).copied().unwrap_or(0.0),
+                VisStyle::Wave => {
+                    let half = (n.max(1) - 1) as f32 / 2.0;
+                    let k = ((i as f32 - half).abs() / half.max(1.0) * (spec.len() - 1) as f32).round() as usize;
+                    spec.get(k).copied().unwrap_or(0.0)
+                }
+                VisStyle::Dots => {
+                    let k = i * 2;
+                    (spec.get(k).copied().unwrap_or(0.0) + spec.get(k + 1).copied().unwrap_or(0.0)) / 2.0
+                }
+            };
+            self.bar_tgt[i] = raw.clamp(0.0, 1.0);
         }
         if self.shown && !self.off && !self.live_vis.bars.is_empty() {
             self.start_frame();

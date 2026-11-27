@@ -20,6 +20,7 @@ pub mod search;
 pub mod settings;
 pub mod spotlight;
 pub mod symbols;
+pub mod theme;
 pub mod trash;
 pub mod visibility;
 pub mod widgets;

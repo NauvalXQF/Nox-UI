@@ -499,6 +499,17 @@ const EN: &[(&str, &str)] = &[
     ("Kepekaan", "Sensitivity"),
     ("Cepat", "Quick"),
     ("Santai", "Relaxed"),
+    ("Preset", "Preset"),
+    ("Visualizer musik", "Music visualizer"),
+    ("Batang", "Bars"),
+    ("Spektrum", "Spectrum"),
+    ("Gelombang", "Wave"),
+    ("Titik", "Dots"),
+    ("Huruf dan gerak", "Type and motion"),
+    ("Font", "Font"),
+    ("Kurangi gerakan", "Reduce motion"),
+    ("Font baru berlaku setelah NOX dibuka ulang", "New font applies after restarting NOX"),
+    ("Buka ulang", "Restart"),
 ];
 
 pub fn is_known(src: &str) -> bool {

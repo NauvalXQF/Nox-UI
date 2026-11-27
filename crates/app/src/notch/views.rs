@@ -590,6 +590,7 @@ impl NavLive {
 #[derive(Default)]
 pub struct Live {
     pub bars: Vec<SpriteVisual>,
+    pub vis: nacre_core::theme::VisStyle,
     pub marquee: Option<MarqueeLive>,
     pub scrub: Option<ScrubLive>,
     pub drop_zones: Vec<DropZoneLive>,
@@ -831,22 +832,32 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
         });
         right_x -= p.px(28.0);
     } else if (media_playing && cur != Tab::Play) || show_play_wave {
-        // Live 5-bar white audio waveform badge in top-right (click jumps to Play).
-        let (bw, gap) = (p.px(2.4), p.px(2.2));
-        let heights = [6.0f32, 10.0, 14.0, 10.0, 6.0];
-        let total_w = 5.0 * bw + 4.0 * gap;
-        let x0 = (right_x - total_w / 2.0).round();
+        // Live audio visualizer badge in top-right (follows selected VisStyle; click jumps to Play).
+        let prefs = crate::prefs::get();
+        let style = prefs.visualizer;
+        let square = prefs.preset == nacre_core::theme::Preset::Pixel;
+        live.vis = style;
+        let n = style.count();
+        let (bw, gap, bh) = match style {
+            nacre_core::theme::VisStyle::Bars => (p.px(2.4), p.px(2.2), p.px(14.0)),
+            nacre_core::theme::VisStyle::Spectrum => (p.px(1.4), p.px(0.7), p.px(14.0)),
+            nacre_core::theme::VisStyle::Wave => (p.px(1.0), p.px(0.45), p.px(14.0)),
+            nacre_core::theme::VisStyle::Dots => (p.px(3.2), p.px(1.1), p.px(3.2)),
+        };
+        let total_w = n as f32 * bw + (n.saturating_sub(1)) as f32 * gap;
+        let x0 = (right_x + p.px(10.0) - total_w).round();
+        let shift = (total_w + p.px(10.0)).max(p.px(30.0));
         let target_parent = if cur == Tab::Play {
             if let Ok(wave_wrap) = p.comp.CreateContainerVisual() {
                 let w_raw = ((0.60 - lp) / 0.60).clamp(0.0, 1.0);
                 let wave_op = w_raw * w_raw * (3.0 - 2.0 * w_raw);
                 let wave_sc = 0.78 + 0.22 * wave_op;
-                let _ = wave_wrap.SetCenterPoint(Vector3 { X: right_x, Y: cy, Z: 0.0 });
+                let _ = wave_wrap.SetCenterPoint(Vector3 { X: x0 + total_w / 2.0, Y: cy, Z: 0.0 });
                 let _ = wave_wrap.SetScale(Vector3 { X: wave_sc, Y: wave_sc, Z: 1.0 });
                 let _ = wave_wrap.SetOpacity(wave_op);
                 let _ = right_anchor.Children().and_then(|k| k.InsertAtTop(&wave_wrap));
                 live.top_right_wave = Some(wave_wrap.clone());
-                live.top_right_pin_shift = p.px(30.0);
+                live.top_right_pin_shift = shift;
                 wave_wrap
             } else {
                 right_anchor.clone()
@@ -855,11 +866,18 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
             right_anchor.clone()
         };
         let n0 = kids(&target_parent);
-        for (i, h_dp) in heights.into_iter().enumerate() {
-            let bh = p.px(h_dp);
-            if let Some(v) = p.rect(&target_parent, x0 + i as f32 * (bw + gap), cy - bh / 2.0, bw, bh, bw / 2.0, white(245)) {
-                let _ = v.SetCenterPoint(Vector3 { X: bw / 2.0, Y: bh / 2.0, Z: 0.0 });
-                let _ = v.SetScale(Vector3 { X: 1.0, Y: 0.45, Z: 1.0 });
+        let radius = if square { 0.0 } else { bw / 2.0 };
+        let start = if style == nacre_core::theme::VisStyle::Dots {
+            Vector3 { X: 0.7, Y: 0.7, Z: 1.0 }
+        } else {
+            Vector3 { X: 1.0, Y: 0.45, Z: 1.0 }
+        };
+        let bars_h = [8.0f32, 11.5, 14.0, 11.5, 8.0];
+        for i in 0..n {
+            let h_px = if style == nacre_core::theme::VisStyle::Bars { p.px(bars_h[i % bars_h.len()]) } else { bh };
+            if let Some(v) = p.rect(&target_parent, x0 + i as f32 * (bw + gap), cy - h_px / 2.0, bw, h_px, radius, white(245)) {
+                let _ = v.SetCenterPoint(Vector3 { X: bw / 2.0, Y: h_px / 2.0, Z: 0.0 });
+                let _ = v.SetScale(start);
                 live.bars.push(v);
             }
         }
@@ -875,7 +893,7 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
                 hover_bg: None,
             });
         }
-        right_x -= p.px(30.0);
+        right_x -= shift;
     }
 
     // Pin button: hidden when not hovered (unless pinned), with 26x26 hover circle pill + 1.15x scale.
@@ -1577,7 +1595,7 @@ fn build_compact_lyric_row(
 fn compact_lyrics(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live: &mut Live) {
     compact_music(p, c, f, d, live, f.h, false);
     let left_pad = p.px(44.0);
-    let right_pad = p.px(50.0);
+    let right_pad = if crate::prefs::get().visualizer == nacre_core::theme::VisStyle::Bars { p.px(50.0) } else { p.px(58.0) };
     let vw = (f.w - left_pad - right_pad).max(p.px(24.0));
     let Ok(vp) = p.comp.CreateContainerVisual() else { return };
     let _ = vp.SetOffset(Vector3 { X: f.x0 + left_pad, Y: 0.0, Z: 0.0 });
@@ -1693,7 +1711,12 @@ fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live:
     let Some(m) = &d.media else { return };
     let is_lyrics = !show_marquee;
     let rgb = media_tint(m);
-    live.compact_glow = p.ambient_glow(c, f.x0, 0.0, f.w, row_h, 0.0, rgb, true);
+    let prefs = crate::prefs::get();
+    live.compact_glow = if prefs.notch_glow && !prefs.reduce_motion {
+        p.ambient_glow(c, f.x0, 0.0, f.w, row_h, 0.0, rgb, true)
+    } else {
+        None
+    };
 
     let cy = row_h / 2.0;
     let a = if is_lyrics { p.px(23.0) } else { p.px(20.0) };
@@ -1714,12 +1737,18 @@ fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live:
         live.compact_left = Some(left_c);
     }
 
-    let (bw, gap, bh) = if is_lyrics {
-        (p.px(2.8), p.px(2.6), p.px(14.0))
-    } else {
-        (p.px(3.0), p.px(3.0), p.px(13.0))
+    let style = prefs.visualizer;
+    let square = prefs.preset == nacre_core::theme::Preset::Pixel;
+    live.vis = style;
+    let n = style.count();
+    let (bw, gap, bh) = match style {
+        nacre_core::theme::VisStyle::Bars if is_lyrics => (p.px(2.8), p.px(2.6), p.px(14.0)),
+        nacre_core::theme::VisStyle::Bars => (p.px(3.0), p.px(3.0), p.px(13.0)),
+        nacre_core::theme::VisStyle::Spectrum => (p.px(1.6), p.px(0.8), p.px(14.0)),
+        nacre_core::theme::VisStyle::Wave => (p.px(1.0), p.px(0.5), p.px(15.0)),
+        nacre_core::theme::VisStyle::Dots => (p.px(3.6), p.px(1.2), p.px(3.6)),
     };
-    let vis_w = 5.0 * bw + 4.0 * gap;
+    let vis_w = n as f32 * bw + (n.saturating_sub(1)) as f32 * gap;
     let right_pad = if is_lyrics { p.px(13.0) } else { p.px(14.0) };
 
     if show_marquee {
@@ -1753,10 +1782,16 @@ fn compact_music(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, live:
         let _ = right_c.SetOffset(Vector3 { X: (f.x0 + f.w).round(), Y: 0.0, Z: 0.0 });
         let _ = c.Children().and_then(|k| k.InsertAtTop(&right_c));
         let bx0 = -(right_pad + vis_w);
-        for i in 0..5 {
-            if let Some(v) = p.rect(&right_c, bx0 + i as f32 * (bw + gap), cy - bh / 2.0, bw, bh, bw / 2.0, Color { A: 240, R: rgb[0], G: rgb[1], B: rgb[2] }) {
+        let radius = if square { 0.0 } else { bw / 2.0 };
+        let start = if style == nacre_core::theme::VisStyle::Dots {
+            Vector3 { X: 0.7, Y: 0.7, Z: 1.0 }
+        } else {
+            Vector3 { X: 1.0, Y: 0.28, Z: 1.0 }
+        };
+        for i in 0..n {
+            if let Some(v) = p.rect(&right_c, bx0 + i as f32 * (bw + gap), cy - bh / 2.0, bw, bh, radius, Color { A: 240, R: rgb[0], G: rgb[1], B: rgb[2] }) {
                 let _ = v.SetCenterPoint(Vector3 { X: bw / 2.0, Y: bh / 2.0, Z: 0.0 });
-                let _ = v.SetScale(Vector3 { X: 1.0, Y: 0.28, Z: 1.0 });
+                let _ = v.SetScale(start);
                 live.bars.push(v);
             }
         }

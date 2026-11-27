@@ -121,6 +121,11 @@ enum Action {
     Rail(Behavior),
     Reveal(u8, nacre_core::settings::Reveal),
     Screen(u8, nacre_core::display::Screen),
+    Preset(nacre_core::theme::Preset),
+    Visualizer(nacre_core::theme::VisStyle),
+    Font(nacre_core::theme::FontChoice),
+    ReduceMotion,
+    Relaunch,
     Theme(Theme),
     Lang(Lang),
     Tab(u8),
@@ -1085,6 +1090,11 @@ impl Win {
                         RowDef::Toggle(prefs::tr("Aktifkan Notch"), s.notch_enabled, Action::NotchOn),
                         RowDef::Seg(prefs::tr("Bentuk"), vec![(prefs::tr("Notch"), Action::NotchShape(false)), (prefs::tr("Capsule"), Action::NotchShape(true))], if s.notch_island { 1 } else { 0 }),
                         RowDef::Seg(prefs::tr("Perilaku"), behaviors(false), beh_idx(s.notch)),
+                        RowDef::Seg(
+                            prefs::tr("Visualizer musik"),
+                            nacre_core::theme::VisStyle::ALL.iter().map(|v| (prefs::tr(v.title()), Action::Visualizer(*v))).collect(),
+                            nacre_core::theme::VisStyle::ALL.iter().position(|v| *v == s.visualizer).unwrap_or(0),
+                        ),
                         RowDef::Slider(prefs::tr("Kebulatan sudut"), s.notch_round as u16, 3),
                         RowDef::Toggle(prefs::tr("Buka otomatis saat kursor di Notch"), s.notch_hover_open, Action::HoverOpen),
                     ],
@@ -1380,6 +1390,14 @@ impl Win {
                     (
                         None,
                         vec![RowDef::Seg(
+                            prefs::tr("Preset"),
+                            nacre_core::theme::Preset::ALL.iter().map(|p| (prefs::tr(p.title()), Action::Preset(*p))).collect(),
+                            nacre_core::theme::Preset::ALL.iter().position(|p| *p == s.preset).unwrap_or(0),
+                        )],
+                    ),
+                    (
+                        None,
+                        vec![RowDef::Seg(
                             prefs::tr("Skala Deck, Notch, Rail & Quick Panel"),
                             vec![("100%", Action::UiScale(100)), ("125%", Action::UiScale(125)), ("150%", Action::UiScale(150))],
                             scale_idx,
@@ -1399,6 +1417,21 @@ impl Win {
                     ),
                     (Some(prefs::tr("Tema")), theme),
                     (Some(prefs::tr("Kaca")), glass_rows),
+                    (Some(prefs::tr("Huruf dan gerak")), {
+                        use nacre_core::theme::FontChoice;
+                        let mut rows = vec![
+                            RowDef::Seg(
+                                prefs::tr("Font"),
+                                FontChoice::ALL.iter().map(|f| (f.title(), Action::Font(*f))).collect(),
+                                FontChoice::ALL.iter().position(|f| *f == s.font).unwrap_or(0),
+                            ),
+                            RowDef::Toggle(prefs::tr("Kurangi gerakan"), s.reduce_motion, Action::ReduceMotion),
+                        ];
+                        if s.font != prefs::launch_font() {
+                            rows.insert(1, RowDef::Pick(prefs::tr("Font baru berlaku setelah NOX dibuka ulang"), prefs::tr("Buka ulang").to_string(), Action::Relaunch));
+                        }
+                        rows
+                    }),
                 ]
             }
             5 => {
@@ -2382,6 +2415,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     2 => s.notch_screen = v,
                     _ => s.widget_screen = v,
                 }),
+                Some(Action::Preset(p)) => prefs::update(|s| nacre_core::theme::apply(s, p)),
+                Some(Action::Visualizer(v)) => prefs::update(|s| s.visualizer = v),
+                Some(Action::Font(f)) => prefs::update(|s| s.font = f),
+                Some(Action::ReduceMotion) => prefs::update(|s| s.reduce_motion = !s.reduce_motion),
+                Some(Action::Relaunch) => crate::mainwin::relaunch(),
                 Some(Action::Theme(t)) => prefs::update(|s| s.theme = t),
                 Some(Action::Lang(l)) => prefs::update(|s| s.lang = l),
                 Some(Action::WinShadow) => prefs::update(|s| s.win_shadow = !s.win_shadow),
