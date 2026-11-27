@@ -125,6 +125,12 @@ enum Action {
     Visualizer(nacre_core::theme::VisStyle),
     Font(nacre_core::theme::FontChoice),
     ReduceMotion,
+    CapLayout(nacre_core::notch::glance::Layout),
+    CapDecor(nacre_core::notch::glance::Decor),
+    CapToggle(u8),
+    CapMove(u8, bool),
+    PillDevices,
+    Meeting,
     Relaunch,
     Theme(Theme),
     Lang(Lang),
@@ -188,6 +194,7 @@ enum RowDef {
     Thumbs(&'static str, Vec<(&'static str, Thumb, Action)>, usize),
     Radios(Vec<(&'static str, Action)>, usize),
     Text(&'static str, String, String, u8),
+    Order(&'static str, bool, u8, bool, bool),
     /// `(label, index_1based, tab, visible, is_default, can_up, can_down, can_hide)`
     TabOrder(&'static str, usize, nacre_core::notch::state::Tab, bool, bool, bool, bool, bool),
 }
@@ -202,7 +209,7 @@ const ACCENT_NAMES: [&str; 9] = ["Multiwarna", "Biru", "Ungu", "Merah Muda", "Me
 
 fn row_label(r: &RowDef) -> &'static str {
     match r {
-        RowDef::Toggle(l, ..) | RowDef::Seg(l, ..) | RowDef::Slider(l, ..) | RowDef::Pick(l, ..) | RowDef::Info(l, ..) | RowDef::Swatches(l, ..) | RowDef::Thumbs(l, ..) | RowDef::Text(l, ..) | RowDef::TabOrder(l, ..) => l,
+        RowDef::Toggle(l, ..) | RowDef::Seg(l, ..) | RowDef::Slider(l, ..) | RowDef::Pick(l, ..) | RowDef::Info(l, ..) | RowDef::Swatches(l, ..) | RowDef::Thumbs(l, ..) | RowDef::Text(l, ..) | RowDef::Order(l, ..) | RowDef::TabOrder(l, ..) => l,
         RowDef::Radios(..) => "",
     }
 }
@@ -924,6 +931,33 @@ impl Win {
                     self.text(c, "\u{2303}", bx + vw - 14.0 * d, by + (bh - 16.0 * d) / 2.0, 10.0, 600, look.fg, 0.6, 1);
                     self.region(x0, y, cw, rh, *act);
                 }
+                RowDef::Order(label, on, idx, up, down) => {
+                    self.text(c, label, lx, y + (rh - 17.0 * d) / 2.0, 13.5, 400, look.fg, if *on { 0.95 } else { 0.50 }, 0);
+                    let (tw, th) = (46.0 * d, 22.0 * d);
+                    let (tx, ty) = (rx - tw, y + (rh - th) / 2.0);
+                    self.rect(c, tx, ty, tw, th, th / 2.0, if *on { col(accent, 255) } else { col(look.fg, 60) });
+                    let knob = th - 4.0 * d;
+                    let kw = knob * 1.55;
+                    let kx = if *on { tx + tw - kw - 2.0 * d } else { tx + 2.0 * d };
+                    self.rect(c, kx, ty + 2.0 * d, kw, knob, knob / 2.0, Color { A: 255, R: 255, G: 255, B: 255 });
+                    self.region(tx - 4.0 * d, y, tw + 8.0 * d, rh, Action::CapToggle(*idx));
+                    if *on {
+                        let (bw, bh, gap) = (26.0 * d, 24.0 * d, 6.0 * d);
+                        let by = y + (rh - bh) / 2.0;
+                        let dn_x = tx - 10.0 * d - bw;
+                        let up_x = dn_x - gap - bw;
+                        self.rect(c, up_x, by, bw, bh, 7.0 * d, col(look.fg, if *up { 30 } else { 12 }));
+                        self.text(c, "\u{2191}", up_x + bw / 2.0, by + (bh - 15.0 * d) / 2.0 - 0.5, 12.0, 600, look.fg, if *up { 0.92 } else { 0.25 }, 1);
+                        if *up {
+                            self.region(up_x, y, bw, rh, Action::CapMove(*idx, true));
+                        }
+                        self.rect(c, dn_x, by, bw, bh, 7.0 * d, col(look.fg, if *down { 30 } else { 12 }));
+                        self.text(c, "\u{2193}", dn_x + bw / 2.0, by + (bh - 15.0 * d) / 2.0 - 0.5, 12.0, 600, look.fg, if *down { 0.92 } else { 0.25 }, 1);
+                        if *down {
+                            self.region(dn_x, y, bw, rh, Action::CapMove(*idx, false));
+                        }
+                    }
+                }
                 RowDef::TabOrder(label, num, tab, visible, is_default, can_up, can_down, can_hide) => {
                     let lbl_txt = format!("{num}. {label}");
                     let lbl_op = if *visible { 0.95 } else { 0.42 };
@@ -1124,6 +1158,8 @@ impl Win {
                         if s.notch_notifs {
                             rows.push(RowDef::Pick(prefs::tr("Listener notifikasi Windows"), st.to_string(), Action::NotifSetup));
                         }
+                        rows.push(RowDef::Toggle(prefs::tr("Perangkat Bluetooth & flashdisk tersambung"), s.pill_devices, Action::PillDevices));
+                        rows.push(RowDef::Toggle(prefs::tr("Pengingat rapat (Google & Kalender Windows)"), s.meeting_companion, Action::Meeting));
                         rows
                     },
                 ));
@@ -1149,6 +1185,34 @@ impl Win {
                         rows
                     },
                 ));
+                if s.notch_idle == 0 {
+                    use nacre_core::notch::glance::{Decor, Layout};
+                    let mut rows = vec![
+                        RowDef::Seg(
+                            prefs::tr("Tata letak"),
+                            vec![(prefs::tr("Bergantian"), Action::CapLayout(Layout::Rotate)), (prefs::tr("Berdampingan"), Action::CapLayout(Layout::Split))],
+                            usize::from(s.capsule_layout == Layout::Split),
+                        ),
+                        RowDef::Seg(
+                            prefs::tr("Hiasan"),
+                            vec![
+                                (prefs::tr("Tidak ada"), Action::CapDecor(Decor::None)),
+                                (prefs::tr("Titik aksen"), Action::CapDecor(Decor::Dot)),
+                                (prefs::tr("Kilau tepi"), Action::CapDecor(Decor::Edge)),
+                            ],
+                            match s.capsule_decor {
+                                Decor::None => 0,
+                                Decor::Dot => 1,
+                                Decor::Edge => 2,
+                            },
+                        ),
+                    ];
+                    let on = s.capsule.on as usize;
+                    for (i, it) in s.capsule.order.iter().enumerate() {
+                        rows.push(RowDef::Order(prefs::tr(it.title()), i < on, i as u8, i < on && i > 0, i + 1 < on));
+                    }
+                    groups.push((Some(prefs::tr("Modul Capsule")), rows));
+                }
                 groups.push((
                     Some(prefs::tr("Lirik")),
                     {
@@ -2419,6 +2483,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 Some(Action::Visualizer(v)) => prefs::update(|s| s.visualizer = v),
                 Some(Action::Font(f)) => prefs::update(|s| s.font = f),
                 Some(Action::ReduceMotion) => prefs::update(|s| s.reduce_motion = !s.reduce_motion),
+                Some(Action::CapLayout(l)) => prefs::update(|s| s.capsule_layout = l),
+                Some(Action::CapDecor(d)) => prefs::update(|s| s.capsule_decor = d),
+                Some(Action::CapToggle(i)) => prefs::update(|s| s.capsule.toggle(i as usize)),
+                Some(Action::CapMove(i, up)) => prefs::update(|s| s.capsule.shift(i as usize, up)),
+                Some(Action::PillDevices) => prefs::update(|s| s.pill_devices = !s.pill_devices),
+                Some(Action::Meeting) => prefs::update(|s| s.meeting_companion = !s.meeting_companion),
                 Some(Action::Relaunch) => crate::mainwin::relaunch(),
                 Some(Action::Theme(t)) => prefs::update(|s| s.theme = t),
                 Some(Action::Lang(l)) => prefs::update(|s| s.lang = l),

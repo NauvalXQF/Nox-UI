@@ -377,6 +377,11 @@ pub struct Settings {
     pub font: crate::theme::FontChoice,
     pub reduce_motion: bool,
     pub notch_glow: bool,
+    pub capsule: crate::notch::glance::Capsule,
+    pub capsule_layout: crate::notch::glance::Layout,
+    pub capsule_decor: crate::notch::glance::Decor,
+    pub pill_devices: bool,
+    pub meeting_companion: bool,
 }
 
 pub const ALL_NOTCH_TABS_MASK: u8 = 0b0111_1111;
@@ -467,6 +472,11 @@ impl Default for Settings {
             font: crate::theme::FontChoice::Inter,
             reduce_motion: false,
             notch_glow: true,
+            capsule: crate::notch::glance::Capsule::default(),
+            capsule_layout: crate::notch::glance::Layout::Rotate,
+            capsule_decor: crate::notch::glance::Decor::None,
+            pill_devices: true,
+            meeting_companion: true,
         }
     }
 }
@@ -744,6 +754,11 @@ impl Settings {
                 "font" => s.font = crate::theme::FontChoice::parse(v).unwrap_or(s.font),
                 "reduce_motion" => s.reduce_motion = parse_bool(v).unwrap_or(s.reduce_motion),
                 "notch_glow" => s.notch_glow = parse_bool(v).unwrap_or(s.notch_glow),
+                "capsule" => s.capsule = crate::notch::glance::Capsule::parse(v),
+                "capsule_layout" => s.capsule_layout = crate::notch::glance::Layout::parse(v).unwrap_or(s.capsule_layout),
+                "capsule_decor" => s.capsule_decor = crate::notch::glance::Decor::parse(v).unwrap_or(s.capsule_decor),
+                "pill_devices" => s.pill_devices = parse_bool(v).unwrap_or(s.pill_devices),
+                "meeting_companion" => s.meeting_companion = parse_bool(v).unwrap_or(s.meeting_companion),
                 "autostart" => {
                     if let Some(b) = parse_bool(v) {
                         s.autostart = b;
@@ -811,7 +826,7 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\npreset={}\nvisualizer={}\nfont={}\nreduce_motion={}\nnotch_glow={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\npreset={}\nvisualizer={}\nfont={}\nreduce_motion={}\nnotch_glow={}\ncapsule={}\ncapsule_layout={}\ncapsule_decor={}\npill_devices={}\nmeeting_companion={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -897,7 +912,12 @@ impl Settings {
             self.visualizer.key(),
             self.font.key(),
             self.reduce_motion,
-            self.notch_glow
+            self.notch_glow,
+            self.capsule.text(),
+            self.capsule_layout.key(),
+            self.capsule_decor.key(),
+            self.pill_devices,
+            self.meeting_companion
         )
     }
 }
@@ -1263,10 +1283,14 @@ dock_margin=900");
 
     #[test]
     fn theme_font_visualizer_round_trip() {
+        use crate::notch::glance::{Capsule, Decor, Layout};
         use crate::theme::{FontChoice, Preset, VisStyle};
         let d = Settings::default();
         assert_eq!((d.preset, d.visualizer, d.font, d.reduce_motion, d.notch_glow), (Preset::Default, VisStyle::Bars, FontChoice::Inter, false, true));
-        let f = Settings::parse(&Settings::parse("preset=neon\nvisualizer=dots\nfont=mono\nreduce_motion=1\nnotch_glow=0\n").serialize());
+        assert_eq!((d.capsule, d.capsule_layout, d.capsule_decor, d.pill_devices, d.meeting_companion), (Capsule::default(), Layout::Rotate, Decor::None, true, true));
+        let f = Settings::parse(&Settings::parse("preset=neon\nvisualizer=dots\nfont=mono\nreduce_motion=1\nnotch_glow=0\ncapsule=clock,system,agenda\ncapsule_layout=split\ncapsule_decor=edge\npill_devices=0\nmeeting_companion=0\n").serialize());
         assert_eq!((f.preset, f.visualizer, f.font, f.reduce_motion, f.notch_glow), (Preset::Neon, VisStyle::Dots, FontChoice::Mono, true, false));
+        assert_eq!((f.capsule_layout, f.capsule_decor, f.pill_devices, f.meeting_companion), (Layout::Split, Decor::Edge, false, false));
+        assert_eq!(f.capsule.text(), "clock,system,agenda");
     }
 }

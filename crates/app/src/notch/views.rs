@@ -51,6 +51,7 @@ pub enum Action {
     GeminiCopy,
     GeminiClear,
     GeminiQuick(u8),
+    MeetingJoin,
 }
 
 pub struct Region {
@@ -106,7 +107,9 @@ pub struct Data<'a> {
     pub battery: Option<(u8, bool)>,
     pub timer: &'a Timer,
     pub now_ms: i64,
-    pub glance: Option<(Item, String)>,
+    pub glance: Vec<(Item, String)>,
+    pub pill: Option<PillView<'a>>,
+    pub meeting: Option<MeetingView<'a>>,
     pub media: Option<MediaView<'a>>,
     pub lyrics: LyricsView<'a>,
     pub lyrics_open: bool,
@@ -164,6 +167,20 @@ pub struct Data<'a> {
 pub struct PrayerView<'a> {
     pub city: &'a str,
     pub snap: nacre_core::notch::prayer::PrayerSnapshot,
+}
+
+pub struct PillView<'a> {
+    pub kind: nacre_core::notch::pills::Kind,
+    pub title: &'a str,
+    pub sub: &'a str,
+}
+
+pub struct MeetingView<'a> {
+    pub title: &'a str,
+    pub when: nacre_core::quick::When,
+    pub link: bool,
+    pub cam: bool,
+    pub mic: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -667,7 +684,9 @@ pub fn draw(p: &mut Painter, c: &ContainerVisual, look: Look, f: Frame, d: &Data
             compact_timer(p, c, f, d, urgent)
         }
         View::Compact(Activity::Charging) => compact_charging(p, c, f, d),
-        View::Compact(Activity::Glance) => compact_glance(p, c, f, d),
+        View::Compact(Activity::Glance | Activity::GlancePair) => compact_glance(p, c, f, d),
+        View::Compact(Activity::Pill) => compact_pill(p, c, f, d),
+        View::Compact(Activity::Meeting) => compact_meeting(p, c, f, d, regions),
         View::Compact(Activity::Music) => compact_music(p, c, f, d, live, f.h, true),
         View::Compact(Activity::Lyrics) => compact_lyrics(p, c, f, d, live),
         View::Compact(Activity::Shelf) => compact_shelf(p, c, f, d),
@@ -1973,32 +1992,175 @@ fn music_column(
     Some((left_group, title_clip_vis, title_clip_h, cy, ctrl_groups))
 }
 
-fn compact_glance(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
-    let Some((item, text)) = &d.glance else { return };
-    let cy = f.h / 2.0;
-    let th = p.px(12.5) * 1.3;
-    if *item == Item::Greeting {
-        let max = f.w - p.px(32.0);
-        let shown = p.fit(text, 12.5, 600, max);
-        p.text(c, &shown, f.x0 + f.w / 2.0, cy - th / 2.0, 12.5, 600, WHITE, 0.95, Anchor::Center, max + p.px(2.0));
-        return;
-    }
-    let left = f.x0 + p.px(14.0);
-    let icon_w = match item {
+fn glance_icon(p: &mut Painter, c: &ContainerVisual, item: Item, x: f32, cy: f32, d: &Data) -> f32 {
+    match item {
+        Item::Greeting => 0.0,
         Item::Battery => {
             let (pct, ch) = d.battery.unwrap_or((0, false));
-            p.battery(c, left, cy, pct, ch)
+            p.battery(c, x, cy, pct, ch)
         }
-        _ => {
-            let sym = if *item == Item::Clock { Sym::Clock } else { Sym::Calendar };
-            p.sym(c, sym, left + p.px(8.0), cy, 15.0, WHITE, 0.9);
-            p.px(16.0)
+        Item::Clock => {
+            p.sym(c, Sym::Clock, x + p.px(7.5), cy, 14.0, WHITE, 0.9);
+            p.px(15.0)
+        }
+        Item::Date | Item::Agenda => {
+            p.sym(c, Sym::Calendar, x + p.px(7.5), cy, 14.0, WHITE, 0.9);
+            p.px(15.0)
+        }
+        Item::System => {
+            p.sym(c, Sym::Control, x + p.px(7.5), cy, 13.5, WHITE, 0.9);
+            p.px(15.0)
+        }
+        Item::Wifi => {
+            p.sym(c, Sym::Wifi, x + p.px(7.5), cy, 14.0, WHITE, 0.9);
+            p.px(15.0)
+        }
+    }
+}
+
+fn glance_icon_w(p: &Painter, item: Item) -> f32 {
+    match item {
+        Item::Greeting => 0.0,
+        Item::Battery => p.px(22.0),
+        _ => p.px(15.0),
+    }
+}
+
+fn compact_glance(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
+    let prefs = crate::prefs::get();
+    if prefs.capsule_decor == nacre_core::notch::glance::Decor::Edge && !prefs.reduce_motion && !d.glance.is_empty() {
+        let _ = p.ambient_glow(c, f.x0, 0.0, f.w, f.h, 0.0, crate::prefs::accent(), true);
+    }
+    let cy = f.h / 2.0;
+    let th = p.px(12.5) * 1.3;
+    let ty = cy - th / 2.0;
+    let mut left = f.x0 + p.px(14.0);
+    let right = f.x0 + f.w - p.px(16.0);
+    if prefs.capsule_decor == nacre_core::notch::glance::Decor::Dot && !d.glance.is_empty() {
+        let r = p.px(6.0);
+        let a = crate::prefs::accent();
+        p.rect(c, left, cy - r / 2.0, r, r, r / 2.0, Color { A: 255, R: a[0], G: a[1], B: a[2] });
+        left += p.px(12.0);
+    }
+    match d.glance.as_slice() {
+        [] => {}
+        [(Item::Greeting, text)] => {
+            let max = right - left;
+            let shown = p.fit(text, 12.5, 600, max);
+            p.text(c, &shown, (left + right) / 2.0, ty, 12.5, 600, WHITE, 0.95, Anchor::Center, max + p.px(2.0));
+        }
+        [(item, text)] => {
+            let iw = glance_icon(p, c, *item, left, cy, d);
+            let max = (right - (left + iw + p.px(10.0))).max(0.0);
+            let shown = p.fit(text, 12.5, 600, max);
+            p.text(c, &shown, right, ty, 12.5, 600, WHITE, 0.95, Anchor::Right, max + p.px(2.0));
+        }
+        [(a, ta), (b, tb), ..] => {
+            let mid = f.x0 + f.w / 2.0;
+            let iw = glance_icon(p, c, *a, left, cy, d);
+            let lx = if iw > 0.0 { left + iw + p.px(6.0) } else { left };
+            let lmax = (mid - p.px(6.0) - lx).max(0.0);
+            let ls = p.fit(ta, 12.0, 600, lmax);
+            p.text(c, &ls, lx, ty, 12.0, 600, WHITE, 0.95, Anchor::Left, lmax + p.px(2.0));
+
+            p.rect(c, mid - 0.5, cy - p.px(6.0), 1.0, p.px(12.0), 0.5, white(36));
+
+            let bw = glance_icon_w(p, *b);
+            let rmax = (right - mid - p.px(6.0) - if bw > 0.0 { bw + p.px(6.0) } else { 0.0 }).max(0.0);
+            let rs = p.fit(tb, 12.0, 600, rmax);
+            let rw = p.measure(&rs, 12.0, 600);
+            if bw > 0.0 {
+                let ix = (right - rw - p.px(6.0) - bw).max(mid + p.px(6.0));
+                glance_icon(p, c, *b, ix, cy, d);
+            }
+            p.text(c, &rs, right, ty, 12.0, 600, WHITE, 0.95, Anchor::Right, rmax + p.px(2.0));
+        }
+    }
+}
+
+fn compact_pill(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {
+    use nacre_core::notch::pills::Kind;
+    let Some(pv) = &d.pill else { return };
+    let cy = f.h / 2.0;
+    let accent = crate::prefs::accent();
+    let (sym, rgb) = match pv.kind {
+        Kind::Reminder => (Sym::Clock, ORANGE),
+        Kind::Notice | Kind::Info => (Sym::Info, accent),
+        Kind::Update => (Sym::ArrowDown, GREEN),
+        Kind::Device => {
+            let t = pv.title.to_lowercase();
+            let s = if pv.sub.contains(':') || t.contains("disk") || t.contains("usb") || t.contains("drive") {
+                Sym::Folder
+            } else if t.contains("mouse") {
+                Sym::Mouse
+            } else if t.contains("keyboard") || t.contains("keyb") {
+                Sym::Keyboard
+            } else if ["buds", "airpods", "headphone", "headset", "earphone", "wh-", "wf-", "jbl", "tws"].iter().any(|k| t.contains(k)) {
+                Sym::Headphones
+            } else {
+                Sym::Bluetooth
+            };
+            (s, accent)
         }
     };
-    let right = f.x0 + f.w - p.px(16.0);
-    let max = right - (left + icon_w + p.px(10.0));
-    let shown = p.fit(text, 12.5, 600, max);
-    p.text(c, &shown, right, cy - th / 2.0, 12.5, 600, WHITE, 0.95, Anchor::Right, max + p.px(2.0));
+    let ix = f.x0 + p.px(22.0);
+    let r = p.px(11.0);
+    p.rect(c, ix - r, cy - r, 2.0 * r, 2.0 * r, r, Color { A: 255, R: rgb[0], G: rgb[1], B: rgb[2] });
+    p.sym(c, sym, ix, cy, 12.0, WHITE, 1.0);
+    let th = p.px(12.5) * 1.3;
+    let sub_w = if pv.sub.is_empty() { 0.0 } else { (p.measure(pv.sub, 11.5, 500) + p.px(4.0)).min(f.w * 0.42) };
+    let tx = ix + r + p.px(10.0);
+    let tw = (f.x0 + f.w - p.px(16.0) - sub_w - p.px(10.0) - tx).max(p.px(40.0));
+    let title = p.fit(pv.title, 12.5, 600, tw);
+    p.text(c, &title, tx, cy - th / 2.0, 12.5, 600, WHITE, 0.98, Anchor::Left, tw + p.px(4.0));
+    if !pv.sub.is_empty() {
+        let sub = p.fit(pv.sub, 11.5, 500, sub_w);
+        let sth = p.px(11.5) * 1.3;
+        p.text(c, &sub, f.x0 + f.w - p.px(16.0), cy - sth / 2.0, 11.5, 500, WHITE, 0.65, Anchor::Right, sub_w + p.px(2.0));
+    }
+}
+
+fn compact_meeting(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, regions: &mut Vec<Region>) {
+    use nacre_core::quick::When;
+    let Some(m) = &d.meeting else { return };
+    let cy = f.h / 2.0;
+    let live = matches!(m.when, When::Live(_));
+    let rgb = if live { GREEN } else { ORANGE };
+    let dot = p.px(8.0);
+    p.rect(c, f.x0 + p.px(16.0), cy - dot / 2.0, dot, dot, dot / 2.0, Color { A: 255, R: rgb[0], G: rgb[1], B: rgb[2] });
+    let th = p.px(12.5) * 1.3;
+    let mut right = f.x0 + f.w - p.px(12.0);
+    if m.link {
+        let label = tr("Gabung");
+        let (bw, bh) = (p.measure(label, 11.5, 700) + p.px(18.0), p.px(20.0));
+        let bx = right - bw;
+        p.rect(c, bx, cy - bh / 2.0, bw, bh, bh / 2.0, Color { A: 255, R: GREEN[0], G: GREEN[1], B: GREEN[2] });
+        let bt = p.px(11.5) * 1.3;
+        p.text(c, label, bx + bw / 2.0, cy - bt / 2.0, 11.5, 700, [4, 52, 44], 1.0, Anchor::Center, bw);
+        regions.push(Region { x: bx - p.px(4.0), y: 0.0, w: bw + p.px(8.0), h: f.h, action: Action::MeetingJoin, vis: None, hover_bg: None });
+        right = bx - p.px(10.0);
+    }
+    if live {
+        for (on, col) in [(m.cam, GREEN), (m.mic, ORANGE)] {
+            if on {
+                let r = p.px(3.5);
+                p.rect(c, right - 2.0 * r, cy - r, 2.0 * r, 2.0 * r, r, Color { A: 255, R: col[0], G: col[1], B: col[2] });
+                right -= 2.0 * r + p.px(6.0);
+            }
+        }
+    }
+    let when = match m.when {
+        When::Soon(0) => tr("sekarang").to_string(),
+        When::Soon(n) => format!("{n} {}", tr("mnt lagi")),
+        When::Live(n) => format!("{n} {}", tr("mnt")),
+    };
+    let when_w = p.measure(&when, 11.5, 600) + p.px(4.0);
+    let wth = p.px(11.5) * 1.3;
+    p.text(c, &when, right, cy - wth / 2.0, 11.5, 600, WHITE, 0.72, Anchor::Right, when_w + p.px(2.0));
+    let tx = f.x0 + p.px(31.0);
+    let tw = (right - when_w - p.px(8.0) - tx).max(p.px(40.0));
+    let title = p.fit(m.title, 12.5, 600, tw);
+    p.text(c, &title, tx, cy - th / 2.0, 12.5, 600, WHITE, 0.96, Anchor::Left, tw + p.px(2.0));
 }
 
 fn compact_download(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data) {

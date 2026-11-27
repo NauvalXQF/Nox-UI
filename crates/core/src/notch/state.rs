@@ -118,6 +118,8 @@ pub enum Activity {
     PrayerAlert,
     TimerEnding,
     Download,
+    Pill,
+    Meeting,
     Player,
     Lyrics,
     Music,
@@ -125,6 +127,7 @@ pub enum Activity {
     Timer,
     Shelf,
     Glance,
+    GlancePair,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -141,6 +144,9 @@ pub struct Live {
     pub glance: bool,
     pub download: bool,
     pub wide_music: bool,
+    pub pill: bool,
+    pub meeting: bool,
+    pub glance_pair: bool,
 }
 
 pub fn activity(l: &Live) -> Option<Activity> {
@@ -155,6 +161,12 @@ pub fn activity(l: &Live) -> Option<Activity> {
     }
     if l.download {
         return Some(Activity::Download);
+    }
+    if l.pill {
+        return Some(Activity::Pill);
+    }
+    if l.meeting {
+        return Some(Activity::Meeting);
     }
     if l.media && l.wide_music {
         return Some(Activity::Player);
@@ -175,7 +187,7 @@ pub fn activity(l: &Live) -> Option<Activity> {
         return Some(Activity::Shelf);
     }
     if l.glance {
-        return Some(Activity::Glance);
+        return Some(if l.glance_pair { Activity::GlancePair } else { Activity::Glance });
     }
     None
 }
@@ -478,7 +490,10 @@ pub fn size_with(l: Look, dpi: f32, ctx: SizeContext) -> Size {
         View::Compact(Activity::PrayerAlert) => (350.0, 46.0, 20.0),
         View::Compact(Activity::Lyrics) => (360.0, 36.0, 18.0),
         View::Compact(Activity::Glance) => (220.0, 30.0, 15.0),
+        View::Compact(Activity::GlancePair) => (300.0, 30.0, 15.0),
         View::Compact(Activity::Download) => (300.0, 36.0, 18.0),
+        View::Compact(Activity::Pill) => (330.0, 36.0, 18.0),
+        View::Compact(Activity::Meeting) => (336.0, 36.0, 18.0),
         View::Compact(Activity::Player) => (540.0, 100.0, 30.0),
         View::Compact(_) => (292.0, 30.0, 15.0),
         View::Open(Tab::Play) if ctx.lyrics_open => (530.0, 186.0, 28.0),
@@ -578,12 +593,14 @@ mod tests {
 
     #[test]
     fn activity_priority() {
-        let base = Live { notification: false, prayer_alert: false, media: true, playing: true, lyric_line: true, lyrics_on: true, timer_left_s: Some(30), charging_fresh: true, shelf: 2, glance: true, download: true, wide_music: false };
+        let base = Live { notification: false, prayer_alert: false, pill: false, meeting: false, media: true, playing: true, lyric_line: true, lyrics_on: true, timer_left_s: Some(30), charging_fresh: true, shelf: 2, glance: true, glance_pair: false, download: true, wide_music: false };
         assert_eq!(activity(&Live { prayer_alert: true, notification: true, ..base }), Some(Activity::PrayerAlert));
         assert_eq!(activity(&Live { notification: true, ..base }), Some(Activity::Notification));
         assert_eq!(activity(&base), Some(Activity::TimerEnding));
         assert_eq!(activity(&Live { timer_left_s: Some(300), ..base }), Some(Activity::Download), "unduhan di atas lirik dan musik");
         let l = Live { timer_left_s: Some(300), download: false, ..base };
+        assert_eq!(activity(&Live { pill: true, meeting: true, ..l }), Some(Activity::Pill), "pil perangkat di atas rapat dan musik");
+        assert_eq!(activity(&Live { meeting: true, ..l }), Some(Activity::Meeting), "rapat segera di atas musik");
         assert_eq!(activity(&Live { wide_music: true, ..l }), Some(Activity::Player), "lebar menggantikan lirik/musik ringkas");
         assert_eq!(activity(&Live { wide_music: true, playing: false, ..l }), Some(Activity::Player), "dijeda: tetap tampil");
         assert_eq!(activity(&Live { wide_music: true, media: false, playing: false, charging_fresh: false, timer_left_s: None, shelf: 0, glance: false, ..l }), None, "tanpa lagu: notch kosong");
@@ -597,6 +614,7 @@ mod tests {
         assert_eq!(activity(&Live { charging_fresh: false, timer_left_s: None, ..no_media }), Some(Activity::Shelf));
         let idle = Live { charging_fresh: false, timer_left_s: None, shelf: 0, ..no_media };
         assert_eq!(activity(&idle), Some(Activity::Glance), "sapaan & info hanya bila tidak ada apa-apa lagi");
+        assert_eq!(activity(&Live { glance_pair: true, ..idle }), Some(Activity::GlancePair), "mode berdampingan menampilkan dua modul sekaligus");
         assert_eq!(activity(&Live { glance: false, ..idle }), None);
         assert_eq!(activity(&Live::default()), None);
     }

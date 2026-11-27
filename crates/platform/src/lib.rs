@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod cred;
 pub mod cursors;
 pub mod desktopicons;
+pub mod devices;
 pub mod dlwatch;
 pub mod downloads;
 pub mod filesearch;

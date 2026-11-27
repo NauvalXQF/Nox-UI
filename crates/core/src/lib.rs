@@ -8,6 +8,7 @@ pub mod genie;
 pub mod iconplate;
 pub mod preview;
 pub mod qr;
+pub mod quick;
 pub mod hud;
 pub mod island;
 pub mod logo;
