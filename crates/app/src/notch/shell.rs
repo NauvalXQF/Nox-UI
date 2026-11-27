@@ -30,6 +30,9 @@ unsafe extern "system" fn shadow_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 pub const ONYX: (u8, u8, u8) = (0, 0, 0);
 /// Seamless pure-black outer edge: zero gray hairline separating the `#000000` body from its shadow.
 const INNER_RIM_BLACK: Color = Color { A: 0, R: 0, G: 0, B: 0 };
+/// Extra top headroom on the offscreen shadow mask so downward-offset `DropShadow`s
+/// wrap continuously around the top-bezel shoulders all the way to `y = 0`.
+const SHADOW_TOP_PAD: f32 = 36.0;
 
 pub fn glass_params(radius: f32) -> GlassParams {
     let look = crate::prefs::look(crate::prefs::Role::Notch);
@@ -61,10 +64,12 @@ pub struct Shell {
     pub stage: ContainerVisual,
     elev_host: SpriteVisual,
     elev_shadow: DropShadow,
+    elev_mask_vis: ShapeVisual,
+    elev_mask_surface: CompositionVisualSurface,
     contact_host: SpriteVisual,
     contact_shadow: DropShadow,
-    mask_vis: ShapeVisual,
-    mask_surface: CompositionVisualSurface,
+    contact_mask_vis: ShapeVisual,
+    contact_mask_surface: CompositionVisualSurface,
     shell_root: ContainerVisual,
     backdrop: SpriteVisual,
     tint: SpriteVisual,
@@ -74,6 +79,7 @@ pub struct Shell {
     rim: ShapeVisual,
     rim_brush: CompositionColorBrush,
     path_geo: CompositionPathGeometry,
+    elev_mask_geo: CompositionPathGeometry,
     rim_geo: CompositionPathGeometry,
     tier: Tier,
 }
@@ -148,23 +154,27 @@ impl Shell {
         stage.SetSize(sz)?;
         root.Children()?.InsertAtTop(&stage)?;
 
-        // Shared single CompositionPathGeometry for clip, inner rim, and Dual-Layer GPU DropShadow mask.
+        // Shared exact Visor CompositionPathGeometry for body clip + zero-overhang contact shadow,
+        // paired with a dedicated inner-body padded mask for the soft downward elevation shadow so
+        // bezel-attached shoulders transition seamlessly into y = 0 with zero floating ear overhang.
         let path_geo = comp.CreatePathGeometry()?;
         let shell_clip: CompositionGeometricClip = comp.CreateGeometricClip()?;
         shell_clip.SetGeometry(&path_geo)?;
 
-        let mask_shape: CompositionSpriteShape = comp.CreateSpriteShapeWithGeometry(&path_geo)?;
-        mask_shape.SetFillBrush(&comp.CreateColorBrushWithColor(Color { A: 255, R: 255, G: 255, B: 255 })?)?;
-        let mask_vis = comp.CreateShapeVisual()?;
-        mask_vis.SetSize(sz)?;
-        mask_vis.Shapes()?.Append(&mask_shape)?;
+        let elev_mask_sz = Vector2 { X: sz.X, Y: sz.Y + SHADOW_TOP_PAD };
+        let elev_mask_geo = comp.CreatePathGeometry()?;
+        let elev_mask_shape: CompositionSpriteShape = comp.CreateSpriteShapeWithGeometry(&elev_mask_geo)?;
+        elev_mask_shape.SetFillBrush(&comp.CreateColorBrushWithColor(Color { A: 255, R: 255, G: 255, B: 255 })?)?;
+        let elev_mask_vis = comp.CreateShapeVisual()?;
+        elev_mask_vis.SetSize(elev_mask_sz)?;
+        elev_mask_vis.Shapes()?.Append(&elev_mask_shape)?;
 
-        let mask_surface = comp.CreateVisualSurface()?;
-        mask_surface.SetSourceVisual(&mask_vis)?;
-        mask_surface.SetSourceSize(sz)?;
+        let elev_mask_surface = comp.CreateVisualSurface()?;
+        elev_mask_surface.SetSourceVisual(&elev_mask_vis)?;
+        elev_mask_surface.SetSourceSize(elev_mask_sz)?;
 
-        // Layer 1 (outer): Broad, soft Elevation Drop Shadow floating above bars and desktop windows.
-        let elev_mask = comp.CreateSurfaceBrushWithSurface(&mask_surface)?;
+        // Layer 1 (outer): Broad, soft Elevation Drop Shadow using the inner-body padded mask.
+        let elev_mask = comp.CreateSurfaceBrushWithSurface(&elev_mask_surface)?;
         let elev_shadow = comp.CreateDropShadow()?;
         elev_shadow.SetColor(Color { A: 255, R: 0, G: 0, B: 0 })?;
         elev_shadow.SetBlurRadius(20.0)?;
@@ -173,16 +183,28 @@ impl Shell {
         elev_shadow.SetMask(&elev_mask)?;
 
         let elev_host = comp.CreateSpriteVisual()?;
-        elev_host.SetSize(sz)?;
+        elev_host.SetSize(elev_mask_sz)?;
+        elev_host.SetOffset(Vector3 { X: 0.0, Y: -SHADOW_TOP_PAD, Z: 0.0 })?;
         elev_host.SetShadow(&elev_shadow)?;
         sh_stage.Children()?.InsertAtTop(&elev_host)?;
 
-        // Layer 2 (inner): Tight, dense Contact Shadow hugging the pure-black silhouette edge.
-        let contact_mask = comp.CreateSurfaceBrushWithSurface(&mask_surface)?;
+        // Layer 2 (inner): Tight, dense Contact Shadow sharing the exact Visor silhouette `path_geo`
+        // at Y = 0 (zero top-cap overhang under outer ear tips).
+        let contact_mask_shape: CompositionSpriteShape = comp.CreateSpriteShapeWithGeometry(&path_geo)?;
+        contact_mask_shape.SetFillBrush(&comp.CreateColorBrushWithColor(Color { A: 255, R: 255, G: 255, B: 255 })?)?;
+        let contact_mask_vis = comp.CreateShapeVisual()?;
+        contact_mask_vis.SetSize(sz)?;
+        contact_mask_vis.Shapes()?.Append(&contact_mask_shape)?;
+
+        let contact_mask_surface = comp.CreateVisualSurface()?;
+        contact_mask_surface.SetSourceVisual(&contact_mask_vis)?;
+        contact_mask_surface.SetSourceSize(sz)?;
+
+        let contact_mask = comp.CreateSurfaceBrushWithSurface(&contact_mask_surface)?;
         let contact_shadow = comp.CreateDropShadow()?;
         contact_shadow.SetColor(Color { A: 255, R: 0, G: 0, B: 0 })?;
         contact_shadow.SetBlurRadius(5.0)?;
-        contact_shadow.SetOffset(Vector3 { X: 0.0, Y: 2.0, Z: 0.0 })?;
+        contact_shadow.SetOffset(Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
         contact_shadow.SetOpacity(0.85)?;
         contact_shadow.SetMask(&contact_mask)?;
 
@@ -234,10 +256,12 @@ impl Shell {
             stage,
             elev_host,
             elev_shadow,
+            elev_mask_vis,
+            elev_mask_surface,
             contact_host,
             contact_shadow,
-            mask_vis,
-            mask_surface,
+            contact_mask_vis,
+            contact_mask_surface,
             shell_root,
             backdrop,
             tint,
@@ -247,6 +271,7 @@ impl Shell {
             rim,
             rim_brush,
             path_geo,
+            elev_mask_geo,
             rim_geo,
             tier,
         };
@@ -256,16 +281,20 @@ impl Shell {
 
     pub fn place(&self, owner_hwnd: HWND, wx: i32, wy: i32, canvas: (i32, i32)) {
         let sz = Vector2 { X: canvas.0 as f32, Y: canvas.1 as f32 };
+        let elev_mask_sz = Vector2 { X: sz.X, Y: sz.Y + SHADOW_TOP_PAD };
         unsafe {
             let _ = SetWindowPos(self.sh_hwnd, Some(owner_hwnd), wx, wy, canvas.0, canvas.1, SWP_NOACTIVATE);
         }
         let _ = self._sh_surface.root.SetSize(sz);
         let _ = self.sh_stage.SetSize(sz);
         let _ = self.stage.SetSize(sz);
-        let _ = self.elev_host.SetSize(sz);
+        let _ = self.elev_host.SetSize(elev_mask_sz);
+        let _ = self.elev_host.SetOffset(Vector3 { X: 0.0, Y: -SHADOW_TOP_PAD, Z: 0.0 });
+        let _ = self.elev_mask_vis.SetSize(elev_mask_sz);
+        let _ = self.elev_mask_surface.SetSourceSize(elev_mask_sz);
         let _ = self.contact_host.SetSize(sz);
-        let _ = self.mask_vis.SetSize(sz);
-        let _ = self.mask_surface.SetSourceSize(sz);
+        let _ = self.contact_mask_vis.SetSize(sz);
+        let _ = self.contact_mask_surface.SetSourceSize(sz);
         let _ = self.shell_root.SetSize(sz);
         let _ = self.backdrop.SetSize(sz);
         let _ = self.tint.SetSize(sz);
@@ -339,6 +368,19 @@ impl Shell {
     ) {
         if let Ok(path) = nacre_ui::visor_geo::visor_path_with_detached(x0, 0.0, w, h, radius, top_radius, ear, detached) {
             let _ = self.path_geo.SetPath(&path);
+        }
+        if let Ok(mask) = nacre_ui::visor_geo::visor_elev_shadow_path_with_detached(
+            x0,
+            SHADOW_TOP_PAD,
+            w,
+            h,
+            radius,
+            top_radius,
+            ear,
+            SHADOW_TOP_PAD,
+            detached,
+        ) {
+            let _ = self.elev_mask_geo.SetPath(&mask);
         }
         if let Ok(rim) = nacre_ui::visor_geo::visor_rim_path_with_detached(x0, 0.0, w, h, radius, top_radius, ear, detached) {
             let _ = self.rim_geo.SetPath(&rim);

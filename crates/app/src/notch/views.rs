@@ -30,8 +30,6 @@ pub enum Action {
     TimerMinus,
     TimerPlus,
     TimerStage(PomodoroStage),
-    FocusCat(u8),
-    FocusStatsToggle,
     OpenTimerPill,
     OpenPrayer,
     CalDay(i32),
@@ -140,7 +138,6 @@ pub struct Data<'a> {
     pub send_zone: bool,
     pub quick: Option<QuickView>,
     pub qr: Option<QrView<'a>>,
-    pub focus: FocusView,
     pub pinned: bool,
     pub notif_toast: Option<NotifRow<'a>>,
     pub notif_list: Vec<NotifRow<'a>>,
@@ -232,29 +229,6 @@ pub struct QrView<'a> {
     pub surface: Option<&'a CompositionDrawingSurface>,
     pub px: f32,
     pub text: String,
-}
-
-pub struct FocusView {
-    pub cat: usize,
-    pub names: [String; nacre_core::focus::CATS],
-    pub stage: nacre_core::focus::Stage,
-    pub today: nacre_core::focus::Today,
-    pub week: [u32; 7],
-    pub show_stats: bool,
-}
-
-impl FocusView {
-    pub fn rgb(&self) -> [u8; 3] {
-        nacre_core::focus::COLORS[self.cat.min(nacre_core::focus::CATS - 1)]
-    }
-
-    pub fn label(&self) -> String {
-        if self.stage == nacre_core::focus::Stage::Break {
-            tr("Istirahat").to_string()
-        } else {
-            self.names[self.cat.min(nacre_core::focus::CATS - 1)].clone()
-        }
-    }
 }
 
 pub type Date = (i32, u32, u32);
@@ -790,7 +764,7 @@ fn detached_timer_pill(
     let _ = c.Children().and_then(|k| k.InsertAtTop(&wrap));
 
     let cy = th / 2.0;
-    let base_rgb = d.media.as_ref().map(media_tint).unwrap_or_else(|| d.focus.rgb());
+    let base_rgb = d.media.as_ref().map(media_tint).unwrap_or_else(crate::prefs::accent);
     let fg_rgb = lift_for_dark_pill(base_rgb);
     if let Some(glow) = p.ambient_glow(&wrap, 0.0, 0.0, tw, th, 0.0, base_rgb, true) {
         let _ = glow.SetOpacity(if d.timer.phase == Phase::Running { 0.85 } else { 0.45 });
@@ -965,7 +939,8 @@ fn top_utilities(p: &mut Painter, c: &ContainerVisual, f: Frame, cur: Tab, d: &D
     }
 
     // Pin button: hidden when not hovered (unless pinned), with 26x26 hover circle pill + 1.15x scale.
-    if !gemini_has_btn {
+    // Omitted on Gemini (Send button occupies top-right), Alerts and Shelf (header actions stay clean).
+    if !gemini_has_btn && cur != Tab::Alerts && cur != Tab::Shelf {
         if let Ok(pin_wrap) = p.comp.CreateContainerVisual() {
             let op = if d.pinned { 1.0 } else if d.hovered { 0.54 } else { 0.0 };
             let _ = pin_wrap.SetOpacity(op);
@@ -1650,19 +1625,15 @@ fn shelf_empty(p: &mut Painter, c: &ContainerVisual, f: Frame) {
 
 fn compact_timer(p: &mut Painter, c: &ContainerVisual, f: Frame, d: &Data, urgent: bool) {
     let cy = f.h / 2.0;
-    let base_rgb = if d.focus.stage == nacre_core::focus::Stage::Break { GREEN } else { d.focus.rgb() };
-    let rgb = if urgent { ORANGE } else { WHITE };
+    let base_rgb = crate::prefs::accent();
+    let rgb = if urgent { lift_for_dark_pill(base_rgb) } else { WHITE };
     if let Some(glow) = p.ambient_glow(c, f.x0, 0.0, f.w, f.h, 0.0, base_rgb, true) {
         let _ = glow.SetOpacity(if urgent { 0.9 } else { 0.55 });
     }
-    let dot = p.px(7.5);
-    p.rect(c, f.x0 + p.px(14.0), cy - dot / 2.0, dot, dot, dot / 2.0, Color { A: 255, R: base_rgb[0], G: base_rgb[1], B: base_rgb[2] });
-    let th = p.px(12.5) * 1.3;
-    let label = p.fit(&d.focus.label(), 12.0, 600, f.w * 0.48);
-    p.text(c, &label, f.x0 + p.px(14.0) + dot + p.px(7.0), cy - th / 2.0, 12.0, 600, WHITE, 0.92, Anchor::Left, f.w * 0.52);
+    p.sym(c, Sym::Stopwatch, f.x0 + p.px(20.0), cy, 15.0, lift_for_dark_pill(base_rgb), 0.96);
     let t = format_mmss(d.timer.remaining_secs(d.now_ms));
-    let th2 = p.px(13.0) * 1.3;
-    p.text(c, &t, f.x0 + f.w - p.px(16.0), cy - th2 / 2.0, 13.0, 600, rgb, 1.0, Anchor::Right, f.w);
+    let th = p.px(13.0) * 1.3;
+    p.text(c, &t, f.x0 + f.w - p.px(16.0), cy - th / 2.0, 13.0, 600, rgb, 1.0, Anchor::Right, f.w);
 }
 
 /// Single source of truth for adaptive media color across Compact Live-Lyrics, Compact Music,
@@ -2981,6 +2952,156 @@ pub fn refresh_gemini_response(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn draw_styled_spans(
+    p: &mut Painter,
+    parent: &ContainerVisual,
+    spans: &[nacre_core::notch::gemini::MdSpan],
+    x_start: f32,
+    y_start: f32,
+    max_w: f32,
+    font: f32,
+    line_h: f32,
+    base_weight: i32,
+    base_op: f32,
+    lines_budget: &mut usize,
+) -> f32 {
+    use nacre_core::notch::gemini::SpanStyle;
+
+    let style_props = |st: SpanStyle| -> (i32, [u8; 3], f32) {
+        match st {
+            SpanStyle::Normal => (base_weight, WHITE, base_op),
+            SpanStyle::Bold => (700, WHITE, 1.0),
+            SpanStyle::Italic => (base_weight.max(500), [216, 226, 255], (base_op + 0.04).min(1.0)),
+            SpanStyle::Code => (600, [152, 214, 255], 0.98),
+        }
+    };
+
+    let sp_w = (p.measure("a a", font, base_weight) - p.measure("aa", font, base_weight)).max(p.px(3.2));
+
+    // Tokenize into words & explicit single spaces while keeping each token's style.
+    let mut tokens: Vec<(SpanStyle, String, bool)> = Vec::new();
+    for sp in spans {
+        let mut word = String::new();
+        for ch in sp.text.chars() {
+            if ch.is_whitespace() {
+                if !word.is_empty() {
+                    tokens.push((sp.style, std::mem::take(&mut word), false));
+                }
+                if !tokens.last().is_some_and(|t| t.2) {
+                    tokens.push((sp.style, " ".to_string(), true));
+                }
+            } else {
+                word.push(ch);
+            }
+        }
+        if !word.is_empty() {
+            tokens.push((sp.style, word, false));
+        }
+    }
+
+    // Wrap into visual lines of `(style, text, is_space)`.
+    let mut lines: Vec<Vec<(SpanStyle, String, bool)>> = Vec::new();
+    let mut cur: Vec<(SpanStyle, String, bool)> = Vec::new();
+    let mut cur_w = 0.0f32;
+
+    for (st, tok, is_sp) in tokens {
+        if is_sp {
+            if !cur.is_empty() && cur_w + sp_w <= max_w {
+                cur.push((st, tok, true));
+                cur_w += sp_w;
+            }
+            continue;
+        }
+        let (wt, _, _) = style_props(st);
+        let tw = p.measure(&tok, font, wt);
+        if !cur.is_empty() && cur_w + tw > max_w {
+            while cur.last().is_some_and(|t| t.2) {
+                cur.pop();
+            }
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0.0;
+            if lines.len() >= *lines_budget {
+                break;
+            }
+        }
+        // If a single long token exceeds max_w on an empty line, split it cleanly.
+        if cur.is_empty() && tw > max_w {
+            for piece in nacre_core::notch::typeset::wrap(&tok, max_w, 40, |s| p.measure(s, font, wt)) {
+                cur.push((st, piece, false));
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0.0;
+                if lines.len() >= *lines_budget {
+                    break;
+                }
+            }
+            if lines.len() >= *lines_budget {
+                break;
+            }
+        } else {
+            cur.push((st, tok, false));
+            cur_w += tw;
+        }
+    }
+    while cur.last().is_some_and(|t| t.2) {
+        cur.pop();
+    }
+    if !cur.is_empty() && lines.len() < *lines_budget {
+        lines.push(cur);
+    }
+
+    let mut yy = y_start;
+    for line in &lines {
+        if *lines_budget == 0 {
+            break;
+        }
+        *lines_budget -= 1;
+
+        // Coalesce adjacent tokens of identical style (keeping interior spaces, handling boundary spaces via sp_w).
+        let mut runs: Vec<(SpanStyle, String, bool)> = Vec::new();
+        for (st, tok, is_sp) in line {
+            if *is_sp {
+                if let Some(last) = runs.last_mut() {
+                    last.2 = true;
+                }
+                continue;
+            }
+            if let Some(last) = runs.last_mut() {
+                if last.0 == *st {
+                    if last.2 {
+                        last.1.push(' ');
+                        last.2 = false;
+                    }
+                    last.1.push_str(tok);
+                    continue;
+                }
+            }
+            runs.push((*st, tok.clone(), false));
+        }
+
+        let mut cx = x_start;
+        for (st, run_txt, trail_sp) in &runs {
+            let (wt, rgb, op) = style_props(*st);
+            let rw = p.measure(run_txt, font, wt);
+            if *st == SpanStyle::Code {
+                let pad_x = p.px(3.5);
+                let pill_h = p.px(font) * 1.24;
+                p.rect(parent, cx - p.px(1.0), yy, rw + 2.0 * pad_x, pill_h, p.px(4.0), Color { A: 26, R: 120, G: 190, B: 255 });
+                p.text(parent, run_txt, cx + pad_x - p.px(1.0), yy, font, wt, rgb, op, Anchor::Left, (max_w - (cx - x_start)).max(p.px(16.0)));
+                cx += rw + 2.0 * pad_x - p.px(1.0);
+            } else {
+                p.text(parent, run_txt, cx, yy, font, wt, rgb, op, Anchor::Left, (max_w - (cx - x_start) + p.px(4.0)).max(p.px(16.0)));
+                cx += rw;
+            }
+            if *trail_sp {
+                cx += sp_w;
+            }
+        }
+        yy += line_h;
+    }
+    yy
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_gemini_response(
     p: &mut Painter,
     c: &ContainerVisual,
@@ -2998,15 +3119,40 @@ fn draw_gemini_response(
     sb_dragging: bool,
     sb_active: f32,
 ) -> Option<ScrollViewLive> {
-    let font = 11.5;
-    let line_h = p.px(font) * 1.38;
+    use nacre_core::notch::gemini::{parse_markdown, MdBlock};
+
+    let font = 11.4;
+    let line_h = p.px(font) * 1.40;
     let wrap_w = (w - p.px(12.0)).max(p.px(40.0));
 
-    let (src, weight, rgb, op, follow) = if !error.is_empty() {
-        (error, 500, [255, 110, 100], 0.95, false)
-    } else if !text.is_empty() {
-        (text, 400, WHITE, 0.92, streaming && auto_follow)
-    } else {
+    if !error.is_empty() {
+        let sc = create_scroll_viewport(p, c, x, y, w, h).ok()?;
+        let mut yy = 0.0;
+        let mut count = 0usize;
+        for para in error.lines() {
+            let t = para.trim_end();
+            if t.is_empty() {
+                yy += line_h * 0.5;
+                continue;
+            }
+            for line in nacre_core::notch::typeset::wrap(t, wrap_w, 120, |s| p.measure(s, font, 500)) {
+                p.text(&sc, &line, 0.0, yy, font, 500, [255, 110, 100], 0.95, Anchor::Left, wrap_w + p.px(4.0));
+                yy += line_h;
+                count += 1;
+                if count >= 120 {
+                    break;
+                }
+            }
+        }
+        let content_h = (yy + p.px(4.0)).max(h);
+        let max_scroll = (content_h - h).max(0.0);
+        return Some(finish_scroll_view(
+            p, c, x, y, w, h, sc, content_h, x + w, y + p.px(2.0), (h - p.px(4.0)).max(p.px(14.0)),
+            scroll_px.clamp(0.0, max_scroll), sb_hover, sb_dragging, sb_active, Vec::new(),
+        ));
+    }
+
+    if text.is_empty() {
         let msg = if streaming {
             tr("Berpikir…")
         } else if !has_key {
@@ -3016,34 +3162,94 @@ fn draw_gemini_response(
         };
         p.text(c, &p.fit(msg, 11.5, 400, w), x + w / 2.0, y + h / 2.0 - p.px(8.0), 11.5, 400, WHITE, 0.45, Anchor::Center, w + p.px(2.0));
         return None;
-    };
+    }
 
-    let mut wrapped: Vec<String> = Vec::new();
-    for para in src.lines() {
-        let t = para.trim_end();
-        if t.is_empty() {
-            wrapped.push(String::new());
-            continue;
-        }
-        for line in nacre_core::notch::typeset::wrap(t, wrap_w, 120, |s| p.measure(s, font, weight)) {
-            wrapped.push(line);
-            if wrapped.len() >= 240 {
-                break;
-            }
-        }
-        if wrapped.len() >= 240 {
+    let follow = streaming && auto_follow;
+    let blocks = parse_markdown(text);
+    let sc = create_scroll_viewport(p, c, x, y, w, h).ok()?;
+    let mut yy = 0.0f32;
+    let mut budget = 260usize;
+
+    for blk in &blocks {
+        if budget == 0 {
             break;
         }
+        match blk {
+            MdBlock::Blank => {
+                yy += line_h * 0.40;
+            }
+            MdBlock::Heading(spans) => {
+                if yy > 1.0 {
+                    yy += p.px(3.0);
+                }
+                yy = draw_styled_spans(p, &sc, spans, 0.0, yy, wrap_w, 12.0, p.px(12.0) * 1.38, 700, 1.0, &mut budget);
+                yy += p.px(1.5);
+            }
+            MdBlock::Formula(expr) => {
+                if yy > 1.0 {
+                    yy += p.px(2.5);
+                }
+                let f_font = 12.8;
+                let f_lh = p.px(f_font) * 1.36;
+                let inner_w = (wrap_w - p.px(18.0)).max(p.px(40.0));
+                let flines = nacre_core::notch::typeset::wrap(expr, inner_w, 8, |s| p.measure(s, f_font, 700));
+                let box_pad_y = p.px(5.5);
+                let box_h = (flines.len().max(1) as f32) * f_lh + 2.0 * box_pad_y - p.px(2.0);
+                p.rect(&sc, 0.0, yy, wrap_w, box_h, p.px(7.0), Color { A: 28, R: 112, G: 148, B: 255 });
+                let mut fy = yy + box_pad_y;
+                for fl in &flines {
+                    p.text(&sc, fl, wrap_w / 2.0, fy, f_font, 700, WHITE, 1.0, Anchor::Center, inner_w + p.px(4.0));
+                    fy += f_lh;
+                    budget = budget.saturating_sub(1);
+                }
+                yy += box_h + p.px(3.5);
+            }
+            MdBlock::Bullet { indent, marker, spans } => {
+                let ind_x = (*indent as f32) * p.px(10.0);
+                let m_w = p.measure(marker, font, 700).max(p.px(8.0)) + p.px(5.0);
+                p.text(&sc, marker, ind_x, yy, font, 700, [164, 186, 255], 0.95, Anchor::Left, m_w + p.px(2.0));
+                let text_x = ind_x + m_w;
+                let avail = (wrap_w - text_x).max(p.px(36.0));
+                yy = draw_styled_spans(p, &sc, spans, text_x, yy, avail, font, line_h, 400, 0.88, &mut budget);
+                yy += p.px(1.5);
+            }
+            MdBlock::CodeBlock(lines) => {
+                if yy > 1.0 {
+                    yy += p.px(2.5);
+                }
+                let c_font = 10.6;
+                let c_lh = p.px(c_font) * 1.36;
+                let inner_w = (wrap_w - p.px(14.0)).max(p.px(40.0));
+                let mut clines: Vec<String> = Vec::new();
+                for l in lines {
+                    if l.is_empty() {
+                        clines.push(String::new());
+                    } else {
+                        clines.extend(nacre_core::notch::typeset::wrap(l, inner_w, 20, |s| p.measure(s, c_font, 500)));
+                    }
+                    if clines.len() >= 40 {
+                        break;
+                    }
+                }
+                let box_pad_y = p.px(4.5);
+                let box_h = (clines.len().max(1) as f32) * c_lh + 2.0 * box_pad_y;
+                p.rect(&sc, 0.0, yy, wrap_w, box_h, p.px(6.0), white(16));
+                let mut cy = yy + box_pad_y;
+                for cl in &clines {
+                    if !cl.is_empty() {
+                        p.text(&sc, cl, p.px(7.0), cy, c_font, 500, [186, 224, 255], 0.94, Anchor::Left, inner_w + p.px(2.0));
+                    }
+                    cy += c_lh;
+                    budget = budget.saturating_sub(1);
+                }
+                yy += box_h + p.px(3.5);
+            }
+            MdBlock::Paragraph(spans) => {
+                yy = draw_styled_spans(p, &sc, spans, 0.0, yy, wrap_w, font, line_h, 400, 0.88, &mut budget);
+            }
+        }
     }
 
-    let sc = create_scroll_viewport(p, c, x, y, w, h).ok()?;
-    let mut yy = 0.0;
-    for line in &wrapped {
-        if !line.is_empty() {
-            p.text(&sc, line, 0.0, yy, font, weight, rgb, op, Anchor::Left, wrap_w + p.px(4.0));
-        }
-        yy += line_h;
-    }
     let content_h = (yy + p.px(4.0)).max(h);
     let max_scroll = (content_h - h).max(0.0);
     let init_scroll = if follow { max_scroll } else { scroll_px.clamp(0.0, max_scroll) };
@@ -3428,70 +3634,72 @@ fn round_button(p: &mut Painter, c: &ContainerVisual, cx: f32, cy: f32, d: f32, 
 }
 
 fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, regions: &mut Vec<Region>, live: &mut Live) {
-    let pad = p.px(EDGE_PAD_DP);
-    let top = p.px(12.0);
+    let pad = p.px(EDGE_PAD_DP + 2.0);
+    let top = p.px(13.0);
     let bot = f.h - p.px(DOTS_STRIP_DP + 8.0);
     let h = (bot - top).max(p.px(110.0));
     let x_left = f.x0 + pad;
-    let lw = p.px(154.0);
-    let div_x = x_left + lw + p.px(10.0);
-    let x_right = div_x + p.px(12.0);
-    let rw = (f.x0 + f.w - pad - x_right).max(p.px(150.0));
+    let lw = p.px(148.0);
+    let div_x = x_left + lw + p.px(12.0);
+    let x_right = div_x + p.px(14.0);
+    let rw = (f.x0 + f.w - pad - x_right).max(p.px(152.0));
 
     let t = d.timer;
     let secs = t.remaining_secs(d.now_ms);
     let mins = t.mins_left(d.now_ms);
     let prog = t.progress(d.now_ms);
-    let lang = crate::prefs::get().lang;
-    let en = lang == nacre_core::i18n::Lang::En;
-    let running = t.phase == Phase::Running;
-    let idle = matches!(t.phase, Phase::Idle | Phase::Finished);
-    let cat_rgb = d.focus.rgb();
-    let accent = if d.focus.stage == nacre_core::focus::Stage::Break { GREEN } else { cat_rgb };
+    let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
+    let accent = crate::prefs::accent();
     let accent_soft = lift_for_dark_pill(accent);
 
-    // Full-bleed bottom-up OLED atmospheric wash tinted by the active Focus category or Break state.
+    // Full-bleed bottom-up OLED atmospheric wash matching the Media Player aesthetic:
+    // pure #000000 across the top bezel/title, blooming smoothly into the rounded bottom corners.
     let glow_rgb = match t.stage {
-        PomodoroStage::Focus(_) => cat_rgb,
+        PomodoroStage::Focus(_) => accent,
         PomodoroStage::ShortBreak(_) => GREEN,
         PomodoroStage::LongBreak => [132, 114, 255],
     };
     let glow_op = match t.phase {
         Phase::Running => 0.92,
         Phase::Paused => 0.72,
-        Phase::Idle | Phase::Finished => 0.66,
+        Phase::Idle | Phase::Finished => 0.68,
     };
     if let Some(glow) = p.ambient_glow(c, f.x0, 0.0, f.w, full_h, 0.0, glow_rgb, false) {
         let _ = glow.SetOpacity(glow_op);
         live.tab_glow = Some(glow);
     }
 
-    // --- Left Column: Focus Category chips, subtitle, big countdown, -5/+5 adjusters & progress bar ---
-    let (mut chx, chy, chh) = (x_left, top, p.px(19.0));
-    let ch_gap = p.px(4.0);
-    let chip_max = (lw - 3.0 * ch_gap) / 4.0;
-    for (i, name) in d.focus.names.iter().enumerate() {
-        let on = i == d.focus.cat;
-        let shown = p.fit(name, 9.5, 600, chip_max - p.px(8.0));
-        let cw = (p.measure(&shown, 9.5, 600) + p.px(10.0)).min(chip_max);
-        let n0 = kids(c);
-        let rgb = nacre_core::focus::COLORS[i];
-        let fill = if on { Color { A: 245, R: rgb[0], G: rgb[1], B: rgb[2] } } else { white(if running { 10 } else { 20 }) };
-        p.rect(c, chx, chy, cw, chh, chh / 2.0, fill);
-        let th = p.px(9.5) * 1.3;
-        p.text(c, &shown, chx + cw / 2.0, chy + (chh - th) / 2.0, 9.5, 600, WHITE, if on { 1.0 } else if running { 0.35 } else { 0.78 }, Anchor::Center, cw);
-        if !running && !on {
-            regions.push(Region { x: chx, y: chy - p.px(3.0), w: cw, h: chh + p.px(6.0), action: Action::FocusCat(i as u8), vis: group_since(c, n0), hover_bg: None });
+    // --- Left Column: Pomodoro title + clean idle −/+ adjusters, session subtitle, big countdown, status & thin progress bar ---
+    p.text(c, "Pomodoro", x_left, top, 15.0, 700, WHITE, 0.98, Anchor::Left, lw - p.px(48.0));
+    if matches!(t.phase, Phase::Idle | Phase::Finished) {
+        let dia = p.px(19.0);
+        let gap = p.px(5.0);
+        let cy = top + p.px(10.0);
+        let plus_cx = x_left + lw - dia / 2.0;
+        let minus_cx = plus_cx - dia - gap;
+        let sth = p.px(12.5) * 1.25;
+        for (cx, lbl, act) in [(minus_cx, "\u{2212}", Action::TimerMinus), (plus_cx, "+", Action::TimerPlus)] {
+            let n_adj = kids(c);
+            round_button(p, c, cx, cy, dia, white(22));
+            p.text(c, lbl, cx, cy - sth / 2.0 - p.px(0.5), 12.5, 600, WHITE, 0.92, Anchor::Center, dia);
+            regions.push(Region {
+                x: cx - dia / 2.0 - p.px(2.0),
+                y: cy - dia / 2.0 - p.px(2.0),
+                w: dia + p.px(4.0),
+                h: dia + p.px(4.0),
+                action: act,
+                vis: group_since(c, n_adj),
+                hover_bg: None,
+            });
         }
-        chx += cw + ch_gap;
     }
 
     let stage_sub = match t.stage {
         PomodoroStage::Focus(n) => {
             if en {
-                format!("{} \u{00B7} {n} of 4", d.focus.label())
+                format!("Focus \u{00B7} {n} of 4")
             } else {
-                format!("{} \u{00B7} {n} dari 4", d.focus.label())
+                format!("Fokus \u{00B7} {n} dari 4")
             }
         }
         PomodoroStage::ShortBreak(n) => {
@@ -3503,33 +3711,23 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         }
         PomodoroStage::LongBreak => tr("Istirahat Panjang").to_string(),
     };
-    p.text(c, &p.fit(&stage_sub, 11.0, 500, lw), x_left, top + p.px(25.0), 11.0, 500, WHITE, 0.52, Anchor::Left, lw);
+    p.text(c, &stage_sub, x_left, top + p.px(25.0), 11.0, 500, WHITE, 0.48, Anchor::Left, lw);
 
-    let time_rgb = if running && secs <= 60 { ORANGE } else { WHITE };
-    p.text(c, &format_mmss(secs), x_left, top + p.px(42.0), 30.0, 700, time_rgb, 1.0, Anchor::Left, lw);
+    let time_rgb = if t.phase == Phase::Running && secs <= 60 { accent_soft } else { WHITE };
+    p.text(c, &format_mmss(secs), x_left, top + p.px(42.0), 31.0, 700, time_rgb, 1.0, Anchor::Left, lw);
 
-    let status_y = top + p.px(88.0);
-    if idle {
-        let (sw, sh) = (p.px(28.0), p.px(20.0));
-        let sth = p.px(10.5) * 1.3;
-        for (idx, (lbl, act)) in [("\u{2212}5", Action::TimerMinus), ("+5", Action::TimerPlus)].into_iter().enumerate() {
-            let sx = x_left + idx as f32 * (sw + p.px(5.0));
-            let n_s = kids(c);
-            p.rect(c, sx, status_y, sw, sh, sh / 2.0, white(24));
-            p.text(c, lbl, sx + sw / 2.0, status_y + (sh - sth) / 2.0, 10.5, 600, WHITE, 0.92, Anchor::Center, sw);
-            regions.push(Region { x: sx, y: status_y - p.px(2.0), w: sw, h: sh + p.px(4.0), action: act, vis: group_since(c, n_s), hover_bg: None });
-        }
-        let tx = x_left + 2.0 * sw + p.px(12.0);
-        let st_str = if t.phase == Phase::Finished { tr("Selesai") } else { tr("Siap") };
-        p.text(c, st_str, tx, status_y + p.px(2.5), 11.5, 500, WHITE, 0.50, Anchor::Left, (x_left + lw - tx).max(p.px(24.0)));
-    } else {
-        let mins_str = if en { format!("{mins} min left") } else { format!("{mins} mnt lagi") };
-        let st_str = if running { tr("Berjalan") } else { tr("Dijeda") };
-        let mw = p.text(c, &mins_str, x_left, status_y + p.px(2.0), 11.5, 700, WHITE, 0.96, Anchor::Left, lw * 0.68);
-        p.text(c, st_str, x_left + mw + p.px(6.0), status_y + p.px(2.0), 11.5, 500, WHITE, 0.48, Anchor::Left, (lw - mw - p.px(6.0)).max(p.px(24.0)));
-    }
+    let mins_str = if en { format!("{mins} min left") } else { format!("{mins} mnt lagi") };
+    let st_str = match t.phase {
+        Phase::Running => tr("Berjalan"),
+        Phase::Paused => tr("Dijeda"),
+        Phase::Finished => tr("Selesai"),
+        Phase::Idle => tr("Siap"),
+    };
+    let status_y = top + p.px(92.0);
+    let mw = p.text(c, &mins_str, x_left, status_y, 12.0, 700, WHITE, 0.96, Anchor::Left, lw * 0.68);
+    p.text(c, st_str, x_left + mw + p.px(6.0), status_y, 12.0, 500, WHITE, 0.48, Anchor::Left, (lw - mw - p.px(6.0)).max(p.px(24.0)));
 
-    let bar_y = top + p.px(116.0);
+    let bar_y = top + p.px(118.0);
     let bar_w = (lw - p.px(4.0)).max(p.px(60.0));
     let bar_h = p.px(3.5);
     p.rect(c, x_left, bar_y, bar_w, bar_h, bar_h / 2.0, white(32));
@@ -3539,28 +3737,30 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         0.0
     };
     if fill_w > 0.5 {
-        p.rect(c, x_left, bar_y, fill_w, bar_h, bar_h / 2.0, Color { A: 255, R: accent[0], G: accent[1], B: accent[2] });
+        p.rect(
+            c,
+            x_left,
+            bar_y,
+            fill_w,
+            bar_h,
+            bar_h / 2.0,
+            Color { A: 255, R: accent[0], G: accent[1], B: accent[2] },
+        );
     }
 
     // --- Center 1px Vertical Divider ---
-    p.divider_v(c, div_x, top + p.px(14.0), (h - p.px(18.0)).max(p.px(76.0)));
+    p.divider_v(c, div_x, top + p.px(22.0), (h - p.px(26.0)).max(p.px(76.0)));
 
-    // --- Right Column Header: [Start/Pause] + [Reset] + [Stats / Round toggle] ---
-    let row_cy = top + p.px(22.0);
-    let toggle_lbl = if d.focus.show_stats { format!("{} \u{203A}", tr("Ronde")) } else { format!("{} \u{203A}", tr("Statistik")) };
-    let tw_btn = (p.measure(&toggle_lbl, 10.0, 600) + p.px(14.0)).min(p.px(70.0));
-    let th_btn = p.px(20.0);
-    let n_tog = kids(c);
-    p.rect(c, x_right, row_cy - th_btn / 2.0, tw_btn, th_btn, th_btn / 2.0, white(22));
-    let tth = p.px(10.0) * 1.3;
-    p.text(c, &toggle_lbl, x_right + tw_btn / 2.0, row_cy - tth / 2.0, 10.0, 600, WHITE, 0.88, Anchor::Center, tw_btn);
-    regions.push(Region { x: x_right, y: row_cy - th_btn / 2.0 - p.px(3.0), w: tw_btn, h: th_btn + p.px(6.0), action: Action::FocusStatsToggle, vis: group_since(c, n_tog), hover_bg: None });
+    // --- Right Column: "This round" + [Start/Resume/Pause] pill + Reset + 1..4 Long timeline ---
+    let row_cy = top + p.px(33.0);
+    let lbl_h = p.px(11.5) * 1.3;
+    p.text(c, tr("Ronde ini"), x_right, row_cy - lbl_h / 2.0, 11.5, 500, WHITE, 0.50, Anchor::Left, p.px(68.0));
 
-    let rst_dia = p.px(24.0);
+    let rst_dia = p.px(25.0);
     let rst_cx = x_right + rw - rst_dia / 2.0;
     let n_rst = kids(c);
     round_button(p, c, rst_cx, row_cy, rst_dia, white(24));
-    p.sym(c, Sym::Restart, rst_cx, row_cy, 11.5, WHITE, 0.90);
+    p.sym(c, Sym::Restart, rst_cx, row_cy, 12.0, WHITE, 0.90);
     regions.push(Region {
         x: rst_cx - rst_dia / 2.0,
         y: row_cy - rst_dia / 2.0,
@@ -3576,19 +3776,20 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         Phase::Paused => tr("Lanjutkan"),
         Phase::Idle | Phase::Finished => tr("Mulai"),
     };
-    let pill_h = p.px(24.0);
-    let pill_w = (p.measure(pill_label, 11.0, 700) + p.px(18.0)).clamp(p.px(50.0), (rst_cx - rst_dia / 2.0 - p.px(6.0) - (x_right + tw_btn + p.px(6.0))).max(p.px(48.0)));
-    let pill_x = rst_cx - rst_dia / 2.0 - p.px(6.0) - pill_w;
+    let pill_h = p.px(25.0);
+    let pill_w = (p.measure(pill_label, 11.5, 700) + p.px(22.0)).clamp(p.px(56.0), p.px(78.0));
+    let pill_x = rst_cx - rst_dia / 2.0 - p.px(7.0) - pill_w;
     let pill_y = row_cy - pill_h / 2.0;
     let n_btn = kids(c);
-    let (pill_fill, pill_txt_rgb, pill_txt_op) = if running {
+    // Calm tinted glass surface when Running (Pause), vibrant theme accent when Idle/Paused (Start/Resume).
+    let (pill_fill, pill_txt_rgb, pill_txt_op) = if t.phase == Phase::Running {
         (Color { A: 58, R: accent[0], G: accent[1], B: accent[2] }, accent_soft, 0.98)
     } else {
         (Color { A: 242, R: accent[0], G: accent[1], B: accent[2] }, WHITE, 1.0)
     };
     p.rect(c, pill_x, pill_y, pill_w, pill_h, pill_h / 2.0, pill_fill);
-    let bth = p.px(11.0) * 1.3;
-    p.text(c, pill_label, pill_x + pill_w / 2.0, row_cy - bth / 2.0, 11.0, 700, pill_txt_rgb, pill_txt_op, Anchor::Center, pill_w);
+    let bth = p.px(11.5) * 1.3;
+    p.text(c, pill_label, pill_x + pill_w / 2.0, row_cy - bth / 2.0, 11.5, 700, pill_txt_rgb, pill_txt_op, Anchor::Center, pill_w);
     regions.push(Region {
         x: pill_x,
         y: pill_y,
@@ -3599,33 +3800,9 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         hover_bg: None,
     });
 
-    if d.focus.show_stats {
-        // Focus daily summary + 7-day bar chart
-        let sy = top + p.px(42.0);
-        let dur_lbl = nacre_core::focus::duration_label_lang(d.focus.today.minutes, lang);
-        let dw = p.text(c, &dur_lbl, x_right, sy, 19.0, 700, WHITE, 0.98, Anchor::Left, rw * 0.55);
-        let sub = match d.focus.today.top {
-            Some(top_cat) => format!("{} {} \u{00B7} {}", d.focus.today.sessions, tr("sesi"), d.focus.names[top_cat]),
-            None => tr("Belum ada sesi").to_string(),
-        };
-        p.text(c, &p.fit(&sub, 10.5, 500, (rw - dw - p.px(8.0)).max(p.px(40.0))), x_right + dw + p.px(8.0), sy + p.px(6.0), 10.5, 500, WHITE, 0.56, Anchor::Left, (rw - dw - p.px(6.0)).max(p.px(40.0)));
-
-        let max_m = d.focus.week.iter().copied().max().unwrap_or(0).max(1) as f32;
-        let gap = p.px(5.0);
-        let bw = (rw - 6.0 * gap) / 7.0;
-        let chart_bot = top + p.px(119.0);
-        let tall = (chart_bot - (top + p.px(72.0))).max(p.px(14.0));
-        for (i, m) in d.focus.week.iter().enumerate() {
-            let bh = (tall * (*m as f32 / max_m)).max(p.px(3.5));
-            let col = if i == 6 { Color { A: 255, R: cat_rgb[0], G: cat_rgb[1], B: cat_rgb[2] } } else { white(44) };
-            p.rect(c, x_right + i as f32 * (bw + gap), chart_bot - bh, bw, bh, p.px(3.0), col);
-        }
-        return;
-    }
-
     // 4 Focus segments separated by 3 short-break dots + Long Break segment
-    let track_cy = top + p.px(74.0);
-    let label_y = top + p.px(88.0);
+    let track_cy = top + p.px(78.0);
+    let label_y = top + p.px(92.0);
     let seg_h = p.px(5.5);
     let dot_d = p.px(4.0);
     let seg_gap = p.px(3.5);
@@ -3652,13 +3829,32 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         if active_focus {
             let fw = (seg_w * prog).clamp(0.0, seg_w);
             if fw > 1.0 {
-                p.rect(c, sx, track_cy - seg_h / 2.0, fw, seg_h, seg_h / 2.0, Color { A: 245, R: accent[0], G: accent[1], B: accent[2] });
+                p.rect(
+                    c,
+                    sx,
+                    track_cy - seg_h / 2.0,
+                    fw,
+                    seg_h,
+                    seg_h / 2.0,
+                    Color { A: 245, R: accent[0], G: accent[1], B: accent[2] },
+                );
             }
             orb_pos = Some((sx + (seg_w * prog).clamp(p.px(3.0), seg_w - p.px(3.0)), track_cy));
         }
         let lbl = (i + 1).to_string();
         let is_cur = active_focus;
-        p.text(c, &lbl, sx + seg_w / 2.0, label_y, 10.0, if is_cur { 700 } else { 500 }, WHITE, if is_cur { 0.98 } else { 0.48 }, Anchor::Center, seg_w + p.px(6.0));
+        p.text(
+            c,
+            &lbl,
+            sx + seg_w / 2.0,
+            label_y,
+            10.0,
+            if is_cur { 700 } else { 500 },
+            WHITE,
+            if is_cur { 0.98 } else { 0.48 },
+            Anchor::Center,
+            seg_w + p.px(6.0),
+        );
         regions.push(Region {
             x: sx - p.px(2.0),
             y: track_cy - p.px(12.0),
@@ -3687,6 +3883,7 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         }
     }
 
+    // Long break segment
     let lx = cur_x;
     let active_long = t.stage == PomodoroStage::LongBreak;
     let n_long = kids(c);
@@ -3694,11 +3891,30 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
     if active_long {
         let fw = (long_w * prog).clamp(0.0, long_w);
         if fw > 1.0 {
-            p.rect(c, lx, track_cy - seg_h / 2.0, fw, seg_h, seg_h / 2.0, Color { A: 245, R: accent[0], G: accent[1], B: accent[2] });
+            p.rect(
+                c,
+                lx,
+                track_cy - seg_h / 2.0,
+                fw,
+                seg_h,
+                seg_h / 2.0,
+                Color { A: 245, R: accent[0], G: accent[1], B: accent[2] },
+            );
         }
         orb_pos = Some((lx + (long_w * prog).clamp(p.px(3.0), long_w - p.px(3.0)), track_cy));
     }
-    p.text(c, tr("Panjang"), lx + long_w / 2.0, label_y, 9.5, if active_long { 700 } else { 500 }, WHITE, if active_long { 0.98 } else { 0.48 }, Anchor::Center, long_w + p.px(14.0));
+    p.text(
+        c,
+        tr("Panjang"),
+        lx + long_w / 2.0,
+        label_y,
+        9.5,
+        if active_long { 700 } else { 500 },
+        WHITE,
+        if active_long { 0.98 } else { 0.48 },
+        Anchor::Center,
+        long_w + p.px(14.0),
+    );
     regions.push(Region {
         x: lx - p.px(3.0),
         y: track_cy - p.px(12.0),
@@ -3709,32 +3925,48 @@ fn timer(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, 
         hover_bg: None,
     });
 
+    // Glowing white + soft theme-accent orb on the active session segment (drawn on top of track).
     if let Some((ox, oy)) = orb_pos {
         let h1 = p.px(21.0);
         let h2 = p.px(13.5);
         let core = p.px(8.0);
-        p.rect(c, (ox - h1 / 2.0).round(), (oy - h1 / 2.0).round(), h1, h1, h1 / 2.0, Color { A: 50, R: accent_soft[0], G: accent_soft[1], B: accent_soft[2] });
-        p.rect(c, (ox - h2 / 2.0).round(), (oy - h2 / 2.0).round(), h2, h2, h2 / 2.0, Color { A: 128, R: accent_soft[0], G: accent_soft[1], B: accent_soft[2] });
-        p.rect(c, (ox - core / 2.0).round(), (oy - core / 2.0).round(), core, core, core / 2.0, white(255));
+        p.rect(
+            c,
+            (ox - h1 / 2.0).round(),
+            (oy - h1 / 2.0).round(),
+            h1,
+            h1,
+            h1 / 2.0,
+            Color { A: 50, R: accent_soft[0], G: accent_soft[1], B: accent_soft[2] },
+        );
+        p.rect(
+            c,
+            (ox - h2 / 2.0).round(),
+            (oy - h2 / 2.0).round(),
+            h2,
+            h2,
+            h2 / 2.0,
+            Color { A: 128, R: accent_soft[0], G: accent_soft[1], B: accent_soft[2] },
+        );
+        p.rect(
+            c,
+            (ox - core / 2.0).round(),
+            (oy - core / 2.0).round(),
+            core,
+            core,
+            core / 2.0,
+            white(255),
+        );
     }
 
-    let summary = if d.focus.today.sessions > 0 {
-        format!(
-            "{}: {} \u{00B7} {} {}",
-            tr("Hari ini"),
-            nacre_core::focus::duration_label_lang(d.focus.today.minutes, lang),
-            d.focus.today.sessions,
-            tr("sesi")
-        )
+    // Bottom round summary: "2 h 10 min · 4 sessions"
+    let total_m = t.round_total_mins();
+    let summary = if en {
+        format!("{} h {} min \u{00B7} 4 sessions", total_m / 60, total_m % 60)
     } else {
-        let total_m = Timer::total_round_mins();
-        if en {
-            format!("{} h {} min \u{00B7} 4 sessions", total_m / 60, total_m % 60)
-        } else {
-            format!("{} j {} mnt \u{00B7} 4 sesi", total_m / 60, total_m % 60)
-        }
+        format!("{} j {} mnt \u{00B7} 4 sesi", total_m / 60, total_m % 60)
     };
-    p.text(c, &p.fit(&summary, 10.5, 500, rw), x_right, top + p.px(110.0), 10.5, 500, WHITE, 0.48, Anchor::Left, rw);
+    p.text(c, &summary, x_right, top + p.px(114.0), 10.5, 500, WHITE, 0.44, Anchor::Left, rw);
 }
 
 fn prayer_tab(p: &mut Painter, c: &ContainerVisual, f: Frame, full_h: f32, d: &Data, live: &mut Live) {
