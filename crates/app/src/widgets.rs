@@ -952,7 +952,7 @@ impl Mgr {
             Kind::Clock | Kind::WorldClock | Kind::Digital => launch::open("ms-clock:"),
             Kind::Calendar | Kind::Month => launch::open("ms-actioncenter:"),
             Kind::Battery => launch::open("ms-settings:batterysaver"),
-            Kind::System => launch::run("taskmgr.exe", ""),
+            Kind::System => launch::show("taskmgr.exe", ""),
         }
     }
 
@@ -1055,7 +1055,7 @@ impl Mgr {
         let mut entries: Vec<(Option<Category>, &'static str, &'static str, [u8; 3])> = vec![(None, "Semua Widget", "\u{E71D}", [99, 99, 108])];
         for c in Category::ALL {
             let (gl, cc) = match c {
-                Category::Clock => ("\u{E917}", ORANGE),
+                Category::Clock => ("\u{E121}", ORANGE),
                 Category::Calendar => ("\u{E787}", RED),
                 Category::Battery => ("\u{E83F}", GREEN),
                 Category::System => ("\u{E950}", BLUE),

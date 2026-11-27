@@ -1,12 +1,40 @@
 use std::ffi::c_void;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, IsZoomed, GWL_EXSTYLE, GWL_STYLE, WS_CAPTION, WS_EX_TOOLWINDOW,
     WS_EX_TRANSPARENT,
 };
 use windows_core::BOOL;
+
+const EDGE_SLACK: i32 = 2;
+
+pub fn covers(r: (i32, i32, i32, i32), screen: (i32, i32)) -> bool {
+    r.0 <= EDGE_SLACK && r.1 <= EDGE_SLACK && r.2 >= screen.0 - EDGE_SLACK && r.3 >= screen.1 - EDGE_SLACK
+}
+
+pub fn exceeds(r: (i32, i32, i32, i32), work: (i32, i32, i32, i32)) -> bool {
+    r.0 < work.0 - EDGE_SLACK || r.1 < work.1 - EDGE_SLACK || r.2 > work.2 + EDGE_SLACK || r.3 > work.3 + EDGE_SLACK
+}
+
+pub fn is_fullscreen(frame: (i32, i32, i32, i32), screen: (i32, i32), work: (i32, i32, i32, i32), zoomed: bool, caption: bool) -> bool {
+    covers(frame, screen) && (!zoomed || !caption || exceeds(frame, work))
+}
+
+fn work_area(h: HWND) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let m = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        GetMonitorInfoW(m, &mut mi).as_bool().then(|| (mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom))
+    }
+}
+
+fn exclusive_fullscreen() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
+    unsafe { SHQueryUserNotificationState().is_ok_and(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN) }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Overlap {
@@ -110,10 +138,12 @@ pub fn evaluate(fg: isize, own_pid: u32, dock: (i32, i32, i32, i32), screen: (i3
         if cx < 0 || cy < 0 || cx >= screen.0 || cy >= screen.1 {
             return none;
         }
-        let covers = r.left <= 0 && r.top <= 0 && r.right >= screen.0 && r.bottom >= screen.1;
-        let captioned_max = IsZoomed(h).as_bool() && (GetWindowLongW(h, GWL_STYLE) as u32 & WS_CAPTION.0) != 0;
-        let fullscreen = covers && !captioned_max;
-        if fullscreen || IsZoomed(h).as_bool() {
+        let frame = (r.left, r.top, r.right, r.bottom);
+        let zoomed = IsZoomed(h).as_bool();
+        let caption = GetWindowLongW(h, GWL_STYLE) as u32 & WS_CAPTION.0 == WS_CAPTION.0;
+        let work = work_area(h).unwrap_or((0, 0, screen.0, screen.1));
+        let fullscreen = is_fullscreen(frame, screen, work, zoomed, caption) || exclusive_fullscreen();
+        if fullscreen || zoomed {
             return Overlap { overlapped: true, fullscreen };
         }
         let hit = r.bottom > dock.1 && r.top < dock.3 && r.right > dock.0 && r.left < dock.2;
@@ -204,4 +234,39 @@ pub fn evaluate_notch(ext_fg: isize, own_pid: u32, notch: (i32, i32, i32, i32), 
         let _ = EnumWindows(Some(scan_notch_window), LPARAM(&mut scan as *mut _ as isize));
     }
     Overlap { overlapped: scan.overlapped, fullscreen: false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCREEN: (i32, i32) = (1920, 1080);
+    const FULL_WORK: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+    const RESERVED_WORK: (i32, i32, i32, i32) = (0, 30, 1920, 1000);
+
+    #[test]
+    fn browser_fullscreen_one_pixel_short_counts() {
+        assert!(is_fullscreen((0, 0, 1920, 1079), SCREEN, FULL_WORK, false, false));
+    }
+
+    #[test]
+    fn fullscreen_from_maximized_without_title_bar_counts() {
+        assert!(is_fullscreen((0, 0, 1920, 1080), SCREEN, FULL_WORK, true, false));
+    }
+
+    #[test]
+    fn maximized_window_beyond_reserved_work_area_counts() {
+        assert!(is_fullscreen((0, 0, 1920, 1080), SCREEN, RESERVED_WORK, true, true));
+    }
+
+    #[test]
+    fn plain_maximized_window_is_not_fullscreen() {
+        assert!(!is_fullscreen((0, 0, 1920, 1080), SCREEN, FULL_WORK, true, true));
+        assert!(!is_fullscreen((0, 30, 1920, 1000), SCREEN, RESERVED_WORK, true, true));
+    }
+
+    #[test]
+    fn small_window_is_not_fullscreen() {
+        assert!(!is_fullscreen((100, 100, 900, 700), SCREEN, FULL_WORK, false, true));
+    }
 }

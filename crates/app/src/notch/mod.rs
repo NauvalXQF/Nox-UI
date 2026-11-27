@@ -3027,7 +3027,7 @@ impl Notch {
 
     fn load_shelf_icons(&mut self) {
         let px = (40.0 * self.dpi).round() as i32;
-        let paths: Vec<String> = self
+        let mut paths: Vec<String> = self
             .shelf
             .items()
             .iter()
@@ -3035,6 +3035,7 @@ impl Notch {
             .filter(|it| !self.shelf_icons.contains_key(&it.path))
             .map(|it| it.path.clone())
             .collect();
+        paths.sort_by_key(|p| p.starts_with("\\\\") || p.starts_with("//"));
         for path in paths {
             self.request_icon(IconKind::Shelf, path, px);
         }
@@ -3133,7 +3134,7 @@ impl Notch {
         let Some(path) = self.shelf.items().get(i).map(|it| it.path.clone()) else { return };
         match id {
             1 => nacre_platform::launch::open(&path),
-            2 => nacre_platform::launch::run("explorer.exe", &format!("/select,\"{path}\"")),
+            2 => nacre_platform::launch::show("explorer.exe", &format!("/select,\"{path}\"")),
             3 => {
                 let _ = nacre_platform::clipboard::copy_text(&path);
             }
@@ -4434,7 +4435,7 @@ impl Notch {
                 if sys::battery() != self.battery {
                     self.on_power();
                 } else if self.look.view == View::Compact(state::Activity::Glance)
-                    || self.mode == Mode::Open(Tab::Prayer)
+                    || (matches!(self.mode, Mode::Open(_)) && !self.focus.is_active())
                 {
                     self.render();
                 }

@@ -323,12 +323,20 @@ pub struct Worker {
 }
 
 pub fn spawn_worker(px: i32, notify: impl Fn() + Send + 'static) -> Worker {
+    spawn_worker_with(px, false, notify)
+}
+
+pub fn spawn_thumb_worker(px: i32, notify: impl Fn() + Send + 'static) -> Worker {
+    spawn_worker_with(px, true, notify)
+}
+
+fn spawn_worker_with(px: i32, thumbs: bool, notify: impl Fn() + Send + 'static) -> Worker {
     let (req_tx, req_rx) = channel::<String>();
     let (res_tx, res_rx) = channel();
     std::thread::spawn(move || {
         let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
         while let Ok(path) = req_rx.recv() {
-            let bmp = load(&path, px);
+            let bmp = if thumbs { thumbnail(&path, px).or_else(|| load(&path, px)) } else { load(&path, px) };
             if res_tx.send((path, bmp)).is_err() {
                 break;
             }

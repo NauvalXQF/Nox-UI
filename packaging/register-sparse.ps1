@@ -35,6 +35,10 @@ if ($Uninstall) {
     Write-Host "=== Uninstall NOX ===" -ForegroundColor Cyan
     Stop-NoxProcesses
     Remove-NoxPackage
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        Get-NetFirewallRule -DisplayName "NOX Send to Phone" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    }
     if (Test-Path $InstallRoot) {
         Write-Host "Menghapus folder aplikasi: $InstallRoot" -ForegroundColor DarkGray
         Remove-Item -Path $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -108,6 +112,20 @@ if ($InstallToAppData) {
 $manifest = Join-Path $targetPkgDir "AppxManifest.xml"
 $msixPath = Join-Path $targetPkgDir "NOX.msix"
 $cerPath = Join-Path $targetPkgDir "NOX.cer"
+$noxExePath = Join-Path $targetBin "nox.exe"
+
+# Ensure inbound Windows Firewall rule for Shelf Send-to-Phone when elevated (or silent skip if non-admin)
+try {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin -and (Test-Path $noxExePath)) {
+        $fwName = "NOX Send to Phone"
+        $existingFw = Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
+        if (-not $existingFw) {
+            New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Program $noxExePath -Protocol TCP -Action Allow -Profile Any | Out-Null
+            Write-Host "Aturan Firewall 'NOX Send to Phone' ditambahkan." -ForegroundColor DarkGray
+        }
+    }
+} catch {}
 
 if (-not (Test-Path (Join-Path $targetPkgDir "nox.png"))) {
     $fallbackLogo = Join-Path $PSScriptRoot "..\assets\logo-rounded.png"

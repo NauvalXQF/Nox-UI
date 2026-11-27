@@ -91,6 +91,41 @@ pub fn capture(hwnd: isize, shrink: u32) -> Option<Shot> {
         let (ow, oh) = ((cw / s).max(1), (ch / s).max(1));
         let mut out = vec![0u8; (ow * oh * 4) as usize];
         let radius = (9.0 / s as f32).max(2.0);
+        if s == 1 && (ratio - 1.0).abs() < f32::EPSILON && cx + ow <= ww && cy + oh <= wh {
+            for y in 0..oh {
+                let from = (((cy + y) * ww + cx) * 4) as usize;
+                let to = (y * ow * 4) as usize;
+                let (src_row, dst_row) = (&src[from..from + (ow * 4) as usize], &mut out[to..to + (ow * 4) as usize]);
+                dst_row.copy_from_slice(src_row);
+                for px in dst_row.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+            }
+            let band = radius.ceil() as i32 + 1;
+            for y in 0..oh {
+                if y >= band && y < oh - band {
+                    continue;
+                }
+                for x in 0..ow {
+                    if x >= band && x < ow - band {
+                        continue;
+                    }
+                    let a = corner_alpha(x as f32 + 0.5, y as f32 + 0.5, ow as f32, oh as f32, radius) as u32;
+                    let o = ((y * ow + x) * 4) as usize;
+                    out[o] = (out[o] as u32 * a / 255) as u8;
+                    out[o + 1] = (out[o + 1] as u32 * a / 255) as u8;
+                    out[o + 2] = (out[o + 2] as u32 * a / 255) as u8;
+                    out[o + 3] = a as u8;
+                }
+            }
+            SelectObject(dc, old);
+            let _ = DeleteObject(HGDIOBJ(dib.0));
+            let _ = DeleteDC(dc);
+            if !ok {
+                return None;
+            }
+            return Some(Shot { rect: (fx, fy, fw, fh), bmp: Bitmap { w: ow as u32, h: oh as u32, bgra: out } });
+        }
         for y in 0..oh {
             for x in 0..ow {
                 let (mut b, mut g, mut r) = (0u32, 0u32, 0u32);

@@ -1,11 +1,12 @@
+use crate::hookthread::{HookThread, Kind};
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::Mutex;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, MSLLHOOKSTRUCT, WH_MOUSE_LL,
-    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    CallNextHookEx, PostMessageW, MSLLHOOKSTRUCT, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
 };
 
-static HOOK: AtomicIsize = AtomicIsize::new(0);
+static HOOK: Mutex<Option<HookThread>> = Mutex::new(None);
 static TARGET: AtomicIsize = AtomicIsize::new(0);
 static MSG: AtomicU32 = AtomicU32::new(0);
 static RECT: [std::sync::atomic::AtomicI32; 4] = [const { std::sync::atomic::AtomicI32::new(0) }; 4];
@@ -33,7 +34,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 }
 
 pub fn begin_dismiss(rect: (i32, i32, i32, i32), target: isize, msg: u32) {
-    let had_hook = HOOK.load(Ordering::Relaxed) != 0;
+    let had_hook = HOOK.lock().unwrap_or_else(|e| e.into_inner()).is_some();
     let prev_target = TARGET.load(Ordering::Relaxed);
     let prev_msg = MSG.load(Ordering::Relaxed);
     end_dismiss();
@@ -48,9 +49,8 @@ pub fn begin_dismiss(rect: (i32, i32, i32, i32), target: isize, msg: u32) {
     RECT[3].store(rect.3, Ordering::Relaxed);
     TARGET.store(target, Ordering::Relaxed);
     MSG.store(msg, Ordering::Relaxed);
-    if let Ok(h) = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(proc), None, 0) } {
-        HOOK.store(h.0 as isize, Ordering::Relaxed);
-    }
+    let h = HookThread::start(Kind::Mouse, Some(proc));
+    *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = h;
 }
 
 pub fn end_dismiss_for(target: isize) {
@@ -61,10 +61,6 @@ pub fn end_dismiss_for(target: isize) {
 
 pub fn end_dismiss() {
     TARGET.store(0, Ordering::Relaxed);
-    let h = HOOK.swap(0, Ordering::Relaxed);
-    if h != 0 {
-        unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(h as *mut _));
-        }
-    }
+    let h = HOOK.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(h);
 }

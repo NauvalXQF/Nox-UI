@@ -1341,7 +1341,7 @@ impl Cc {
                     Kind::Lock => launch::run("rundll32.exe", "user32.dll,LockWorkStation"),
                     Kind::Mission => crate::mission::toggle(),
                     Kind::Apps => crate::launchpad::toggle(),
-                    Kind::Calculator => launch::run("calc.exe", ""),
+                    Kind::Calculator => launch::show("calc.exe", ""),
                     Kind::Timer => launch::open("ms-clock:"),
                     _ => {}
                 }

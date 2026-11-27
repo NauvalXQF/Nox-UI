@@ -153,6 +153,8 @@ fn main() {
     };
 
     let Ok(main_hwnd) = mainwin::create() else { return };
+    mainwin::set_compositor(&host.compositor);
+    mainwin::start_gpu_watch(main_hwnd);
     single_instance::listen(event, main_hwnd);
     mainwin::add_tray(main_hwnd);
     if let Some(s) = args.exit_after {

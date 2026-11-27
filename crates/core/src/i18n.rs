@@ -488,6 +488,9 @@ const EN: &[(&str, &str)] = &[
     ("Terjemahkan", "Translate"),
     ("Rapikan", "Polish"),
     ("Ketik teks di atas atau salin teks ke clipboard dulu.", "Type text above or copy text to clipboard first."),
+    ("Efek transparansi Windows mati, Deck tampil solid", "Windows transparency effects are off; Deck shows solid"),
+    ("Penghemat baterai aktif, Deck tampil solid", "Battery saver is on; Deck shows solid"),
+    ("Nyalakan", "Turn on"),
 ];
 
 pub fn is_known(src: &str) -> bool {

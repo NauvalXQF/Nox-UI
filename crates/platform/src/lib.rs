@@ -12,6 +12,7 @@ pub mod downloads;
 pub mod filesearch;
 pub mod gemini;
 pub mod gtasks;
+pub mod hookthread;
 pub mod http;
 pub mod iconpack;
 pub mod icons;

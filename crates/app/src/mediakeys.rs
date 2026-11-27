@@ -1,10 +1,10 @@
 use crate::services;
+use nacre_platform::hookthread::{HookThread, Kind};
 use nacre_platform::{audio, log};
-use std::sync::atomic::{AtomicIsize, Ordering};
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use std::sync::Mutex;
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const VK_VOLUME_MUTE: u16 = 0xAD;
@@ -13,26 +13,24 @@ const VK_VOLUME_UP: u16 = 0xAF;
 
 const VOLUME_STEP: f32 = 0.02;
 
-static HOOK: AtomicIsize = AtomicIsize::new(0);
+static HOOK: Mutex<Option<HookThread>> = Mutex::new(None);
 
 pub fn install() {
-    if HOOK.load(Ordering::Relaxed) != 0 {
+    let mut g = HOOK.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
         return;
     }
-    unsafe {
-        let hi = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), hi, 0) {
-            Ok(h) => {
-                HOOK.store(h.0 as isize, Ordering::Relaxed);
-                log::line("mediakeys", "hook volume aktif");
-            }
-            Err(e) => log::line("mediakeys", &format!("gagal pasang hook: {e}")),
+    match HookThread::start(Kind::Keyboard, Some(proc)) {
+        Some(h) => {
+            *g = Some(h);
+            log::line("mediakeys", "hook volume aktif (thread khusus)");
         }
+        None => log::line("mediakeys", "gagal pasang hook volume"),
     }
 }
 
 pub fn reinstall() {
-    if HOOK.load(Ordering::Relaxed) == 0 {
+    if HOOK.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
         return;
     }
     shutdown();
@@ -40,12 +38,8 @@ pub fn reinstall() {
 }
 
 pub fn shutdown() {
-    let h = HOOK.swap(0, Ordering::Relaxed);
-    if h != 0 {
-        unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(h as *mut _));
-        }
-    }
+    let h = HOOK.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(h);
 }
 
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {

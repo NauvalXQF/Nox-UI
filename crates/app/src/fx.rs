@@ -614,9 +614,22 @@ impl Fx {
                 return;
             }
         }
+        let t0 = std::time::Instant::now();
         let Some(shot) = snapshot::capture(h, 2) else { return };
+        let t_cap = t0.elapsed();
         if let Ok(surface) = self.gfx.surface_from_bgra(shot.bmp.w, shot.bmp.h, &shot.bmp.bgra) {
-            log::line("fx", &format!("tangkap hwnd={h} {}x{} (px {}x{})", shot.rect.2, shot.rect.3, shot.bmp.w, shot.bmp.h));
+            log::line(
+                "fx",
+                &format!(
+                    "tangkap hwnd={h} {}x{} (px {}x{}) ambil={}ms unggah={}ms",
+                    shot.rect.2,
+                    shot.rect.3,
+                    shot.bmp.w,
+                    shot.bmp.h,
+                    t_cap.as_millis(),
+                    (t0.elapsed() - t_cap).as_millis()
+                ),
+            );
             let s = Snap { hwnd: h, rect: shot.rect, surface };
             self.snaps.insert(h, (s.clone(), std::time::Instant::now()));
             if self.snaps.len() > 4 {
