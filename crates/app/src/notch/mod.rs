@@ -3253,7 +3253,7 @@ impl Notch {
             if self.cursor_on_media_button() {
                 kill(self.hwnd, T_DWELL);
             } else {
-                timer(self.hwnd, T_DWELL, motion::DWELL_MS);
+                timer(self.hwnd, T_DWELL, crate::prefs::get().notch_reveal.visor_open_ms());
             }
         }
     }
@@ -4134,7 +4134,9 @@ impl Notch {
         }
         let s = crate::prefs::get();
         self.off = !s.notch_enabled;
-        let rail_here = s.menubar && nacre_platform::monitors::target(s.rail_screen).area == notch_monitor().area;
+        let rail_here = s.menubar
+            && s.rail == nacre_core::settings::Behavior::Fixed
+            && nacre_platform::monitors::target(s.rail_screen).area == notch_monitor().area;
         let (vis, reserve) = (s.notch.mode(), s.notch.reserves() && s.notch_enabled && !rail_here);
         if vis != self.vis {
             self.vis = vis;
@@ -4828,7 +4830,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         STRIP_ENTER => {
             with(hwnd, |d| {
                 if d.vis != Vis::Always {
-                    let delay = crate::prefs::get().notch_autohide_delay.clamp(50, 300) as u32;
+                    let s = crate::prefs::get();
+                    let delay = match s.notch_reveal {
+                        nacre_core::settings::Reveal::Quick => s.notch_autohide_delay.clamp(50, 300) as u32,
+                        nacre_core::settings::Reveal::Calm => s.notch_reveal.visor_edge_ms(),
+                    };
                     timer(hwnd, T_EDGE, delay);
                 }
             });

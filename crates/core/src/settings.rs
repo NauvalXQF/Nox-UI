@@ -2,6 +2,67 @@ use crate::display::Screen;
 use crate::i18n::Lang;
 use crate::visibility::policy::Mode;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reveal {
+    #[default]
+    Quick,
+    Calm,
+}
+
+impl Reveal {
+    pub const ALL: [Reveal; 2] = [Reveal::Quick, Reveal::Calm];
+
+    pub fn parse(s: &str) -> Option<Reveal> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "quick" | "cepat" | "fast" | "sensitive" => Some(Reveal::Quick),
+            "calm" | "santai" | "relaxed" | "delay" => Some(Reveal::Calm),
+            _ => None,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Reveal::Quick => "quick",
+            Reveal::Calm => "calm",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Reveal::Quick => "Cepat",
+            Reveal::Calm => "Santai",
+        }
+    }
+
+    pub fn deck_ms(self) -> u32 {
+        match self {
+            Reveal::Quick => 200,
+            Reveal::Calm => 550,
+        }
+    }
+
+    pub fn rail_ms(self) -> u32 {
+        match self {
+            Reveal::Quick => 150,
+            Reveal::Calm => 500,
+        }
+    }
+
+    pub fn visor_edge_ms(self) -> u32 {
+        match self {
+            Reveal::Quick => 200,
+            Reveal::Calm => 500,
+        }
+    }
+
+    pub fn visor_open_ms(self) -> u32 {
+        match self {
+            Reveal::Quick => 180,
+            Reveal::Calm => 450,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
     Fixed,
@@ -15,7 +76,7 @@ impl Behavior {
         match s.trim().to_ascii_lowercase().as_str() {
             "fixed" | "tetap" | "permanent" => Some(Behavior::Fixed),
             "overlay" | "menimpa" => Some(Behavior::Overlay),
-            "smart" | "auto" => Some(Behavior::Smart),
+            "smart" | "pintar" | "auto" => Some(Behavior::Smart),
             "autohide" | "auto-hide" | "peek" | "hidden" | "ondemand" => Some(Behavior::AutoHide),
             _ => None,
         }
@@ -307,6 +368,10 @@ pub struct Settings {
     pub rail_screen: Screen,
     pub notch_screen: Screen,
     pub widget_screen: Screen,
+    pub rail: Behavior,
+    pub dock_reveal: Reveal,
+    pub rail_reveal: Reveal,
+    pub notch_reveal: Reveal,
 }
 
 pub const ALL_NOTCH_TABS_MASK: u8 = 0b0111_1111;
@@ -388,6 +453,10 @@ impl Default for Settings {
             rail_screen: Screen::Primary,
             notch_screen: Screen::Primary,
             widget_screen: Screen::Primary,
+            rail: Behavior::Fixed,
+            dock_reveal: Reveal::Quick,
+            rail_reveal: Reveal::Quick,
+            notch_reveal: Reveal::Quick,
         }
     }
 }
@@ -656,6 +725,10 @@ impl Settings {
                 "rail_screen" => s.rail_screen = Screen::parse(v).unwrap_or(s.rail_screen),
                 "notch_screen" => s.notch_screen = Screen::parse(v).unwrap_or(s.notch_screen),
                 "widget_screen" => s.widget_screen = Screen::parse(v).unwrap_or(s.widget_screen),
+                "rail" => s.rail = Behavior::parse(v).unwrap_or(s.rail),
+                "dock_reveal" => s.dock_reveal = Reveal::parse(v).unwrap_or(s.dock_reveal),
+                "rail_reveal" => s.rail_reveal = Reveal::parse(v).unwrap_or(s.rail_reveal),
+                "notch_reveal" => s.notch_reveal = Reveal::parse(v).unwrap_or(s.notch_reveal),
                 "autostart" => {
                     if let Some(b) = parse_bool(v) {
                         s.autostart = b;
@@ -723,7 +796,7 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\n",
+            "# NOX settings\ntakeover={}\ndock={}\nnotch={}\nblur={}\ntransparency={}\ntheme={}\nlang={}\ndock_material={}\ndock_round={}\nnotch_material={}\nnotch_round={}\nautostart={}\ndock_size={}\ndock_gap={}\ndock_zoom={}\ndock_margin={}\nanim={}\nrefraction={}\ndock_enabled={}\nnotch_enabled={}\nnotch_hover_open={}\nwin_shadow={}\nmenubar={}\nclock_24h={}\nmenubar_glass={}\nhot_tl={}\nhot_tr={}\nhot_bl={}\nhot_br={}\nhide_desktop_icons={}\nmenubar_style={}\ndock_plates={}\nabove_fullscreen={}\nclipboard_history={}\nicon_style={}\nicon_tint={}\naccent={}\nmac_shortcuts={}\ndownloads_stack={}\nrecent_apps={}\nicon_pack={}\nmenubar_material={}\nicon_variant={}\nmin_effect={}\nnotch_idle={}\ngreet_name={}\ngreet_text={}\nlyrics_compact={}\nlyrics_panel_open={}\nlyrics_online={}\nlyrics_lead_ms={}\nnotch_downloads={}\nnotch_send={}\nui_scale={}\nnotch_island={}\nnotch_autohide_delay={}\nnotch_notif_peek={}\nnotch_notifs={}\nnotch_tab_order={}\nnotch_tab_hidden={}\nprayer_city={}\nprayer_lat_e4={}\nprayer_lon_e4={}\nprayer_method={}\nprayer_auto_loc={}\nprayer_alert_10m={}\nprayer_alert_5m={}\nprayer_alert_now={}\nprayer_alert_sound={}\ngemini_model={}\ngemini_custom_model={}\nwidget_style={}\nbattery_pct={}\ndeck_screen={}\nrail_screen={}\nnotch_screen={}\nwidget_screen={}\nrail={}\ndock_reveal={}\nrail_reveal={}\nnotch_reveal={}\n",
             self.takeover,
             self.dock.key(),
             self.notch.key(),
@@ -800,7 +873,11 @@ impl Settings {
             self.deck_screen.key(),
             self.rail_screen.key(),
             self.notch_screen.key(),
-            self.widget_screen.key()
+            self.widget_screen.key(),
+            self.rail.key(),
+            self.dock_reveal.key(),
+            self.rail_reveal.key(),
+            self.notch_reveal.key()
         )
     }
 }
@@ -1143,5 +1220,22 @@ dock_margin=900");
         let f = Settings::parse(&Settings::parse("deck_screen=2\nrail_screen=1\nnotch_screen=primary\nwidget_screen=3\n").serialize());
         assert_eq!((f.deck_screen, f.rail_screen, f.notch_screen, f.widget_screen), (Screen::Nth(2), Screen::Nth(1), Screen::Primary, Screen::Nth(3)));
         assert_eq!(Settings::parse("deck_screen=9\n").deck_screen, Screen::Primary);
+    }
+
+    #[test]
+    fn reveal_modes_round_trip_and_calm_is_always_slower() {
+        let d = Settings::default();
+        assert_eq!((d.dock_reveal, d.rail_reveal, d.notch_reveal, d.rail), (Reveal::Quick, Reveal::Quick, Reveal::Quick, Behavior::Fixed));
+        let f = Settings::parse(&Settings::parse("rail=pintar\ndock_reveal=santai\nrail_reveal=calm\nnotch_reveal=cepat\n").serialize());
+        assert_eq!((f.rail, f.dock_reveal, f.rail_reveal, f.notch_reveal), (Behavior::Smart, Reveal::Calm, Reveal::Calm, Reveal::Quick));
+        assert_eq!(Settings::parse("dock_reveal=999\n").dock_reveal, Reveal::Quick);
+        for r in Reveal::ALL {
+            assert_eq!(Reveal::parse(r.key()), Some(r));
+        }
+        let (q, c) = (Reveal::Quick, Reveal::Calm);
+        assert!(c.deck_ms() >= q.deck_ms() + 250 && c.rail_ms() >= q.rail_ms() + 250);
+        assert!(c.visor_edge_ms() > q.visor_edge_ms() && c.visor_open_ms() > q.visor_open_ms());
+        assert_eq!((q.deck_ms(), q.rail_ms(), q.visor_edge_ms()), (200, 150, 200));
+        assert!(q.visor_open_ms() < 300);
     }
 }
