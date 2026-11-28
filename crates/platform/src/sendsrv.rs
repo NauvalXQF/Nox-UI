@@ -32,12 +32,19 @@ impl Drop for Server {
 }
 
 fn lan_ip() -> Option<Ipv4Addr> {
-    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("8.8.8.8:80").ok()?;
-    match s.local_addr().ok()? {
-        SocketAddr::V4(a) if is_private(a.ip().octets()) => Some(*a.ip()),
-        _ => None,
+    // Try internet route first, then private LAN gateway targets so offline Wi-Fi hotspots still resolve.
+    for target in ["8.8.8.8:80", "192.168.1.1:80", "192.168.137.1:80", "10.0.0.1:80", "172.16.0.1:80"] {
+        let Ok(s) = UdpSocket::bind("0.0.0.0:0") else { continue };
+        if s.connect(target).is_err() {
+            continue;
+        }
+        if let Ok(SocketAddr::V4(a)) = s.local_addr() {
+            if is_private(a.ip().octets()) {
+                return Some(*a.ip());
+            }
+        }
     }
+    None
 }
 
 fn random10() -> [u8; 10] {
@@ -54,6 +61,7 @@ struct Shared {
     active: Mutex<usize>,
     tx: Mutex<Sender<Progress>>,
     last: Mutex<Instant>,
+    stop: Arc<AtomicBool>,
     notify: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -169,6 +177,9 @@ fn serve(mut s: TcpStream, tok: &str, sh: &Shared, en: bool) {
     let mut buf = vec![0u8; 64 * 1024];
     let mut sent = 0u64;
     loop {
+        if sh.stop.load(Ordering::Relaxed) {
+            break;
+        }
         let n = match f.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
@@ -207,7 +218,7 @@ pub fn start(paths: &[String], en: bool, notify: impl Fn() + Send + Sync + 'stat
     let (tx, rx) = channel();
     let stop = Arc::new(AtomicBool::new(false));
     let n = files.len();
-    let sh = Arc::new(Shared { files, reached: Mutex::new(vec![0; n]), active: Mutex::new(0), tx: Mutex::new(tx), last: Mutex::new(Instant::now()), notify: Box::new(notify) });
+    let sh = Arc::new(Shared { files, reached: Mutex::new(vec![0; n]), active: Mutex::new(0), tx: Mutex::new(tx), last: Mutex::new(Instant::now()), stop: stop.clone(), notify: Box::new(notify) });
     let stop2 = stop.clone();
     let live = Arc::new(AtomicUsize::new(0));
     std::thread::spawn(move || {

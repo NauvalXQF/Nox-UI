@@ -90,7 +90,7 @@ pub fn primary(list: &[Monitor]) -> Option<Monitor> {
 pub fn resolve(screen: Screen, list: &[Monitor]) -> Option<Monitor> {
     match screen {
         Screen::Primary => primary(list),
-        Screen::Nth(n) => ordered(list.to_vec()).get(n as usize - 1).copied().or_else(|| primary(list)),
+        Screen::Nth(n) => ordered(list.to_vec()).get(n.saturating_sub(1) as usize).copied().or_else(|| primary(list)),
     }
 }
 

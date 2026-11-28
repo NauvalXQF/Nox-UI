@@ -42,13 +42,17 @@ pub fn unique(base: PathBuf, exists: &dyn Fn(&Path) -> bool) -> PathBuf {
     let dir = base.parent().map(Path::to_path_buf).unwrap_or_default();
     let stem = base.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let ext = base.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-    for n in 2..1000 {
+    for n in 2..=100_000 {
         let c = dir.join(format!("{stem} ({n}){ext}"));
         if !exists(&c) {
             return c;
         }
     }
-    dir.join(format!("{stem} (baru){ext}"))
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    dir.join(format!("{stem} ({ts}){ext}"))
 }
 
 pub fn output_for(src: &str, op: Op, small: &str, exists: &dyn Fn(&Path) -> bool) -> PathBuf {

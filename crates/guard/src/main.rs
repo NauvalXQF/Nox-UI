@@ -19,10 +19,12 @@ fn main() {
         return;
     }
 
-    let parked = marker.with_file_name("parked.txt");
-    if parked.exists() {
-        let n = nacre_platform::wins::park::restore_file(&parked);
-        nacre_platform::log::line("guard", &format!("{n} jendela terparkir dikembalikan"));
+    for file_name in ["parked.txt", "opening.txt"] {
+        let parked = marker.with_file_name(file_name);
+        if parked.exists() {
+            let n = nacre_platform::wins::park::restore_file(&parked);
+            nacre_platform::log::line("guard", &format!("{n} jendela terparkir ({file_name}) dikembalikan"));
+        }
     }
 
     let cur_flag = marker.with_file_name("cursors_replaced.flag");

@@ -15,9 +15,18 @@ pub struct Release {
 
 pub fn parse_version(s: &str) -> Option<(u32, u32, u32, bool)> {
     let s = s.trim().trim_start_matches(['v', 'V']);
-    let (core, pre) = match s.split_once(['-', '+']) {
-        Some((c, _)) => (c, true),
-        None => (s, false),
+    if s.is_empty() || s.len() > 64 || s.contains("..") {
+        return None;
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_')) {
+        return None;
+    }
+    // Strip SemVer `+build` metadata first (build metadata is NOT a prerelease).
+    let no_build = s.split_once('+').map(|(a, _)| a).unwrap_or(s);
+    let (core, pre) = match no_build.split_once('-') {
+        Some((c, rest)) if !rest.is_empty() => (c, true),
+        Some(_) => return None,
+        None => (no_build, false),
     };
     let mut it = core.split('.');
     let a = it.next()?.parse().ok()?;
@@ -50,21 +59,33 @@ pub fn parse_release_from(body: &str, allowed: &str) -> Option<Release> {
     }
     let tag = j.get("tag_name")?.as_str()?;
     parse_version(tag)?;
-    let version = tag.trim_start_matches(['v', 'V']).to_string();
+    let version = tag.trim().trim_start_matches(['v', 'V']).to_string();
     let page = j.get("html_url").and_then(|v| v.as_str()).unwrap_or(RELEASES).to_string();
     let mut out = Release { version, page, asset_url: None, asset_name: None, sha256: None };
+    let mut best_rank = 0u8;
     for a in j.get("assets").and_then(|v| v.as_arr()).unwrap_or(&[]) {
         let Some(name) = a.get("name").and_then(|v| v.as_str()) else { continue };
         let lower = name.to_lowercase();
         let is_nox_zip = lower.starts_with("nox-") && lower.ends_with(".zip");
+        let is_win64_zip = is_nox_zip && (lower.contains("win64") || lower.contains("x64"));
         let is_nox_setup = lower.starts_with("nox-setup-") && lower.ends_with(".exe");
-        if !is_nox_zip && !is_nox_setup {
+        let rank = if is_win64_zip {
+            3
+        } else if is_nox_zip {
+            2
+        } else if is_nox_setup {
+            1
+        } else {
+            0
+        };
+        if rank == 0 || rank <= best_rank {
             continue;
         }
         let Some(url) = a.get("browser_download_url").and_then(|v| v.as_str()) else { continue };
         if !url.starts_with(allowed) {
             continue;
         }
+        best_rank = rank;
         out.asset_url = Some(url.to_string());
         out.asset_name = Some(name.to_string());
         out.sha256 = a
@@ -73,9 +94,6 @@ pub fn parse_release_from(body: &str, allowed: &str) -> Option<Release> {
             .and_then(|d| d.strip_prefix("sha256:"))
             .filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
             .map(|h| h.to_ascii_lowercase());
-        if is_nox_zip {
-            break;
-        }
     }
     Some(out)
 }
@@ -100,6 +118,9 @@ mod tests {
         assert!(!is_newer("abc", "0.6.0"));
         assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3, false)));
         assert_eq!(parse_version("1.2.3.4"), None);
+        assert_eq!(parse_version("0.6.1+../../escape"), None);
+        assert_eq!(parse_version("0.6.1+2026"), Some((0, 6, 1, false)));
+        assert!(!is_newer("0.6.1", "0.6.1+2026"));
     }
 
     #[test]

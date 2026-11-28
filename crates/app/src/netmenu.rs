@@ -72,6 +72,10 @@ fn post(hwnd: isize, msg: u32) -> impl Fn() + Send + 'static {
     }
 }
 
+pub fn is_open() -> bool {
+    NET.with(|c| c.borrow().as_ref().is_some_and(|n| n.open.is_some()))
+}
+
 fn ensure(comp: &Compositor) -> bool {
     if NET.with(|c| c.borrow().is_some()) {
         return true;
@@ -189,6 +193,7 @@ impl Net {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), T_LIVE);
         }
+        crate::menubar::request_resync();
     }
 
     fn live_signal(&mut self) {

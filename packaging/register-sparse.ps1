@@ -16,8 +16,21 @@ $AppId = "Nox"
 $InstallRoot = Join-Path $env:LOCALAPPDATA "NOX"
 
 function Stop-NoxProcesses {
+    # Give running NOX up to 3s to finish graceful cleanup (taskbar/gamma/icons) before force-killing.
+    for ($i = 0; $i -lt 15; $i++) {
+        $alive = Get-Process nox, abra -ErrorAction SilentlyContinue
+        if (-not $alive) { break }
+        Start-Sleep -Milliseconds 200
+    }
     Get-Process nox, nox-guard, abra, abra-guard -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds 250
+}
+
+function Invoke-ElevatedPowerShell {
+    param([string]$ScriptText)
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($ScriptText)
+    $enc = [Convert]::ToBase64String($bytes)
+    return Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
 }
 
 function Remove-NoxPackage {
@@ -35,6 +48,9 @@ if ($Uninstall) {
     Write-Host "=== Uninstall NOX ===" -ForegroundColor Cyan
     Stop-NoxProcesses
     Remove-NoxPackage
+    # Remove logon autostart entries (Task Scheduler + legacy Run key)
+    try { & schtasks.exe /Delete /TN "NOX Autostart" /F 2>$null | Out-Null } catch {}
+    try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "NOX" -ErrorAction SilentlyContinue } catch {}
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($isAdmin) {
         Get-NetFirewallRule -DisplayName "NOX Send to Phone" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
@@ -91,6 +107,12 @@ if ($InstallToAppData) {
     if (Test-Path (Join-Path $srcBin "nox-guard.exe")) {
         Copy-Item (Join-Path $srcBin "nox-guard.exe") (Join-Path $InstallRoot "nox-guard.exe") -Force
     }
+    $srcFonts = Join-Path $srcBin "fonts"
+    if (Test-Path $srcFonts) {
+        $dstFonts = Join-Path $InstallRoot "fonts"
+        New-Item -ItemType Directory -Path $dstFonts -Force | Out-Null
+        Copy-Item (Join-Path $srcFonts "*") $dstFonts -Force
+    }
     foreach ($f in @("AppxManifest.xml", "nox.png", "register-sparse.ps1", "NOX.msix", "NOX.cer")) {
         $srcFile = Join-Path $srcPkgDir $f
         if (Test-Path $srcFile) {
@@ -140,26 +162,37 @@ $registered = $false
 if ((Test-Path $msixPath) -and (Test-Path $cerPath)) {
     Write-Host "Mendeteksi paket MSIX bertanda tangan (NOX.msix)..." -ForegroundColor Cyan
     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cerPath)
+    try {
+        $thumb = $cert.Thumbprint
+    } finally {
+        $cert.Dispose()
+    }
     $alreadyTrusted = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-        Where-Object { $_.Thumbprint -eq $cert.Thumbprint }
+        Where-Object { $_.Thumbprint -eq $thumb }
 
-    if (-not $alreadyTrusted) {
+    $certTrusted = [bool]$alreadyTrusted
+    if (-not $certTrusted) {
         Write-Host "Memasang sertifikat NOX agar Windows mempercayai paket (1x konfirmasi UAC)..." -ForegroundColor Yellow
-        $importCmd = "Import-Certificate -FilePath '$cerPath' -CertStoreLocation Cert:\LocalMachine\Root | Out-Null"
-        $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$importCmd`""
-        if ($p.ExitCode -ne 0) {
-            Write-Host "Pemasangan sertifikat dibatalkan." -ForegroundColor Yellow
+        $safeCer = $cerPath.Replace("'", "''")
+        $importCmd = "Import-Certificate -FilePath '$safeCer' -CertStoreLocation Cert:\LocalMachine\Root | Out-Null"
+        $p = Invoke-ElevatedPowerShell -ScriptText $importCmd
+        if ($p.ExitCode -eq 0) {
+            $certTrusted = $true
+        } else {
+            Write-Host "Pemasangan sertifikat dibatalkan; registrasi paket lama dipertahankan." -ForegroundColor Yellow
         }
     }
 
-    try {
-        Stop-NoxProcesses
-        Remove-NoxPackage
-        Add-AppxPackage -Path $msixPath -ExternalLocation $targetBin
-        $registered = $true
-    } catch {
-        Write-Host "Registrasi NOX.msix gagal: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Mencoba fallback registrasi manifest..." -ForegroundColor DarkGray
+    if ($certTrusted) {
+        try {
+            Stop-NoxProcesses
+            Remove-NoxPackage
+            Add-AppxPackage -Path $msixPath -ExternalLocation $targetBin
+            $registered = $true
+        } catch {
+            Write-Host "Registrasi NOX.msix gagal: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "Mencoba fallback registrasi manifest..." -ForegroundColor DarkGray
+        }
     }
 }
 
@@ -182,7 +215,7 @@ if (-not $registered) {
         if ($choice -eq "1") {
             Write-Host "Meminta izin Administrator (UAC) untuk mengaktifkan Developer Mode..." -ForegroundColor Cyan
             $enableCmd = "New-Item -Path '$devKey' -Force | Out-Null; Set-ItemProperty -Path '$devKey' -Name 'AllowDevelopmentWithoutDevLicense' -Type DWord -Value 1"
-            $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$enableCmd`""
+            $p = Invoke-ElevatedPowerShell -ScriptText $enableCmd
             $devMode = (Get-ItemProperty -Path $devKey -Name "AllowDevelopmentWithoutDevLicense" -ErrorAction SilentlyContinue).AllowDevelopmentWithoutDevLicense
             if ($devMode -ne 1) {
                 Write-Host "Developer Mode belum aktif. Menjalankan NOX dalam Mode Zero-Config..." -ForegroundColor Yellow

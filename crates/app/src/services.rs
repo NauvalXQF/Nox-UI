@@ -12,6 +12,8 @@ pub const WM_GFX_RESET: u32 = WM_APP + 160;
 
 static HUD: AtomicIsize = AtomicIsize::new(0);
 static ISLAND: AtomicIsize = AtomicIsize::new(0);
+static CC: AtomicIsize = AtomicIsize::new(0);
+static CC_MSG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static GFX_LISTENERS: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 static AUDIO: OnceLock<Sender<audio::Cmd>> = OnceLock::new();
 static BRIGHT: OnceLock<Sender<brightness::Cmd>> = OnceLock::new();
@@ -48,12 +50,24 @@ pub fn register_island(h: HWND) {
     ISLAND.store(h.0 as isize, Ordering::Relaxed);
 }
 
+pub fn register_cc(h: HWND, msg: u32) {
+    CC.store(h.0 as isize, Ordering::Relaxed);
+    CC_MSG.store(msg, Ordering::Relaxed);
+}
+
 fn post_all(msg: u32) {
     for h in [HUD.load(Ordering::Relaxed), ISLAND.load(Ordering::Relaxed)] {
         if h != 0 {
             unsafe {
                 let _ = PostMessageW(Some(HWND(h as *mut _)), msg, WPARAM(0), LPARAM(0));
             }
+        }
+    }
+    let cc = CC.load(Ordering::Relaxed);
+    let cc_msg = CC_MSG.load(Ordering::Relaxed);
+    if cc != 0 && cc_msg != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(cc as *mut _)), cc_msg, WPARAM(0), LPARAM(0));
         }
     }
 }

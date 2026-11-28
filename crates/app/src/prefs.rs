@@ -63,6 +63,10 @@ pub fn update_silent(f: impl FnOnce(&mut Settings)) {
     }
 }
 
+pub fn flush_pending() {
+    update_with(true, |_| {});
+}
+
 pub fn update_with(save: bool, f: impl FnOnce(&mut Settings)) {
     let before = get();
     let mut s = before;

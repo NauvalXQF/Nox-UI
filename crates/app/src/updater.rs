@@ -86,6 +86,7 @@ fn check(manual: bool) {
     if let Some(Phase::Available(r)) = &next {
         let seen = std::fs::read_to_string(seen_file()).unwrap_or_default();
         if seen.trim() != r.version {
+            let _ = std::fs::create_dir_all(crate::paths::config_dir());
             let _ = std::fs::write(seen_file(), &r.version);
             let title = crate::prefs::tr("Pembaruan tersedia");
             crate::notch::push_pill(
@@ -98,12 +99,12 @@ fn check(manual: bool) {
         }
     }
     let auto = test_mode() && std::env::var_os("NACRE_UPDATE_AUTOINSTALL").is_some() && matches!(next, Some(Phase::Available(_)));
+    BUSY.store(false, std::sync::atomic::Ordering::Release);
     if let Some(p) = next {
         set(p);
     } else if phase() == Phase::Checking {
         set(Phase::Idle);
     }
-    BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     if auto {
         install();
     }
@@ -208,20 +209,34 @@ fn fetch_and_prepare(r: &Release) -> Result<PathBuf, String> {
     let Some(want) = &r.sha256 else {
         return Err(crate::prefs::tr("Sidik jari paket tidak tersedia").to_string());
     };
-    if !update::safe_file_name(name) {
+    if !update::safe_file_name(name) || !update::safe_file_name(&r.version) {
         return Err(crate::prefs::tr("Nama berkas paket tidak wajar").to_string());
     }
     let dir = std::env::temp_dir().join("NOX-update");
+    // Clean up older staging directories / downloaded archives so %TEMP% never bloats.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
     let path = dir.join(name);
     nacre_platform::net::download(url, &path, Duration::from_secs(180), 200 * 1024 * 1024)?;
-    let got = nacre_platform::net::sha256_file(&path).unwrap_or_default();
+    let got = nacre_platform::net::sha256_file(&path)
+        .ok_or_else(|| crate::prefs::tr("Gagal memverifikasi sidik jari paket").to_string())?;
     if &got != want {
         let _ = std::fs::remove_file(&path);
         return Err(crate::prefs::tr("Sidik jari paket tidak cocok").to_string());
     }
     if name.to_ascii_lowercase().ends_with(".zip") {
         let stage = dir.join(format!("stage-{}", r.version));
-        extract_zip(&path, &stage)
+        let res = extract_zip(&path, &stage);
+        let _ = std::fs::remove_file(&path);
+        res
     } else {
         Ok(path)
     }

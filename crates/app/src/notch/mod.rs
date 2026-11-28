@@ -149,7 +149,8 @@ enum PillMsg {
 }
 
 static PILL_Q: std::sync::Mutex<Vec<PillMsg>> = std::sync::Mutex::new(Vec::new());
-static QUICK_DONE: std::sync::Mutex<Option<Result<Vec<std::path::PathBuf>, String>>> = std::sync::Mutex::new(None);
+static QUICK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static QUICK_DONE: std::sync::Mutex<Option<(u64, Result<Vec<std::path::PathBuf>, String>)>> = std::sync::Mutex::new(None);
 static QR_TEXT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn push_pill(kind: nacre_core::notch::pills::Kind, key: &str, title: &str, sub: &str, linger: Option<i64>) {
@@ -1163,7 +1164,9 @@ impl Notch {
         let pad = 18.0 * self.dpi;
         let top = 14.0 * self.dpi;
         let cur_mx = cur_x0 + pad + 4.0 * self.dpi;
-        let mw_full = (cur_w - 2.0 * pad - 8.0 * self.dpi).max(180.0 * self.dpi);
+        // Anchor the closed-state column width to the constant closed shell (395 dp) so `cur_mw`
+        // is strictly linear in `lp` (no quadratic cur_w*lp term -> no mid-glide surge).
+        let mw_full = (395.0 * self.dpi - 2.0 * pad - 8.0 * self.dpi).max(180.0 * self.dpi);
         let mw_split = 224.0 * self.dpi;
         let cur_mw = mw_full + (mw_split - mw_full) * lp;
         let cur_div_x = cur_mx + cur_mw + 14.0 * self.dpi;
@@ -1186,6 +1189,10 @@ impl Notch {
             let live_tw = (cur_mw - 70.0 * self.dpi - (1.0 - lp) * 34.0 * self.dpi).max(40.0 * self.dpi);
             let _ = tc.SetSize(Vector2 { X: live_tw.ceil(), Y: pl.title_clip_h });
         }
+        if let Some((closed_l, open_l)) = &self.live_vis.title_layers {
+            let _ = closed_l.SetOpacity(1.0 - smoothstep(0.6, 1.0, lp));
+            let _ = open_l.SetOpacity(smoothstep(0.0, 0.6, lp));
+        }
 
         // Smoothly stretch/contract scrub bar + timestamps in lockstep with `sp_w` & `lp`.
         // Guarded on `scrub.is_some()` so empty ("Not Playing") state never recurses into `render()`.
@@ -1207,11 +1214,11 @@ impl Notch {
         let btn_sc = 1.0 - 0.04 * lp;
         for (act, base_bx, vis) in &pl.ctrl_groups {
             let target_bx = match act {
-                Action::ToggleLyrics => (cur_mx + 24.0 * self.dpi) * (1.0 - lp) + (cx - 2.0 * step) * lp,
+                Action::ToggleLyrics => cur_mx + 24.0 * self.dpi,
                 Action::Prev => cx - step,
                 Action::PlayPause => cx,
                 Action::Next => cx + step,
-                Action::ToggleMute => (cur_mx + cur_mw - 24.0 * self.dpi) * (1.0 - lp) + (cx + 2.0 * step) * lp,
+                Action::ToggleMute => cur_mx + cur_mw - 24.0 * self.dpi,
                 _ => *base_bx,
             };
             let _ = vis.SetOffset(Vector3 { X: target_bx - *base_bx, Y: dy_ctrl, Z: 0.0 });
@@ -1257,9 +1264,9 @@ impl Notch {
         }
         if let Some(panel) = &pl.lyrics_panel {
             let panel_t = if self.lyrics_open {
-                smoothstep(0.20, 0.94, lp)
+                smoothstep(0.30, 0.96, lp)
             } else {
-                smoothstep(0.32, 0.96, lp)
+                smoothstep(0.55, 0.96, lp)
             };
             let travel = if self.lyrics_open { 16.0 * self.dpi } else { 12.0 * self.dpi };
             let slide_x = (1.0 - panel_t) * travel;
@@ -1275,7 +1282,8 @@ impl Notch {
             let _ = group.SetOffset(Vector3 { X: (cur_x0 + cur_w) - *base_right, Y: 0.0, Z: 0.0 });
         }
         if let Some(wave) = &self.live_vis.top_right_wave {
-            let wave_op = smoothstep(0.0, 0.60, 1.0 - lp);
+            let w_raw = ((0.60 - lp) / 0.60).clamp(0.0, 1.0);
+            let wave_op = w_raw * w_raw * (3.0 - 2.0 * w_raw);
             let wave_sc = 0.78 + 0.22 * wave_op;
             let _ = wave.SetOpacity(wave_op);
             let _ = wave.SetScale(Vector3 { X: wave_sc, Y: wave_sc, Z: 1.0 });
@@ -1497,6 +1505,8 @@ impl Notch {
             return;
         }
         self.send = None;
+        self.quick = None;
+        self.qr_card = None;
         let en = crate::prefs::get().lang == nacre_core::i18n::Lang::En;
         let hw = self.hwnd.0 as isize;
         match nacre_platform::sendsrv::start(&paths, en, move || post(hw, WM_SEND)) {
@@ -1506,8 +1516,12 @@ impl Notch {
                     let bmp = nacre_core::qr::render(&m, px as u32, 1);
                     self.paint.gfx.surface_from_bgra(px as u32, px as u32, &bmp).ok()
                 });
-                let names = paths.iter().filter_map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string())).collect();
-                let total = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+                let files: Vec<&String> = paths
+                    .iter()
+                    .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file()))
+                    .collect();
+                let names = files.iter().filter_map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string())).collect();
+                let total = files.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
                 self.send = Some(SendSess {
                     server,
                     qr,
@@ -2206,7 +2220,7 @@ impl Notch {
         } else {
             kill(self.hwnd, T_PILL);
         }
-        if pushed && self.vis == Vis::OnDemand && !self.overlap.fullscreen {
+        if pushed && matches!(self.vis, Vis::OnDemand | Vis::AutoHide) && !self.overlap.fullscreen {
             self.pill_peeking = true;
         } else if self.pills.current(now).is_none() {
             self.pill_peeking = false;
@@ -2221,6 +2235,7 @@ impl Notch {
         if paths.is_empty() {
             return;
         }
+        QUICK_GEN.fetch_add(1, Ordering::Relaxed);
         self.quick = Some(QuickSess { paths, busy: None, status: String::new() });
         self.qr_card = None;
         self.send = None;
@@ -2251,16 +2266,22 @@ impl Notch {
         let paths = q.paths.clone();
         let (small, archive) = (crate::prefs::tr("kecil").to_string(), crate::prefs::tr("Arsip").to_string());
         let hw = self.hwnd.0 as isize;
+        let gen = QUICK_GEN.fetch_add(1, Ordering::Relaxed) + 1;
         std::thread::spawn(move || {
             let r = nacre_platform::quickops::run(op, &paths, &small, &archive);
-            *QUICK_DONE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-            post(hw, WM_QUICKDONE);
+            if QUICK_GEN.load(Ordering::Relaxed) == gen {
+                *QUICK_DONE.lock().unwrap_or_else(|e| e.into_inner()) = Some((gen, r));
+                post(hw, WM_QUICKDONE);
+            }
         });
         self.refresh();
     }
 
     fn on_quick_done(&mut self) {
-        let Some(r) = QUICK_DONE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        let Some((gen, r)) = QUICK_DONE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        if gen != QUICK_GEN.load(Ordering::Relaxed) {
+            return;
+        }
         let (title, sub) = match &r {
             Ok(files) => {
                 let first = files.first().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -2627,7 +2648,14 @@ impl Notch {
         }
         if !matches!(new.view, View::Open(_)) {
             self.swipe.reset();
-            self.cal_sel = 0;
+            if self.cal_sel != 0 {
+                self.cal_sel = 0;
+                self.cal_fetched_at = None;
+                self.cal_events = None;
+                if crate::prefs::get().meeting_companion || crate::prefs::get().capsule.enabled().contains(&glance::Item::Agenda) {
+                    self.ensure_events();
+                }
+            }
             self.todo_adding = false;
             self.todo_editing = false;
             self.todo_cal_adding = false;
@@ -2946,6 +2974,22 @@ impl Notch {
         if let Some(nav) = self.live_vis.nav.as_mut() {
             nav.set_progress_and_height(self.sp_nav.pos, self.sp_h.pos);
         }
+        // Carry live visualizer bar levels across rebuilds (no 1-frame flat-bar flash).
+        if !self.live_vis.bars.is_empty() {
+            use nacre_core::theme::{quantize, VisStyle};
+            let preset = crate::prefs::get().preset;
+            let is_dots = self.live_vis.vis == VisStyle::Dots;
+            for (i, bar) in self.live_vis.bars.iter().enumerate().take(self.bar_cur.len()) {
+                let v = quantize(self.bar_cur[i].clamp(0.0, 1.0), preset);
+                if is_dots {
+                    let s = 0.55 + 0.75 * v;
+                    let _ = bar.SetScale(Vector3 { X: s, Y: s, Z: 1.0 });
+                    let _ = bar.SetOpacity(0.35 + 0.65 * v);
+                } else {
+                    let _ = bar.SetScale(Vector3 { X: 1.0, Y: 0.22 + 0.78 * v, Z: 1.0 });
+                }
+            }
+        }
         if self.play_glide_active && self.live_vis.play_layout.is_some() {
             self.sync_play_glide();
         }
@@ -3119,6 +3163,7 @@ impl Notch {
                 self.sp_art_scale.set_target(if self.playing { 1.0 } else { 0.90 }, SpringParams::open());
                 self.start_frame();
             }
+            self.lyr_idx = self.lyr.as_ref().and_then(|l| l.index_at(self.lyric_pos_ms()));
             self.refresh();
             self.schedule_lyric();
             self.update_visibility();
@@ -3442,6 +3487,20 @@ impl Notch {
         }
         self.update_scrub_in_place();
         self.sync_progress();
+        let pos = self.lyric_pos_ms();
+        let new_idx = self.lyr.as_ref().and_then(|l| l.index_at(pos));
+        if new_idx != self.lyr_idx {
+            let dir = match (self.lyr_idx, new_idx) {
+                (Some(a), Some(b)) if b < a => -1,
+                (Some(a), Some(b)) if b > a => 1,
+                _ => 0,
+            };
+            self.lyr_idx = new_idx;
+            if self.live_vis.lyrics_host.is_some() {
+                let ly = LyricsView { lines: self.lyr.as_ref(), state: self.lyr_state, pos_ms: pos };
+                views::refresh_lyrics_in_place(&mut self.paint, &mut self.live_vis, self.has_media, &ly, dir);
+            }
+        }
         self.schedule_lyric();
         true
     }
@@ -3511,6 +3570,8 @@ impl Notch {
                         self.shelf.add(p);
                     }
                     self.save_shelf();
+                    self.quick = None;
+                    self.qr_card = None;
                     self.dispatch(Event::Dropped);
                 } else if zone == 1 {
                     self.start_send(paths);
@@ -3912,6 +3973,7 @@ impl Notch {
             }
             Action::QuickOp(i) => self.run_quick(i),
             Action::QuickClose => {
+                QUICK_GEN.fetch_add(1, Ordering::Relaxed);
                 self.quick = None;
                 self.refresh();
             }
@@ -4098,6 +4160,7 @@ impl Notch {
             Action::GeminiFocus => self.focus_input(ActiveInput::Gemini),
             Action::GeminiSend => self.submit_gemini(),
             Action::GeminiStop => {
+                self.gemini_req_id = self.gemini_req_id.wrapping_add(1);
                 self.gemini.cancel_current();
                 self.gemini_streaming = false;
                 self.render();
@@ -4110,6 +4173,7 @@ impl Notch {
                 }
             }
             Action::GeminiClear => {
+                self.gemini_req_id = self.gemini_req_id.wrapping_add(1);
                 self.gemini.cancel_current();
                 self.gemini_streaming = false;
                 self.gemini_resp.clear();
@@ -4274,8 +4338,14 @@ impl Notch {
         let finished = self.timer.tick(now);
         let s = self.timer.remaining_secs(now);
         if finished || s != self.last_sec {
+            let crossed_ending = self.last_sec > 60 && s <= 60;
             self.last_sec = s;
-            self.refresh();
+            let shows_timer = self.mode == Mode::Open(Tab::Timer)
+                || matches!(self.look.view, View::Compact(state::Activity::Timer | state::Activity::TimerEnding))
+                || (matches!(self.look.view, View::Rest | View::Compact(_)) && self.live_vis.detached_timer.is_some());
+            if finished || shows_timer || crossed_ending {
+                self.refresh();
+            }
         }
         if finished {
             log::line("notch", &format!("pomodoro selesai stage={:?}", self.timer.stage));
@@ -4840,7 +4910,19 @@ impl Notch {
                     timer(self.hwnd, T_GRACE, 220);
                 } else {
                     self.grace = false;
-                    self.update_visibility();
+                    // In Auto-hide Floating Pill mode, a dwell opened from the 0..6dp bezel gap
+                    // never sets `self.tracking`; collapse cleanly once the pointer leaves the zone.
+                    if !self.tracking
+                        && matches!(self.mode, Mode::Peek | Mode::Open(_))
+                        && !self.send_pinned()
+                        && !self.pinned
+                        && !self.dragging_out
+                        && !self.focus.is_active()
+                    {
+                        self.dispatch(Event::Leave);
+                    } else {
+                        self.update_visibility();
+                    }
                 }
             }
             T_START => {
@@ -5301,8 +5383,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_LBUTTONUP => {
             let (x, y) = xy(lp);
+            let handled = with(hwnd, |d| d.on_up()).unwrap_or(false);
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-            if with(hwnd, |d| d.on_up()).unwrap_or(false) {
+            if handled {
                 return LRESULT(0);
             }
             with(hwnd, |d| d.on_click(x, y));

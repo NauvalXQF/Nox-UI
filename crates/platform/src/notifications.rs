@@ -217,7 +217,8 @@ fn emit(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), ev: Event) -> boo
 // =============================================================================
 
 static PID_CACHE: Mutex<Option<HashMap<u32, bool>>> = Mutex::new(None);
-static HOOK_TX: Mutex<Option<Sender<isize>>> = Mutex::new(None);
+static HOOK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOOK_TX: Mutex<Option<(u64, Sender<isize>)>> = Mutex::new(None);
 
 fn is_toast_host_pid(pid: u32) -> bool {
     if pid == 0 {
@@ -636,7 +637,7 @@ unsafe extern "system" fn win_event_proc(
         return;
     }
     if let Ok(guard) = HOOK_TX.lock() {
-        if let Some(tx) = guard.as_ref() {
+        if let Some((_, tx)) = guard.as_ref() {
             let _ = tx.send(hwnd.0 as isize);
         }
     }
@@ -690,8 +691,9 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
     };
 
     let (hwnd_tx, hwnd_rx) = channel::<isize>();
+    let my_hook_gen = HOOK_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     if let Ok(mut guard) = HOOK_TX.lock() {
-        *guard = Some(hwnd_tx.clone());
+        *guard = Some((my_hook_gen, hwnd_tx.clone()));
     }
 
     let handler: IUIAutomationEventHandler = ToastOpenHandler { hwnd_tx: hwnd_tx.clone() }.into();
@@ -821,7 +823,9 @@ fn run_uia_backend(tx: &Sender<Event>, notify: &(dyn Fn() + Send + Sync), flag: 
     }
 
     if let Ok(mut guard) = HOOK_TX.lock() {
-        *guard = None;
+        if guard.as_ref().is_some_and(|(g, _)| *g == my_hook_gen) {
+            *guard = None;
+        }
     }
     if !win_hook_show.is_invalid() {
         unsafe {

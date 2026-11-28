@@ -241,9 +241,7 @@ fn main() {
 
     mainwin::TAKEOVER_ALLOWED.store(!args.no_dock && !args.keep_taskbar, std::sync::atomic::Ordering::Relaxed);
     prefs::listen(main_hwnd);
-    if pref.autostart {
-        mainwin::apply_autostart();
-    }
+    mainwin::apply_autostart();
     mainwin::apply_desktop_icons();
     if args.hide_taskbar || (pref.takeover && pref.dock_enabled && !args.no_dock && !args.keep_taskbar) {
         mainwin::set_taskbar_hidden(true);

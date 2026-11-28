@@ -45,12 +45,14 @@ static RAIL_R: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(
 static NOTCH_EXCL_L: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static NOTCH_EXCL_R: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static CAPTION_EXCL_L: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MAX);
+static HAS_ABOVE_MON: AtomicBool = AtomicBool::new(false);
 const T_CLOCK: usize = 1;
 const T_STATUS: usize = 2;
 const T_APP: usize = 3;
 const T_FS: usize = 4;
 const T_RECONF: usize = 6;
 const T_EDGE: usize = 7;
+const T_HIDE: usize = 8;
 const BAR_W: i32 = 600;
 const APP_W: i32 = 800;
 
@@ -102,6 +104,7 @@ struct Bar {
     fullscreen: bool,
     edge: bool,
     smart_hidden: bool,
+    hiding: bool,
 }
 
 impl Drop for Bar {
@@ -141,9 +144,15 @@ unsafe extern "system" fn ll_mouse(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         let was = RAIL_EDGE.load(Ordering::Relaxed);
         let in_notch = pt.x >= NOTCH_EXCL_L.load(Ordering::Relaxed) && pt.x < NOTCH_EXCL_R.load(Ordering::Relaxed);
         let in_caption = pt.x >= CAPTION_EXCL_L.load(Ordering::Relaxed);
-        let now = if inside && y <= 1 {
+        let has_above = HAS_ABOVE_MON.load(Ordering::Relaxed);
+        // Raw WH_MOUSE_LL coordinates frequently overshoot slightly negative (`y < 0`) when flicking
+        // against the top screen bezel on single/horizontal monitor setups; only enforce a lower Y
+        // bound when another monitor actually sits above the rail monitor.
+        let at_bezel = inside && y <= 1 && (!has_above || y >= -2);
+        let out_vertical = y > RAIL_ZONE.load(Ordering::Relaxed) || (has_above && y < -2);
+        let now = if at_bezel {
             if was { true } else { !in_notch && !in_caption }
-        } else if !inside || y > RAIL_ZONE.load(Ordering::Relaxed) {
+        } else if !inside || out_vertical {
             false
         } else {
             was
@@ -292,6 +301,8 @@ fn apply_prefs() {
                 let _ = DestroyWindow(b.popup.hwnd);
             }
         }
+        services::register_bar(HWND::default());
+        services::set_bar_occupied(0, 0);
         services::set_rail_area(None);
         RAIL_SMART.store(false, Ordering::Relaxed);
         sync_mouse_hook(false);
@@ -447,6 +458,7 @@ fn create(comp: &Compositor) -> windows_core::Result<Box<Bar>> {
         fullscreen: false,
         edge: false,
         smart_hidden: false,
+        hiding: false,
     });
     bar.apply_bg();
     Ok(bar)
@@ -691,6 +703,10 @@ impl Bar {
         RAIL_L.store(self.area.x, Ordering::Relaxed);
         RAIL_R.store(self.area.right(), Ordering::Relaxed);
         CAPTION_EXCL_L.store((self.area.right() - (160.0 * self.dpi).round() as i32).max(self.area.x), Ordering::Relaxed);
+        let has_above = nacre_platform::monitors::list()
+            .iter()
+            .any(|m| m.area.bottom() <= self.area.y && m.area.x < self.area.right() && m.area.right() > self.area.x);
+        HAS_ABOVE_MON.store(has_above, Ordering::Relaxed);
         self.sync_notch_exclusion();
         services::set_rail_area(Some(self.area));
         if mode == Behavior::Fixed {
@@ -761,25 +777,51 @@ impl Bar {
                 (self.area.x, self.area.y, self.area.right(), self.area.y + self.h),
                 self.area,
             );
-            let busy = self.open.is_some() || self.tracking || self.edge || crate::controlcenter::is_open();
+            let busy = self.open.is_some()
+                || self.tracking
+                || self.edge
+                || crate::controlcenter::is_open()
+                || crate::netmenu::is_open();
             hide_smart = ov.overlapped && !busy;
         }
         let want = !self.fullscreen && !hide_smart;
         self.smart_hidden = hide_smart;
-        if want != self.popup.is_visible() {
-            if want {
-                self.popup.show();
+        if want {
+            if !self.popup.is_visible() || self.hiding {
+                unsafe {
+                    let _ = KillTimer(Some(self.popup.hwnd), T_HIDE);
+                }
+                self.hiding = false;
+                if !self.popup.is_visible() {
+                    self.popup.show();
+                }
                 self.popup.slide_down(&self.comp);
                 crate::topmost::request_raise();
                 log::line("menubar", "tampil");
-            } else {
-                self.tracking = false;
-                self.hover = None;
-                self.edge = false;
-                RAIL_EDGE.store(false, Ordering::Relaxed);
-                self.close_menu();
+            }
+        } else if self.popup.is_visible() && !self.hiding {
+            self.tracking = false;
+            self.hover = None;
+            self.edge = false;
+            RAIL_EDGE.store(false, Ordering::Relaxed);
+            self.close_menu();
+            if self.fullscreen {
+                unsafe {
+                    let _ = KillTimer(Some(self.popup.hwnd), T_HIDE);
+                }
                 self.popup.hide();
-                log::line("menubar", if self.fullscreen { "sembunyi (fullscreen)" } else { "sembunyi (pintar)" });
+                log::line("menubar", "sembunyi (fullscreen)");
+            } else {
+                let ms = self.popup.slide_up(&self.comp);
+                if ms > 0 {
+                    self.hiding = true;
+                    unsafe {
+                        SetTimer(Some(self.popup.hwnd), T_HIDE, ms + 25, None);
+                    }
+                } else {
+                    self.popup.hide();
+                }
+                log::line("menubar", "sembunyi (pintar)");
             }
         }
     }
@@ -815,7 +857,16 @@ impl Bar {
                 }
             })
             .filter(|n| !n.is_empty());
-        let Some(name) = name else { return changed };
+        let Some(name) = name else {
+            // Reset stale app/profile when focus moves to Desktop (Progman) or filtered system windows
+            // so stale per-app shortcuts (e.g. Close Window -> Alt+F4) are not advertised for Desktop.
+            if self.app != "NOX" || !self.app_path.is_empty() {
+                self.app = "NOX".into();
+                self.app_path.clear();
+                return true;
+            }
+            return changed;
+        };
         let path = wins.iter().find(|w| w.hwnd == fg).map(|w| w.path.clone()).unwrap_or_default();
         let profile_changed = nacre_core::appmenus::exe_of(&path) != nacre_core::appmenus::exe_of(&self.app_path);
         self.app_path = path;
@@ -1604,6 +1655,9 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         b.tracking = true;
                     }
                 }
+                if b.hiding {
+                    b.apply_visibility();
+                }
                 let id = b.id_at(x);
                 if id != b.hover {
                     b.hover = id;
@@ -1707,6 +1761,16 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_POWERBROADCAST | WM_SETTINGCHANGE => {
             SetTimer(Some(hwnd), T_RECONF, 600, None);
             DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_TIMER if wp.0 == T_HIDE => {
+            let _ = KillTimer(Some(hwnd), T_HIDE);
+            with_bar(|b| {
+                if b.hiding {
+                    b.hiding = false;
+                    b.popup.hide();
+                }
+            });
+            LRESULT(0)
         }
         WM_TIMER if wp.0 == T_RECONF => {
             let _ = KillTimer(Some(hwnd), T_RECONF);

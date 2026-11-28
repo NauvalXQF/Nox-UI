@@ -547,47 +547,35 @@ fn push_span(out: &mut Vec<MdSpan>, style: SpanStyle, text: &str) {
     out.push(MdSpan { style, text: text.to_string() });
 }
 
-fn parse_inline_spans(raw: &str) -> Vec<MdSpan> {
-    let s = replace_inline_math(raw);
+fn parse_inline_text_segment(seg: &str, out: &mut Vec<MdSpan>) {
+    let s = replace_inline_math(seg);
     let bytes = s.as_bytes();
     let n = bytes.len();
     let mut i = 0usize;
-    let mut out = Vec::new();
     let mut buf = String::new();
 
     while i < n {
-        // Inline code `` `...` ``
-        if bytes[i] == b'`' {
-            if let Some(rel) = s[i + 1..].find('`') {
-                if !buf.is_empty() {
-                    push_span(&mut out, SpanStyle::Normal, &buf);
-                    buf.clear();
-                }
-                push_span(&mut out, SpanStyle::Code, &s[i + 1..i + 1 + rel]);
-                i += 2 + rel;
-                continue;
-            }
-        }
-        // Bold `**...**` or `__...__`
+        // Bold `**...**` or paired `__...__` (only `**` applies streaming unclosed fallback so `foo__bar` stays literal)
         if i + 1 < n && ((bytes[i] == b'*' && bytes[i + 1] == b'*') || (bytes[i] == b'_' && bytes[i + 1] == b'_')) {
-            let delim = if bytes[i] == b'*' { "**" } else { "__" };
+            let is_star = bytes[i] == b'*';
+            let delim = if is_star { "**" } else { "__" };
             if let Some(rel) = s[i + 2..].find(delim) {
                 if rel > 0 {
                     if !buf.is_empty() {
-                        push_span(&mut out, SpanStyle::Normal, &buf);
+                        push_span(out, SpanStyle::Normal, &buf);
                         buf.clear();
                     }
-                    push_span(&mut out, SpanStyle::Bold, &s[i + 2..i + 2 + rel]);
+                    push_span(out, SpanStyle::Bold, &s[i + 2..i + 2 + rel]);
                     i += 4 + rel;
                     continue;
                 }
-            } else {
+            } else if is_star {
                 // Streaming unclosed bold marker: drop `**` so user never sees raw asterisks.
                 if !buf.is_empty() {
-                    push_span(&mut out, SpanStyle::Normal, &buf);
+                    push_span(out, SpanStyle::Normal, &buf);
                     buf.clear();
                 }
-                push_span(&mut out, SpanStyle::Bold, &s[i + 2..]);
+                push_span(out, SpanStyle::Bold, &s[i + 2..]);
                 break;
             }
         }
@@ -597,10 +585,10 @@ fn parse_inline_spans(raw: &str) -> Vec<MdSpan> {
                 let inner = &s[i + 1..i + 1 + rel];
                 if !inner.is_empty() && !inner.ends_with(' ') {
                     if !buf.is_empty() {
-                        push_span(&mut out, SpanStyle::Normal, &buf);
+                        push_span(out, SpanStyle::Normal, &buf);
                         buf.clear();
                     }
-                    push_span(&mut out, SpanStyle::Italic, inner);
+                    push_span(out, SpanStyle::Italic, inner);
                     i += 2 + rel;
                     continue;
                 }
@@ -611,7 +599,30 @@ fn parse_inline_spans(raw: &str) -> Vec<MdSpan> {
         i += ch.len_utf8();
     }
     if !buf.is_empty() {
-        push_span(&mut out, SpanStyle::Normal, &buf);
+        push_span(out, SpanStyle::Normal, &buf);
+    }
+}
+
+fn parse_inline_spans(raw: &str) -> Vec<MdSpan> {
+    // Split inline code spans `` `...` `` BEFORE LaTeX math replacement so code like `$HOME` stays untouched.
+    let mut out = Vec::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find('`') {
+        let before = &rest[..open];
+        if !before.is_empty() {
+            parse_inline_text_segment(before, &mut out);
+        }
+        let after = &rest[open + 1..];
+        if let Some(close) = after.find('`') {
+            push_span(&mut out, SpanStyle::Code, &after[..close]);
+            rest = &after[close + 1..];
+        } else {
+            parse_inline_text_segment(&rest[open..], &mut out);
+            return out;
+        }
+    }
+    if !rest.is_empty() {
+        parse_inline_text_segment(rest, &mut out);
     }
     out
 }
@@ -641,9 +652,14 @@ pub fn parse_markdown(src: &str) -> Vec<MdBlock> {
         let trimmed_end = raw_line.trim_end();
         let trimmed = trimmed_end.trim();
 
-        // Fenced code blocks ```
+        // Fenced code blocks ``` (including single-line ```code```)
         if trimmed.starts_with("```") {
-            if in_code {
+            if !in_code && trimmed.len() > 6 && trimmed.ends_with("```") {
+                let inner = trimmed[3..trimmed.len() - 3].trim();
+                if !inner.is_empty() {
+                    blocks.push(MdBlock::CodeBlock(vec![inner.to_string()]));
+                }
+            } else if in_code {
                 blocks.push(MdBlock::CodeBlock(std::mem::take(&mut code_lines)));
                 in_code = false;
             } else {

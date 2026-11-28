@@ -180,6 +180,7 @@ pub fn init(comp: &Compositor) -> windows_core::Result<()> {
         let class = w!("AbraCcCtl");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ctl_proc), hInstance: hi, lpszClassName: class, ..Default::default() });
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("abra-cc-ctl"), WS_POPUP, 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hi), None)?;
+        crate::services::register_cc(hwnd, WM_VALUES);
         let (layout, sizes) = controls::from_text_sized(&std::fs::read_to_string(layout_file()).unwrap_or_default());
         CC.with(|c| {
             *c.borrow_mut() = Some(Cc {
@@ -368,6 +369,7 @@ impl Cc {
             self.cache.clear();
             nacre_platform::sys::trim_later(5000);
         }
+        crate::menubar::request_resync();
     }
 
     fn text_surf(&mut self, text: &str, px: i32, weight: i32, rgb: [u8; 3], maxw: i32) -> Option<(CompositionDrawingSurface, i32, i32)> {
@@ -1421,8 +1423,14 @@ impl Cc {
         let Ok(mut popup) = Popup::new_with(&self.comp, w!("AbraCcGallery"), Some(gallery_proc), WINDOW_EX_STYLE(0), prefs::apply(base, &look), true) else { return };
         let (gw, gh) = (620.0 * dpi, 560.0 * dpi);
         let rect = p.popup.rect;
-        let x = (rect.0 as f32 + pad() - gw - 16.0 * dpi).max(10.0 * dpi);
-        let _ = popup.set_rect(x as i32, rect.1 + pad() as i32, gw as i32, gh as i32);
+        let mon = nacre_platform::monitors::at(rect.0 + rect.2 / 2, rect.1 + rect.3 / 2).area;
+        let min_x = mon.x as f32 + 10.0 * dpi;
+        let max_x = (mon.right() as f32 - gw - 10.0 * dpi).max(min_x);
+        let x = (rect.0 as f32 + pad() - gw - 16.0 * dpi).clamp(min_x, max_x);
+        let min_y = mon.y as f32 + 10.0 * dpi;
+        let max_y = (mon.bottom() as f32 - gh - 10.0 * dpi).max(min_y);
+        let y = (rect.1 as f32 + pad()).clamp(min_y, max_y);
+        let _ = popup.set_rect(x as i32, y as i32, gw as i32, gh as i32);
         let _ = popup.panel.set_radius(26.0 * dpi);
         self.gallery = Some(Gallery { popup, dpi, cat: None, query: String::new(), cards: vec![], cats: vec![], done: (0.0, 0.0, 0.0, 0.0), scroll: 0.0, content_h: 0.0, panels: vec![], conts: vec![], hover: None, tracking: false });
         self.refresh_gallery();
@@ -1621,7 +1629,11 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     }
                 }
                 c.ssid = wifi::ssid();
-                if c.panel.is_some() && !c.edit {
+                let busy = c.closing
+                    || c.panel
+                        .as_ref()
+                        .is_some_and(|p| p.slider.is_some() || p.drag.is_some() || p.resize.is_some());
+                if c.panel.is_some() && !c.edit && !busy {
                     c.build();
                 }
             });
@@ -1641,7 +1653,11 @@ unsafe extern "system" fn ctl_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         changed = true;
                     }
                 }
-                if changed && c.panel.is_some() && !c.edit {
+                let busy = c.closing
+                    || c.panel
+                        .as_ref()
+                        .is_some_and(|p| p.slider.is_some() || p.drag.is_some() || p.resize.is_some());
+                if changed && c.panel.is_some() && !c.edit && !busy {
                     c.build();
                 }
             });
@@ -1747,6 +1763,20 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         }
         WM_MOUSELEAVE => {
             with(|c| c.set_hover(None));
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            with(|c| {
+                if let Some(p) = c.panel.as_mut() {
+                    if let Some(i) = p.slider.take() {
+                        if let Some(m) = p.mods.get(i) {
+                            raindrop(&c.comp, &m.thumb, false);
+                        }
+                    }
+                    p.drag = None;
+                    p.resize = None;
+                }
+            });
             LRESULT(0)
         }
         m if m == MENU_PICK => {

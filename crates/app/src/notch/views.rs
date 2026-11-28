@@ -648,6 +648,7 @@ pub struct Live {
     pub top_right_group: Option<(f32, ContainerVisual)>,
     pub top_right_wave: Option<ContainerVisual>,
     pub top_right_pin_shift: f32,
+    pub title_layers: Option<(ContainerVisual, ContainerVisual)>,
     pub play_layout: Option<PlayLayoutLive>,
     pub album_art: Option<ContainerVisual>,
 }
@@ -2002,10 +2003,32 @@ fn music_column(
         let _ = tc.SetSize(Vector2 { X: tw_live.ceil(), Y: title_clip_h });
         let _ = tc.SetClip(&iclip);
         let _ = left_group.Children().and_then(|k| k.InsertAtTop(&tc));
-        let title = p.fit(m.title, 15.0, 700, fit_w);
-        p.text(&tc, &title, 0.0, p.px(11.0), 15.0, 700, WHITE, 1.0, Anchor::Left, fit_w + 2.0);
-        let artist = p.fit(m.artist, 12.0, 500, fit_w);
-        p.text(&tc, &artist, 0.0, p.px(33.0), 12.0, 500, WHITE, 0.56, Anchor::Left, fit_w + 2.0);
+        if gliding {
+            // Two ellipsized layers (closed-width + split-width) cross-faded by `lp` so the title
+            // never hard-clips mid-glyph and never pops to "..." when the glide settles.
+            let tw_open = (p.px(224.0) - (art + p.px(12.0))).max(p.px(40.0));
+            let tw_closed = (p.px(395.0 - 2.0 * EDGE_PAD_DP - 8.0) - (art + p.px(12.0)) - p.px(34.0)).max(p.px(40.0));
+            let mut layers = Vec::new();
+            for (fw, op) in [(tw_closed, 1.0 - smoothstep01(0.6, 1.0, lp)), (tw_open, smoothstep01(0.0, 0.6, lp))] {
+                if let Ok(l) = p.comp.CreateContainerVisual() {
+                    let _ = l.SetOpacity(op);
+                    let _ = tc.Children().and_then(|k| k.InsertAtTop(&l));
+                    let title = p.fit(m.title, 15.0, 700, fw);
+                    p.text(&l, &title, 0.0, p.px(11.0), 15.0, 700, WHITE, 1.0, Anchor::Left, fw + 2.0);
+                    let artist = p.fit(m.artist, 12.0, 500, fw);
+                    p.text(&l, &artist, 0.0, p.px(33.0), 12.0, 500, WHITE, 0.56, Anchor::Left, fw + 2.0);
+                    layers.push(l);
+                }
+            }
+            if layers.len() == 2 {
+                live.title_layers = Some((layers[0].clone(), layers[1].clone()));
+            }
+        } else {
+            let title = p.fit(m.title, 15.0, 700, fit_w);
+            p.text(&tc, &title, 0.0, p.px(11.0), 15.0, 700, WHITE, 1.0, Anchor::Left, fit_w + 2.0);
+            let artist = p.fit(m.artist, 12.0, 500, fit_w);
+            p.text(&tc, &artist, 0.0, p.px(33.0), 12.0, 500, WHITE, 0.56, Anchor::Left, fit_w + 2.0);
+        }
         title_clip_vis = Some(tc);
     } else {
         let title = p.fit(m.title, 15.0, 700, tw_live);
@@ -3013,7 +3036,8 @@ fn draw_styled_spans(
             continue;
         }
         let (wt, _, _) = style_props(st);
-        let tw = p.measure(&tok, font, wt);
+        let code_pad = if st == SpanStyle::Code { p.px(6.0) } else { 0.0 };
+        let tw = p.measure(&tok, font, wt) + code_pad;
         if !cur.is_empty() && cur_w + tw > max_w {
             while cur.last().is_some_and(|t| t.2) {
                 cur.pop();
@@ -3210,8 +3234,9 @@ fn draw_gemini_response(
                 p.text(&sc, marker, ind_x, yy, font, 700, [164, 186, 255], 0.95, Anchor::Left, m_w + p.px(2.0));
                 let text_x = ind_x + m_w;
                 let avail = (wrap_w - text_x).max(p.px(36.0));
+                let y0 = yy;
                 yy = draw_styled_spans(p, &sc, spans, text_x, yy, avail, font, line_h, 400, 0.88, &mut budget);
-                yy += p.px(1.5);
+                yy = yy.max(y0 + line_h) + p.px(1.5);
             }
             MdBlock::CodeBlock(lines) => {
                 if yy > 1.0 {
@@ -3362,9 +3387,9 @@ fn play(p: &mut Painter, c: &ContainerVisual, bf: Frame, full_h: f32, d: &Data, 
             let _ = c.Children().and_then(|k| k.InsertAtTop(&vp));
 
             let panel_t = if d.lyrics_open {
-                smoothstep01(0.20, 0.94, lp)
+                smoothstep01(0.30, 0.96, lp)
             } else {
-                smoothstep01(0.32, 0.96, lp)
+                smoothstep01(0.55, 0.96, lp)
             };
             let travel = if d.lyrics_open { p.px(16.0) } else { p.px(12.0) };
             let slide_x = (1.0 - panel_t) * travel;

@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $CargoToml = Get-Content (Join-Path $RepoRoot "Cargo.toml") -Raw
-$Version = if ($CargoToml -match 'version\s*=\s*"([^"]+)"') { $Matches[1] } else { "0.6.0" }
+$Version = if ($CargoToml -match 'version\s*=\s*"([^"]+)"') { $Matches[1] } else { "0.6.1" }
 
 if (-not $SkipBuild) {
     Write-Host "Membangun NOX v$Version (release)..." -ForegroundColor Cyan
@@ -46,12 +46,22 @@ if (Test-Path (Join-Path $ReleaseBin "nox-guard.exe")) {
     Copy-Item (Join-Path $ReleaseBin "nox-guard.exe") (Join-Path $StageDir "nox-guard.exe") -Force
 }
 
+# Copy bundled fonts (e.g. Inter) alongside nox.exe so text::load_bundled_fonts() finds them
+$SrcFonts = Join-Path $RepoRoot "assets\fonts"
+if (Test-Path $SrcFonts) {
+    $StageFonts = Join-Path $StageDir "fonts"
+    New-Item -ItemType Directory -Path $StageFonts -Force | Out-Null
+    Copy-Item (Join-Path $SrcFonts "*") $StageFonts -Force
+}
+
 # Copy 1-click launchers to root of release folder
 Copy-Item (Join-Path $PSScriptRoot "Install-NOX.cmd") (Join-Path $StageDir "Install-NOX.cmd") -Force
 Copy-Item (Join-Path $PSScriptRoot "Uninstall-NOX.cmd") (Join-Path $StageDir "Uninstall-NOX.cmd") -Force
 
-# Copy packaging assets
-Copy-Item (Join-Path $PSScriptRoot "AppxManifest.xml") (Join-Path $StagePkg "AppxManifest.xml") -Force
+# Copy packaging assets and sync AppxManifest.xml Identity Version with Cargo.toml
+$ManifestRaw = Get-Content (Join-Path $PSScriptRoot "AppxManifest.xml") -Raw
+$ManifestSynced = $ManifestRaw -replace 'Version="[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"', "Version=`"$Version.0`""
+Set-Content -Path (Join-Path $StagePkg "AppxManifest.xml") -Value $ManifestSynced -Encoding UTF8
 Copy-Item (Join-Path $PSScriptRoot "register-sparse.ps1") (Join-Path $StagePkg "register-sparse.ps1") -Force
 if (Test-Path (Join-Path $PSScriptRoot "nox.png")) {
     Copy-Item (Join-Path $PSScriptRoot "nox.png") (Join-Path $StagePkg "nox.png") -Force
@@ -72,7 +82,7 @@ if (Test-Path $kits) {
 
 if ($makeAppx -and $signTool) {
     Write-Host "Windows SDK terdeteksi — membuat paket self-signed NOX.msix..." -ForegroundColor Cyan
-    $msixBuildDir = Join-Path $env:TEMP "nox-msix-stage"
+    $msixBuildDir = Join-Path $env:TEMP "nox-msix-stage-$PID"
     if (Test-Path $msixBuildDir) { Remove-Item $msixBuildDir -Recurse -Force }
     New-Item -ItemType Directory -Path $msixBuildDir -Force | Out-Null
     Copy-Item (Join-Path $StagePkg "AppxManifest.xml") $msixBuildDir -Force
@@ -80,6 +90,9 @@ if ($makeAppx -and $signTool) {
 
     $msixOut = Join-Path $StagePkg "NOX.msix"
     & $makeAppx pack /d $msixBuildDir /p $msixOut /nv /o | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "makeappx gagal dengan exit code $LASTEXITCODE"
+    }
 
     $cert = Get-ChildItem Cert:\CurrentUser\My |
         Where-Object { $_.Subject -eq "CN=Opankcs" -and $_.HasPrivateKey } | Select-Object -First 1
@@ -92,6 +105,9 @@ if ($makeAppx -and $signTool) {
     $cerOut = Join-Path $StagePkg "NOX.cer"
     Export-Certificate -Cert $cert -FilePath $cerOut -Force | Out-Null
     & $signTool sign /fd SHA256 /sha1 $cert.Thumbprint $msixOut | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "signtool gagal dengan exit code $LASTEXITCODE"
+    }
     Remove-Item $msixBuildDir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "NOX.msix + NOX.cer berhasil dibuat (tanpa perlu Developer Mode!)." -ForegroundColor Green
 } else {

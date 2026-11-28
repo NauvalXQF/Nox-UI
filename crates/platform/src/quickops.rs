@@ -114,10 +114,25 @@ pub fn zip(paths: &[String], dst: &Path) -> Result<(), String> {
     let tar = tar_exe().ok_or("tar.exe tidak ditemukan")?;
     let mut cmd = std::process::Command::new(tar);
     cmd.arg("-a").arg("-c").arg("-f").arg(dst);
+    let mut added = 0usize;
     for p in paths {
         let path = Path::new(p);
-        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { continue };
-        cmd.arg("-C").arg(dir).arg(name);
+        let Some(name) = path.file_name() else { continue };
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        // Prefix leading '-' with '.\' so bsdtar never interprets a filename as a CLI flag.
+        let safe_name = if name.to_string_lossy().starts_with('-') {
+            std::ffi::OsString::from(format!(".\\{}", name.to_string_lossy()))
+        } else {
+            name.to_os_string()
+        };
+        cmd.arg("-C").arg(dir).arg(safe_name);
+        added += 1;
+    }
+    if added == 0 {
+        return Err("tidak ada berkas".into());
     }
     let out = cmd.creation_flags(0x0800_0000).output().map_err(|e| e.to_string())?;
     if out.status.success() && dst.exists() {

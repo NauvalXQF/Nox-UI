@@ -53,6 +53,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
         }
+        WM_KILLFOCUS | WM_CANCELMODE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_ACTIVATE if (wp.0 & 0xFFFF) == 0 => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
         WM_TIMER if wp.0 == T_TIMEOUT => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -77,7 +85,10 @@ pub fn pick(done: impl FnOnce(Option<[u8; 3]>) + Send + 'static) -> bool {
             RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hi, lpszClassName: class, ..Default::default() });
             let (x, y, cw, ch) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
             let hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, class, w!("nox-colorpick"), WS_POPUP, x, y, cw, ch, None, None, Some(hi), None)?;
-            SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA)?;
+            if let Err(e) = SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA) {
+                let _ = DestroyWindow(hwnd);
+                return Err(e);
+            }
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             let _ = SetFocus(Some(hwnd));
