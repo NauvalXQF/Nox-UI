@@ -16,6 +16,16 @@ pub struct Popup {
     pub rect: (i32, i32, i32, i32),
 }
 
+impl Drop for Popup {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hwnd.is_invalid() && IsWindow(Some(self.hwnd)).as_bool() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+}
+
 impl Popup {
     pub fn new(
         comp: &Compositor,
@@ -109,6 +119,38 @@ impl Popup {
             root.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from("Offset"), &off)
         };
         let _ = go();
+    }
+
+    /// Exact mirror of `slide_down`: glides the popup smoothly upward while fading out,
+    /// returning the animation duration in milliseconds (`0` when Reduce Motion is active).
+    pub fn slide_up(&self, comp: &Compositor) -> u32 {
+        use windows::Foundation::TimeSpan;
+        use windows::UI::Composition::{CompositionEasingFunction, CompositionObject};
+        use windows_core::{Interface, HSTRING};
+        if crate::prefs::get().reduce_motion {
+            let _ = self.surface.root.SetOpacity(0.0);
+            return 0;
+        }
+        let ms: u32 = 150;
+        let go = || -> Result<()> {
+            let root = &self.surface.root;
+            root.SetScale(windows_numerics::Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+            let h = self.rect.3 as f32;
+            let ease: CompositionEasingFunction =
+                comp.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?.cast()?;
+            let dur = TimeSpan { Duration: ms as i64 * 10_000 };
+            let o = comp.CreateScalarKeyFrameAnimation()?;
+            o.InsertKeyFrame(0.0, 1.0)?;
+            o.InsertKeyFrameWithEasingFunction(1.0, 0.0, &ease)?;
+            o.SetDuration(dur)?;
+            root.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from("Opacity"), &o)?;
+            let off = comp.CreateVector3KeyFrameAnimation()?;
+            off.InsertKeyFrame(0.0, windows_numerics::Vector3 { X: 0.0, Y: 0.0, Z: 0.0 })?;
+            off.InsertKeyFrameWithEasingFunction(1.0, windows_numerics::Vector3 { X: 0.0, Y: -(h * 0.28).min(18.0), Z: 0.0 }, &ease)?;
+            off.SetDuration(dur)?;
+            root.cast::<CompositionObject>()?.StartAnimation(&HSTRING::from("Offset"), &off)
+        };
+        if go().is_ok() { ms } else { 0 }
     }
 
     pub fn fade_in(&self, comp: &Compositor, from_top: bool) {

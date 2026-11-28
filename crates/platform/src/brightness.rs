@@ -185,8 +185,10 @@ mod displays {
     }
 }
 
+static GAMMA_DIRTY: AtomicBool = AtomicBool::new(false);
+
 pub fn restore() {
-    if SOFT.load(Ordering::Relaxed) {
+    if SOFT.load(Ordering::Relaxed) || GAMMA_DIRTY.swap(false, Ordering::Relaxed) {
         apply_gamma(100);
     }
 }
@@ -326,6 +328,9 @@ pub fn spawn(notify: impl Fn() + Send + Sync + 'static) -> Brightness {
                             let mut ok = false;
                             if outs.is_empty() || SOFT.load(Ordering::Relaxed) {
                                 ok = apply_gamma(p);
+                                if ok && p < 100 {
+                                    GAMMA_DIRTY.store(true, Ordering::Relaxed);
+                                }
                             } else {
                                 let mut soft: Vec<Vec<u16>> = Vec::new();
                                 for o in &outs {
@@ -337,7 +342,11 @@ pub fn spawn(notify: impl Fn() + Send + Sync + 'static) -> Brightness {
                                     }
                                 }
                                 if !soft.is_empty() {
-                                    ok |= apply_gamma_to(&soft, p);
+                                    let sg = apply_gamma_to(&soft, p);
+                                    if sg && p < 100 {
+                                        GAMMA_DIRTY.store(true, Ordering::Relaxed);
+                                    }
+                                    ok |= sg;
                                 }
                             }
                             if ok {
@@ -388,7 +397,12 @@ fn start_wmi(notify: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<Sender<Cm
                 return;
             }
         }
-        while let Ok(cmd) = wrx.recv() {
+        while let Ok(mut cmd) = wrx.recv() {
+            while let Ok(next) = wrx.try_recv() {
+                if matches!(next, Cmd::Set(_)) || matches!(cmd, Cmd::Refresh) {
+                    cmd = next;
+                }
+            }
             match cmd {
                 Cmd::Set(p) => {
                     let p = p.min(100);

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{GlobalFree, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
     RemoveClipboardFormatListener, SetClipboardData,
@@ -183,18 +183,40 @@ pub fn copy_image(id: u64) -> bool {
     let Some(bytes) = dib_bytes(id) else { return false };
     unsafe {
         let hwnd = HWND(HWND_LISTENER.load(Ordering::Relaxed) as *mut _);
+        let owner = (!hwnd.0.is_null()).then_some(hwnd);
         for _ in 0..6 {
-            if OpenClipboard(Some(hwnd)).is_ok() {
+            if OpenClipboard(owner).is_ok() {
                 let ok = (|| {
                     let _ = EmptyClipboard();
                     let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).ok()?;
                     let p = GlobalLock(h) as *mut u8;
                     if p.is_null() {
+                        let _ = GlobalFree(Some(h));
                         return None;
                     }
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
                     let _ = GlobalUnlock(h);
-                    SetClipboardData(CF_DIB, Some(windows::Win32::Foundation::HANDLE(h.0))).ok()?;
+                    if SetClipboardData(CF_DIB, Some(windows::Win32::Foundation::HANDLE(h.0))).is_err() {
+                        let _ = GlobalFree(Some(h));
+                        return None;
+                    }
+                    // Mark excluded from monitor processing so re-copying a pinned image does not
+                    // re-ingest itself into HISTORY and evict another unpinned screenshot.
+                    let excl_fmt = RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"));
+                    if excl_fmt != 0 {
+                        if let Ok(he) = GlobalAlloc(GMEM_MOVEABLE, 4) {
+                            let pe = GlobalLock(he) as *mut u32;
+                            if !pe.is_null() {
+                                *pe = 0;
+                                let _ = GlobalUnlock(he);
+                                if SetClipboardData(excl_fmt, Some(windows::Win32::Foundation::HANDLE(he.0))).is_err() {
+                                    let _ = GlobalFree(Some(he));
+                                }
+                            } else {
+                                let _ = GlobalFree(Some(he));
+                            }
+                        }
+                    }
                     Some(())
                 })()
                 .is_some();
@@ -289,16 +311,21 @@ unsafe fn read_clip(hwnd: HWND) -> Option<Clip> {
                     return read_dib().map(Clip::Dib);
                 }
                 let h = GetClipboardData(CF_UNICODETEXT).ok()?;
-                let p = GlobalLock(windows::Win32::Foundation::HGLOBAL(h.0)) as *const u16;
+                let g = windows::Win32::Foundation::HGLOBAL(h.0);
+                let max_u16 = (GlobalSize(g) / 2).min(200_000);
+                if max_u16 == 0 {
+                    return None;
+                }
+                let p = GlobalLock(g) as *const u16;
                 if p.is_null() {
                     return None;
                 }
                 let mut n = 0usize;
-                while *p.add(n) != 0 && n < 200_000 {
+                while n < max_u16 && *p.add(n) != 0 {
                     n += 1;
                 }
                 let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
-                let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(h.0));
+                let _ = GlobalUnlock(g);
                 Some(Clip::Text(s))
             })();
             let _ = CloseClipboard();
@@ -356,12 +383,16 @@ pub fn paste_text() -> Option<String> {
                     }
                     let h = GetClipboardData(CF_UNICODETEXT).ok()?;
                     let g = windows::Win32::Foundation::HGLOBAL(h.0);
+                    let max_u16 = (GlobalSize(g) / 2).min(200_000);
+                    if max_u16 == 0 {
+                        return None;
+                    }
                     let p = GlobalLock(g) as *const u16;
                     if p.is_null() {
                         return None;
                     }
                     let mut n = 0usize;
-                    while *p.add(n) != 0 && n < 200_000 {
+                    while n < max_u16 && *p.add(n) != 0 {
                         n += 1;
                     }
                     let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
@@ -380,19 +411,24 @@ pub fn paste_text() -> Option<String> {
 pub fn copy_text(text: &str) -> bool {
     unsafe {
         let hwnd = HWND(HWND_LISTENER.load(Ordering::Relaxed) as *mut _);
+        let owner = (!hwnd.0.is_null()).then_some(hwnd);
         for _ in 0..6 {
-            if OpenClipboard(Some(hwnd)).is_ok() {
+            if OpenClipboard(owner).is_ok() {
                 let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
                 let ok = (|| {
                     let _ = EmptyClipboard();
                     let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).ok()?;
                     let p = GlobalLock(h) as *mut u16;
                     if p.is_null() {
+                        let _ = GlobalFree(Some(h));
                         return None;
                     }
                     std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
                     let _ = GlobalUnlock(h);
-                    SetClipboardData(CF_UNICODETEXT, Some(windows::Win32::Foundation::HANDLE(h.0))).ok()?;
+                    if SetClipboardData(CF_UNICODETEXT, Some(windows::Win32::Foundation::HANDLE(h.0))).is_err() {
+                        let _ = GlobalFree(Some(h));
+                        return None;
+                    }
                     Some(())
                 })()
                 .is_some();

@@ -8,7 +8,7 @@
   <Identity
     Name="Opankcs.NoxShell"
     Publisher="CN=Opankcs"
-    Version="0.6.0.0"
+    Version="0.6.1.0"
     ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>NOX</DisplayName>

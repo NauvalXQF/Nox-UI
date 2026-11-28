@@ -926,11 +926,21 @@ impl Win {
                 }
                 RowDef::Pick(label, value, act) => {
                     self.text(c, label, lx, y + (rh - 17.0 * d) / 2.0, 13.5, 400, look.fg, 0.95, 0);
-                    let vw = (measure(value, &Style { px: (12.5 * d).round() as i32, weight: 500 }).0 as f32 + 44.0 * d).max(96.0 * d);
+                    let max_vw = (cw * 0.56).max(120.0 * d);
+                    let st = Style { px: (12.5 * d).round() as i32, weight: 500 };
+                    let mut shown = value.to_string();
+                    let max_txt = (max_vw - 44.0 * d).max(40.0 * d);
+                    if measure(&shown, &st).0 as f32 > max_txt {
+                        while !shown.is_empty() && measure(&format!("{shown}…"), &st).0 as f32 > max_txt {
+                            shown.pop();
+                        }
+                        shown.push('…');
+                    }
+                    let vw = (measure(&shown, &st).0 as f32 + 44.0 * d).clamp(96.0 * d, max_vw);
                     let (bx, bh) = (rx - vw, 26.0 * d);
                     let by = y + (rh - bh) / 2.0;
                     self.rect(c, bx, by, vw, bh, bh / 2.0, col(look.fg, 30));
-                    self.text(c, value, bx + 14.0 * d, by + (bh - 16.0 * d) / 2.0 - 1.0, 12.5, 500, look.fg, 1.0, 0);
+                    self.text(c, &shown, bx + 14.0 * d, by + (bh - 16.0 * d) / 2.0 - 1.0, 12.5, 500, look.fg, 1.0, 0);
                     self.text(c, "\u{2303}", bx + vw - 14.0 * d, by + (bh - 16.0 * d) / 2.0, 10.0, 600, look.fg, 0.6, 1);
                     self.region(x0, y, cw, rh, *act);
                 }
@@ -2185,10 +2195,33 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             });
             LRESULT(0)
         }
+        WM_CAPTURECHANGED => {
+            with_win(|w| {
+                let mut dirty = false;
+                if w.content_drag.take().is_some() {
+                    w.content_sb_hover = false;
+                    w.sp_sb_hover.target = 0.0;
+                    w.wake_sb();
+                }
+                if w.side_drag.take().is_some() {
+                    dirty = true;
+                }
+                if w.press.take().is_some() {
+                    dirty = true;
+                }
+                if w.dragging.take().is_some() {
+                    prefs::flush_pending();
+                    dirty = true;
+                }
+                if dirty {
+                    w.render();
+                }
+            });
+            LRESULT(0)
+        }
         WM_LBUTTONUP => {
             let (x, y) = xy(lp);
-            let _ = ReleaseCapture();
-            if with_win(|w| {
+            let handled_content = with_win(|w| {
                 if w.content_drag.take().is_some() {
                     let still_over = w.content_sb.as_ref().is_some_and(|sb| {
                         let r = sb.track;
@@ -2202,11 +2235,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     false
                 }
             })
-            .unwrap_or(false)
-            {
+            .unwrap_or(false);
+            if handled_content {
+                let _ = ReleaseCapture();
                 return LRESULT(0);
             }
             if with_win(|w| w.side_drag.take().is_some()).unwrap_or(false) {
+                let _ = ReleaseCapture();
                 with_win(|w| w.render());
                 return LRESULT(0);
             }
@@ -2223,6 +2258,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 w.hit(x, y)
             })
             .flatten();
+            let _ = ReleaseCapture();
             if !matches!(act, Some(Action::Search)) {
                 with_win(|w| {
                     if w.search_focus {

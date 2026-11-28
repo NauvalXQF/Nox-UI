@@ -254,14 +254,18 @@ pub fn tune(l: &mut Look, p: Preset) {
             l.saturation = l.saturation.max(1.5);
         }
         Preset::Stealth => {
-            l.tint = [l.tint[0].max(245), 0, 0, 0];
-            l.solid = [255, 0, 0, 0];
+            if l.dark {
+                l.tint = [l.tint[0].max(245), 0, 0, 0];
+                l.solid = [255, 0, 0, 0];
+                l.fg = [196, 196, 200];
+            } else {
+                l.tint = [l.tint[0].max(245), 245, 245, 247];
+                l.solid = [255, 245, 245, 247];
+                l.fg = [28, 28, 32];
+            }
             l.rim = [0, 255, 255, 255];
             l.highlight = 0.0;
             l.liquify = false;
-            if l.dark {
-                l.fg = [196, 196, 200];
-            }
         }
         Preset::Pixel => {
             if l.dark {
@@ -353,6 +357,13 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn stealth_light_stays_readable() {
+        let s = Settings { preset: Preset::Stealth, theme: Theme::Light, ..Settings::default() };
+        let l = look(&s, false, Material::Glass);
+        assert!(l.solid[1] > 200 && l.fg[0] < 60, "Stealth + Light must preserve readable contrast");
     }
 
     #[test]

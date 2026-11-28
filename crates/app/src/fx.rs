@@ -845,8 +845,7 @@ impl Fx {
                 this.shadow_key = key;
             }
             unsafe {
-                let below = GetWindow(HWND(h as *mut _), GW_HWNDNEXT).unwrap_or(HWND_BOTTOM);
-                let _ = SetWindowPos(sh.hwnd, Some(below), x - m, y - m, fw, fh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                let _ = SetWindowPos(sh.hwnd, Some(HWND(h as *mut _)), x - m, y - m, fw, fh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
             Ok(())
         };

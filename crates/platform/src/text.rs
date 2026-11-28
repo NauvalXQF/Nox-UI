@@ -254,7 +254,10 @@ fn render_raw(text: &str, style: &Style, face: &str, w: i32, h: i32) -> Option<B
             ..Default::default()
         };
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        let Ok(dib) = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(dc);
+            return None;
+        };
         if bits.is_null() {
             let _ = DeleteDC(dc);
             return None;

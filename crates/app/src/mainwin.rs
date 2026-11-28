@@ -86,11 +86,15 @@ pub fn request_quit() {
 
 pub fn relaunch() {
     let Ok(exe) = std::env::current_exe() else { return };
-    let exe_str = exe.to_string_lossy().to_string();
+    let pid = std::process::id();
     let _ = std::thread::Builder::new().name("nox-relaunch".into()).spawn(move || {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("cmd.exe")
-            .args(["/C", "timeout /t 1 /nobreak >nul && start \"\" /b", &exe_str])
+        let script = format!(
+            "Wait-Process -Id {pid} -Timeout 8 -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 250; Start-Process -FilePath $env:NOX_RELAUNCH_EXE"
+        );
+        let _ = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+            .env("NOX_RELAUNCH_EXE", &exe)
             .creation_flags(0x0800_0000)
             .spawn();
     });
@@ -178,18 +182,25 @@ fn remove_tray(hwnd: HWND) {
 }
 
 pub static TAKEOVER_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_AUTOSTART: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
 
 pub fn apply_autostart() {
-    use nacre_platform::startup;
     let want = crate::prefs::get().autostart;
+    let code = if want { 1i8 } else { 0i8 };
+    if LAST_AUTOSTART.swap(code, Ordering::Relaxed) == code {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else { return };
-    let cur = startup::current();
-    let ok = match (want, &cur) {
-        (true, Some(c)) if *c == startup::command_for(&exe) && startup::run_value_absent() => return,
-        (false, None) => return,
-        _ => startup::set(want, &exe),
-    };
-    nacre_platform::log::line("startup", &format!("autostart={want} hasil={ok:?}"));
+    let _ = std::thread::Builder::new().name("nox-autostart".into()).spawn(move || {
+        use nacre_platform::startup;
+        let cur = startup::current();
+        let ok = match (want, &cur) {
+            (true, Some(c)) if *c == startup::command_for(&exe) && startup::run_value_absent() => return,
+            (false, None) => return,
+            _ => startup::set(want, &exe),
+        };
+        nacre_platform::log::line("startup", &format!("autostart={want} hasil={ok:?}"));
+    });
 }
 
 pub fn apply_desktop_icons() {
@@ -350,6 +361,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_ENDSESSION => {
             if wp.0 != 0 {
                 nacre_platform::desktopicons::set_visible(true);
+                nacre_platform::brightness::restore();
+                crate::fx::restore_all();
+                nacre_platform::shell::appbar::release();
                 taskbar::restore();
             }
             LRESULT(0)

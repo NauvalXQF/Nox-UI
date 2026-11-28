@@ -252,7 +252,14 @@ fn act(manager: &GlobalSystemMediaTransportControlsSessionManager, cmd: Command)
             let _ = s.TrySkipPreviousAsync();
         }
         Command::SeekMs(ms) => {
-            let _ = s.TryChangePlaybackPositionAsync(ms * 10_000);
+            let start_ms = s
+                .GetTimelineProperties()
+                .ok()
+                .and_then(|t| t.StartTime().ok())
+                .map(|v| v.Duration / 10_000)
+                .unwrap_or(0)
+                .max(0);
+            let _ = s.TryChangePlaybackPositionAsync(start_ms.saturating_add(ms.max(0)).saturating_mul(10_000));
         }
         Command::Refresh => {}
     }
@@ -327,8 +334,9 @@ fn build(session: Option<&GlobalSystemMediaTransportControlsSession>, art_state:
     let (position_ms, duration_ms) = match s.GetTimelineProperties() {
         Ok(t) => {
             let ms = |r: windows::core::Result<windows::Foundation::TimeSpan>| r.map(|v| v.Duration / 10_000).unwrap_or(0);
-            let (start, end, mut pos) = (ms(t.StartTime()), ms(t.EndTime()), ms(t.Position()));
+            let (start, end, raw_pos) = (ms(t.StartTime()), ms(t.EndTime()), ms(t.Position()));
             let dur = (end - start).max(0);
+            let mut pos = (raw_pos - start).max(0);
             // SMTC `Position()` is a checkpoint recorded at `LastUpdatedTime()`; while playing,
             // add the elapsed time since that checkpoint so refreshes never snap the timeline backward.
             if playing {

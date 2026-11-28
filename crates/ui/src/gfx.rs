@@ -142,7 +142,13 @@ impl Gfx {
     }
 
     pub fn surface_from_bgra(&self, w: u32, h: u32, bgra: &[u8]) -> Result<CompositionDrawingSurface> {
-        debug_assert_eq!(bgra.len(), (w * h * 4) as usize);
+        let expected = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4));
+        if w == 0 || h == 0 || expected != Some(bgra.len()) {
+            return Err(windows_core::Error::empty());
+        }
+        if REPLACED.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = self.recover();
+        }
         match self.upload(w, h, bgra) {
             Ok(s) => Ok(s),
             Err(e) => {

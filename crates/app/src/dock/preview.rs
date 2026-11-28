@@ -152,6 +152,7 @@ impl Preview {
     }
 
     fn clear(&mut self) {
+        INSIDE.store(false, Ordering::Relaxed);
         for c in self.cells.drain(..) {
             if let Some(t) = c.thumb {
                 thumbnail::unregister(t);
@@ -163,9 +164,16 @@ impl Preview {
     }
 
     pub fn hide(&mut self) {
+        INSIDE.store(false, Ordering::Relaxed);
         if self.popup.is_visible() || !self.cells.is_empty() {
             self.clear();
             self.popup.hide();
         }
+    }
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
